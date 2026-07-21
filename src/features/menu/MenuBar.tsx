@@ -1,14 +1,20 @@
 import {
   CircleHelp,
+  Clipboard,
+  Copy,
   Download,
   FileJson,
   FolderOpen,
   FlaskConical,
   Grid2X2,
   Info,
+  Pause,
+  Play,
   Redo2,
+  RotateCcw,
   Save,
   Settings2,
+  Trash2,
   Undo2,
 } from 'lucide-react'
 import type { MouseEvent, ReactNode } from 'react'
@@ -22,10 +28,29 @@ interface MenuBarProps {
   onNew: () => void
   onOpen: () => void
   onSave: () => void
+  onSaveAs: () => void
+  onExportCsv: () => void
   onUndo: () => void
   onRedo: () => void
+  onCopy: () => void
+  onPaste: () => void
+  onDelete: () => void
+  onSelectAll: () => void
+  onToggleGrid: () => void
+  onToggleSnap: () => void
+  onPlayPause: () => void
+  onStepSimulation: () => void
+  onResetSimulation: () => void
+  onClearRecords: () => void
+  onShowShortcuts: () => void
+  onShowPhysics: () => void
   canUndo: boolean
   canRedo: boolean
+  canPaste: boolean
+  hasSelection: boolean
+  hasChartData: boolean
+  gridVisible: boolean
+  snapEnabled: boolean
 }
 
 interface MenuActionProps {
@@ -79,10 +104,29 @@ export function MenuBar({
   onNew,
   onOpen,
   onSave,
+  onSaveAs,
+  onExportCsv,
   onUndo,
   onRedo,
+  onCopy,
+  onPaste,
+  onDelete,
+  onSelectAll,
+  onToggleGrid,
+  onToggleSnap,
+  onPlayPause,
+  onStepSimulation,
+  onResetSimulation,
+  onClearRecords,
+  onShowShortcuts,
+  onShowPhysics,
   canUndo,
   canRedo,
+  canPaste,
+  hasSelection,
+  hasChartData,
+  gridVisible,
+  snapEnabled,
 }: MenuBarProps) {
   return (
     <header className={styles.header} role="banner">
@@ -103,7 +147,13 @@ export function MenuBar({
           </MenuAction>
           <MenuDivider />
           <MenuAction icon={<Save size={15} />} shortcut="Ctrl+S" onClick={onSave}>
-            保存到文件
+            保存
+          </MenuAction>
+          <MenuAction icon={<Save size={15} />} shortcut="Ctrl+Shift+S" onClick={onSaveAs}>
+            另存为…
+          </MenuAction>
+          <MenuAction icon={<Download size={15} />} disabled={!hasChartData} onClick={onExportCsv}>
+            导出记录 CSV
           </MenuAction>
           <MenuAction icon={<Download size={15} />} disabled>
             导出画布 PNG
@@ -127,17 +177,60 @@ export function MenuBar({
           >
             重做
           </MenuAction>
+          <MenuDivider />
+          <MenuAction
+            icon={<Copy size={15} />}
+            shortcut="Ctrl+C"
+            disabled={!hasSelection}
+            onClick={onCopy}
+          >
+            复制
+          </MenuAction>
+          <MenuAction
+            icon={<Clipboard size={15} />}
+            shortcut="Ctrl+V"
+            disabled={!canPaste}
+            onClick={onPaste}
+          >
+            粘贴
+          </MenuAction>
+          <MenuAction
+            icon={<Trash2 size={15} />}
+            shortcut="Delete"
+            disabled={!hasSelection}
+            onClick={onDelete}
+          >
+            删除
+          </MenuAction>
+          <MenuAction shortcut="Ctrl+A" onClick={onSelectAll}>
+            全选
+          </MenuAction>
         </Menu>
 
         <Menu label="视图">
-          <MenuAction icon={<Grid2X2 size={15} />} disabled>
-            网格与参考线
+          <MenuAction icon={<Grid2X2 size={15} />} onClick={onToggleGrid}>
+            {gridVisible ? '隐藏网格' : '显示网格'}
+          </MenuAction>
+          <MenuAction onClick={onToggleSnap}>
+            {snapEnabled ? '关闭网格吸附' : '开启网格吸附'}
           </MenuAction>
         </Menu>
 
         <Menu label="模拟">
+          <MenuAction icon={<Play size={15} />} shortcut="P" onClick={onPlayPause}>
+            播放 / 暂停
+          </MenuAction>
+          <MenuAction icon={<Pause size={15} />} shortcut="." onClick={onStepSimulation}>
+            单步
+          </MenuAction>
+          <MenuAction icon={<RotateCcw size={15} />} shortcut="Shift+R" onClick={onResetSimulation}>
+            重置模拟
+          </MenuAction>
+          <MenuAction icon={<Trash2 size={15} />} onClick={onClearRecords}>
+            清空记录
+          </MenuAction>
           <MenuAction icon={<FlaskConical size={15} />} disabled>
-            模拟精度
+            模拟精度（场景属性）
           </MenuAction>
         </Menu>
 
@@ -148,10 +241,10 @@ export function MenuBar({
         </Menu>
 
         <Menu label="帮助">
-          <MenuAction icon={<CircleHelp size={15} />} disabled>
+          <MenuAction icon={<CircleHelp size={15} />} onClick={onShowShortcuts}>
             快捷键与教程
           </MenuAction>
-          <MenuAction icon={<Info size={15} />} disabled>
+          <MenuAction icon={<Info size={15} />} onClick={onShowPhysics}>
             物理模型说明
           </MenuAction>
         </Menu>
@@ -160,7 +253,8 @@ export function MenuBar({
       <div className={styles.sceneStatus} title={fileName ?? '尚未保存到文件'}>
         <span className={styles.statusDot} data-dirty={isDirty} />
         <span className={styles.sceneName}>{sceneName}</span>
-        <span className={styles.stageBadge}>阶段 2</span>
+        <span className={styles.saveState}>{isDirty ? '有未保存更改' : '已保存'}</span>
+        <span className={styles.stageBadge}>阶段 4</span>
       </div>
     </header>
   )

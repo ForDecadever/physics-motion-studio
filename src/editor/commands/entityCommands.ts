@@ -1,4 +1,10 @@
-import type { EntityId, SceneDocument, SceneEntity } from '../../scene/model/types'
+import type {
+  EntityId,
+  Layer,
+  SceneDocument,
+  SceneEntity,
+  SceneSettings,
+} from '../../scene/model/types'
 import type { DocumentCommand } from './types'
 
 export class EntityListCommand implements DocumentCommand {
@@ -15,6 +21,54 @@ export class EntityListCommand implements DocumentCommand {
   undo(document: SceneDocument): SceneDocument {
     return { ...document, entities: this.before }
   }
+}
+
+export class SceneSettingsCommand implements DocumentCommand {
+  constructor(
+    readonly label: string,
+    private readonly before: SceneSettings,
+    private readonly after: SceneSettings,
+  ) {}
+
+  execute(document: SceneDocument): SceneDocument {
+    return { ...document, settings: this.after }
+  }
+
+  undo(document: SceneDocument): SceneDocument {
+    return { ...document, settings: this.before }
+  }
+}
+
+export class SceneLayersCommand implements DocumentCommand {
+  constructor(
+    readonly label: string,
+    private readonly before: Layer[],
+    private readonly after: Layer[],
+  ) {}
+
+  execute(document: SceneDocument): SceneDocument {
+    return { ...document, layers: this.after }
+  }
+
+  undo(document: SceneDocument): SceneDocument {
+    return { ...document, layers: this.before }
+  }
+}
+
+export function createReplaceSceneSettingsCommand(
+  document: SceneDocument,
+  settings: SceneSettings,
+  label: string,
+): SceneSettingsCommand {
+  return new SceneSettingsCommand(label, document.settings, settings)
+}
+
+export function createReplaceLayersCommand(
+  document: SceneDocument,
+  layers: Layer[],
+  label: string,
+): SceneLayersCommand {
+  return new SceneLayersCommand(label, document.layers, layers)
 }
 
 export function createAddEntityCommand(

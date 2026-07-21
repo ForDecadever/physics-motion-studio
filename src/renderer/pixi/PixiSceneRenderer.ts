@@ -22,6 +22,7 @@ export interface PixiRenderState {
   marquee: { start: Vec2; end: Vec2 } | null
   connectorStartBodyId: EntityId | null
   runtimeBodies: Record<EntityId, RuntimeBodyState>
+  runtimeTrajectories: Record<EntityId, Vec2[]>
 }
 
 const colors = {
@@ -37,6 +38,11 @@ const colors = {
   fieldElectric: 0xe2bd59,
   fieldMagnetic: 0x59c6bd,
   connector: 0xf2b55b,
+  trajectory: 0x78d6c6,
+  velocity: 0x73c7ff,
+  force: 0xffb45e,
+  positiveCharge: 0xf06b78,
+  negativeCharge: 0x6ea8ff,
 }
 
 function transformedEntities(state: PixiRenderState): SceneEntity[] {
@@ -72,6 +78,7 @@ export class PixiSceneRenderer {
   private readonly fields = new Graphics()
   private readonly grounds = new Graphics()
   private readonly connectors = new Graphics()
+  private readonly motionGuides = new Graphics()
   private readonly bodies = new Graphics()
   private readonly overlays = new Graphics()
 
@@ -93,6 +100,7 @@ export class PixiSceneRenderer {
       this.fields,
       this.grounds,
       this.connectors,
+      this.motionGuides,
       this.bodies,
       this.overlays,
     )
@@ -121,9 +129,10 @@ export class PixiSceneRenderer {
 
     this.drawGrid(state)
     const entities = transformedEntities(state)
-    this.drawFields(entities, camera.pixelsPerMeter)
+    this.drawFields(state, entities)
     this.drawGrounds(entities, camera.pixelsPerMeter)
     this.drawConnectors(entities, camera.pixelsPerMeter)
+    this.drawMotionGuides(state)
     this.drawBodies(entities, camera.pixelsPerMeter)
     this.drawOverlays(state, entities)
     this.app.render()
@@ -195,12 +204,14 @@ export class PixiSceneRenderer {
       })
   }
 
-  private drawFields(entities: SceneEntity[], pixelsPerMeter: number): void {
+  private drawFields(state: PixiRenderState, entities: SceneEntity[]): void {
     this.fields.clear()
+    const { camera, size } = state
+    const pixelsPerMeter = camera.pixelsPerMeter
     const lineWidth = 1.25 / pixelsPerMeter
 
     for (const entity of entities) {
-      if (entity.kind !== 'field' || entity.region.type === 'infinite') continue
+      if (entity.kind !== 'field') continue
       const color =
         entity.field.type === 'uniformGravity'
           ? colors.fieldGravity
@@ -208,7 +219,11 @@ export class PixiSceneRenderer {
             ? colors.fieldElectric
             : colors.fieldMagnetic
 
-      if (entity.region.type === 'rectangle') {
+      if (entity.region.type === 'infinite') {
+        const width = size.width / pixelsPerMeter
+        const height = size.height / pixelsPerMeter
+        this.fields.rect(camera.center.x - width / 2, camera.center.y - height / 2, width, height)
+      } else if (entity.region.type === 'rectangle') {
         this.fields.poly(
           flattenPoints(
             rotatedRectangle(
@@ -274,12 +289,112 @@ export class PixiSceneRenderer {
       const start = resolveConnectorEndpoint(entities, entity.a)
       const end = resolveConnectorEndpoint(entities, entity.b)
       if (!start || !end) continue
-      this.connectors.moveTo(start.x, start.y).lineTo(end.x, end.y).stroke({
-        color: colors.connector,
-        alpha: 0.9,
-        width: lineWidth,
-      })
+      if (entity.connector.type === 'spring') {
+        const dx = end.x - start.x
+        const dy = end.y - start.y
+        const length = Math.hypot(dx, dy)
+        if (length <= Number.EPSILON) continue
+        const normal = { x: -dy / length, y: dx / length }
+        const turns = 12
+        const amplitude = Math.min(0.12, length / 10)
+        this.connectors.moveTo(start.x, start.y)
+        for (let index = 1; index < turns; index += 1) {
+          const ratio = index / turns
+          const offset = (index % 2 === 0 ? -1 : 1) * amplitude
+          this.connectors.lineTo(
+            start.x + dx * ratio + normal.x * offset,
+            start.y + dy * ratio + normal.y * offset,
+          )
+        }
+        this.connectors.lineTo(end.x, end.y).stroke({
+          color: colors.connector,
+          alpha: 0.95,
+          width: lineWidth,
+        })
+      } else {
+        this.connectors
+          .moveTo(start.x, start.y)
+          .lineTo(end.x, end.y)
+          .stroke({
+            color: colors.connector,
+            alpha: entity.connector.type === 'rod' ? 1 : 0.85,
+            width: entity.connector.type === 'rod' ? lineWidth * 1.8 : lineWidth,
+          })
+      }
     }
+  }
+
+  private drawMotionGuides(state: PixiRenderState): void {
+    this.motionGuides.clear()
+    const selected = new Set(state.selectedIds)
+    const pixelsPerMeter = state.camera.pixelsPerMeter
+
+    for (const entityId of selected) {
+      const trajectory = state.runtimeTrajectories[entityId]
+      if (trajectory && trajectory.length > 1) {
+        const first = trajectory[0]
+        if (first) {
+          this.motionGuides.moveTo(first.x, first.y)
+          for (const point of trajectory.slice(1)) this.motionGuides.lineTo(point.x, point.y)
+          this.motionGuides.stroke({
+            color: colors.trajectory,
+            alpha: 0.68,
+            width: 1.6 / pixelsPerMeter,
+          })
+        }
+      }
+
+      const runtime = state.runtimeBodies[entityId]
+      if (!runtime) continue
+      this.drawVectorArrow(
+        runtime.position,
+        runtime.linearVelocity,
+        0.28,
+        3,
+        colors.velocity,
+        pixelsPerMeter,
+      )
+      this.drawVectorArrow(
+        runtime.position,
+        runtime.netForce,
+        0.18,
+        3,
+        colors.force,
+        pixelsPerMeter,
+      )
+    }
+  }
+
+  private drawVectorArrow(
+    start: Vec2,
+    vector: Vec2,
+    scale: number,
+    maximumLength: number,
+    color: number,
+    pixelsPerMeter: number,
+  ): void {
+    const magnitude = Math.hypot(vector.x, vector.y)
+    if (magnitude <= 1e-9) return
+    const length = Math.min(maximumLength, magnitude * scale)
+    const direction = { x: vector.x / magnitude, y: vector.y / magnitude }
+    const end = { x: start.x + direction.x * length, y: start.y + direction.y * length }
+    const headLength = Math.min(length * 0.35, 8 / pixelsPerMeter)
+    const headWidth = headLength * 0.55
+    const normal = { x: -direction.y, y: direction.x }
+    const stroke = { color, alpha: 0.95, width: 2 / pixelsPerMeter }
+    this.motionGuides.moveTo(start.x, start.y).lineTo(end.x, end.y).stroke(stroke)
+    this.motionGuides
+      .moveTo(end.x, end.y)
+      .lineTo(
+        end.x - direction.x * headLength + normal.x * headWidth,
+        end.y - direction.y * headLength + normal.y * headWidth,
+      )
+      .moveTo(end.x, end.y)
+      .lineTo(
+        end.x - direction.x * headLength - normal.x * headWidth,
+        end.y - direction.y * headLength - normal.y * headWidth,
+      )
+      .stroke(stroke)
   }
 
   private drawBodies(entities: SceneEntity[], pixelsPerMeter: number): void {
@@ -301,8 +416,14 @@ export class PixiSceneRenderer {
           entity.shape.type === 'circle' ? entity.shape.radius : entity.shape.collisionRadius
         this.bodies.circle(position.x, position.y, radius)
       }
+      const bodyColor =
+        entity.preset === 'pointCharge'
+          ? entity.chargeC >= 0
+            ? colors.positiveCharge
+            : colors.negativeCharge
+          : colors.bodyFill
       this.bodies
-        .fill({ color: colors.bodyFill, alpha: 0.9 })
+        .fill({ color: bodyColor, alpha: 0.9 })
         .stroke({ color: colors.bodyStroke, alpha: 0.95, width: lineWidth })
 
       const radius =

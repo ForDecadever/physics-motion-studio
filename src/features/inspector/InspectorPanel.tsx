@@ -1,7 +1,10 @@
 import { BoxSelect, Gauge, Grid2X2, Timer } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
 
-import { createReplaceEntitiesCommand } from '../../editor/commands/entityCommands'
+import {
+  createReplaceEntitiesCommand,
+  createReplaceSceneSettingsCommand,
+} from '../../editor/commands/entityCommands'
 import { getEntityTransform, withEntityTransform } from '../../editor/geometry/entityGeometry'
 import type { SceneEntity } from '../../scene/model/types'
 import { resolveRenderedEntity } from '../../renderer/pixi/renderEntityState'
@@ -116,6 +119,10 @@ const kindNames: Record<SceneEntity['kind'], string> = {
 }
 
 function formatNumber(value: number, digits = 2): string {
+  const absolute = Math.abs(value)
+  if (absolute > 0 && (absolute < 10 ** -digits || absolute >= 1e6)) {
+    return value.toExponential(Math.min(3, digits))
+  }
   return Number(value.toFixed(digits)).toString()
 }
 
@@ -179,11 +186,13 @@ function EntityProperties({ entity, disabled }: { entity: SceneEntity; disabled:
               icon={<Gauge size={14} />}
               label="形状"
               value={
-                entity.shape.type === 'circle'
-                  ? '圆形'
-                  : entity.shape.type === 'box'
-                    ? '矩形'
-                    : '质点'
+                entity.preset === 'pointCharge'
+                  ? '点电荷'
+                  : entity.shape.type === 'circle'
+                    ? '圆形'
+                    : entity.shape.type === 'box'
+                      ? '矩形'
+                      : '质点'
               }
             />
             <NumberProperty
@@ -193,6 +202,13 @@ function EntityProperties({ entity, disabled }: { entity: SceneEntity; disabled:
               min={0.000001}
               disabled={disabled}
               onCommit={(massKg) => replace({ ...entity, massKg }, '修改物体质量')}
+            />
+            <NumberProperty
+              label="电荷量"
+              value={entity.chargeC}
+              unit="C"
+              disabled={disabled}
+              onCommit={(chargeC) => replace({ ...entity, chargeC }, '修改物体电荷量')}
             />
             {entity.shape.type === 'circle' ? (
               <NumberProperty
@@ -234,18 +250,34 @@ function EntityProperties({ entity, disabled }: { entity: SceneEntity; disabled:
               </>
             ) : null}
             {entity.shape.type === 'particle' ? (
-              <ToggleProperty
-                label="质点碰撞"
-                checked={entity.shape.collisionEnabled}
-                disabled={disabled}
-                onChange={(collisionEnabled) => {
-                  if (entity.kind !== 'body' || entity.shape.type !== 'particle') return
-                  replace(
-                    { ...entity, shape: { ...entity.shape, collisionEnabled } },
-                    '修改质点碰撞',
-                  )
-                }}
-              />
+              <>
+                <NumberProperty
+                  label="显示/碰撞半径"
+                  value={entity.shape.collisionRadius}
+                  unit="m"
+                  min={0.001}
+                  disabled={disabled}
+                  onCommit={(collisionRadius) => {
+                    if (entity.kind !== 'body' || entity.shape.type !== 'particle') return
+                    replace(
+                      { ...entity, shape: { ...entity.shape, collisionRadius } },
+                      '修改质点半径',
+                    )
+                  }}
+                />
+                <ToggleProperty
+                  label="质点碰撞"
+                  checked={entity.shape.collisionEnabled}
+                  disabled={disabled}
+                  onChange={(collisionEnabled) => {
+                    if (entity.kind !== 'body' || entity.shape.type !== 'particle') return
+                    replace(
+                      { ...entity, shape: { ...entity.shape, collisionEnabled } },
+                      '修改质点碰撞',
+                    )
+                  }}
+                />
+              </>
             ) : null}
             <NumberProperty
               label="初速度 X"
@@ -374,6 +406,57 @@ function EntityProperties({ entity, disabled }: { entity: SceneEntity; disabled:
                 />
               </>
             ) : null}
+            {entity.geometry.type === 'cubicBezier'
+              ? (['p0', 'p1', 'p2', 'p3'] as const).flatMap((pointKey, pointIndex) => {
+                  const point =
+                    entity.geometry.type === 'cubicBezier' ? entity.geometry[pointKey] : null
+                  if (!point) return []
+                  return [
+                    <NumberProperty
+                      key={`${pointKey}-x`}
+                      label={`控制点 ${pointIndex} X`}
+                      value={point.x}
+                      unit="m"
+                      disabled={disabled}
+                      onCommit={(x) => {
+                        if (entity.kind !== 'ground' || entity.geometry.type !== 'cubicBezier')
+                          return
+                        replace(
+                          {
+                            ...entity,
+                            geometry: {
+                              ...entity.geometry,
+                              [pointKey]: { ...entity.geometry[pointKey], x },
+                            },
+                          },
+                          '修改贝塞尔控制点',
+                        )
+                      }}
+                    />,
+                    <NumberProperty
+                      key={`${pointKey}-y`}
+                      label={`控制点 ${pointIndex} Y`}
+                      value={point.y}
+                      unit="m"
+                      disabled={disabled}
+                      onCommit={(y) => {
+                        if (entity.kind !== 'ground' || entity.geometry.type !== 'cubicBezier')
+                          return
+                        replace(
+                          {
+                            ...entity,
+                            geometry: {
+                              ...entity.geometry,
+                              [pointKey]: { ...entity.geometry[pointKey], y },
+                            },
+                          },
+                          '修改贝塞尔控制点',
+                        )
+                      }}
+                    />,
+                  ]
+                })
+              : null}
             <NumberProperty
               label="摩擦系数"
               value={entity.material.friction}
@@ -411,6 +494,19 @@ function EntityProperties({ entity, disabled }: { entity: SceneEntity; disabled:
                   : entity.field.type === 'uniformElectric'
                     ? '匀强电场'
                     : '匀强磁场'
+              }
+            />
+            <PropertyRow
+              icon={<Gauge size={14} />}
+              label="作用范围"
+              value={
+                entity.region.type === 'rectangle'
+                  ? '矩形'
+                  : entity.region.type === 'circle'
+                    ? '圆形'
+                    : entity.region.type === 'polygon'
+                      ? '多边形'
+                      : '无限范围'
               }
             />
             {entity.field.type === 'uniformGravity' ? (
@@ -455,21 +551,208 @@ function EntityProperties({ entity, disabled }: { entity: SceneEntity; disabled:
                 />
               </>
             ) : null}
+            {entity.field.type === 'uniformElectric' ? (
+              <>
+                <NumberProperty
+                  label="电场强度 X"
+                  value={entity.field.strength.x}
+                  unit="N/C"
+                  disabled={disabled}
+                  onCommit={(x) => {
+                    if (entity.kind !== 'field' || entity.field.type !== 'uniformElectric') return
+                    replace(
+                      {
+                        ...entity,
+                        field: { ...entity.field, strength: { ...entity.field.strength, x } },
+                      },
+                      '修改电场',
+                    )
+                  }}
+                />
+                <NumberProperty
+                  label="电场强度 Y"
+                  value={entity.field.strength.y}
+                  unit="N/C"
+                  disabled={disabled}
+                  onCommit={(y) => {
+                    if (entity.kind !== 'field' || entity.field.type !== 'uniformElectric') return
+                    replace(
+                      {
+                        ...entity,
+                        field: { ...entity.field, strength: { ...entity.field.strength, y } },
+                      },
+                      '修改电场',
+                    )
+                  }}
+                />
+              </>
+            ) : null}
+            {entity.field.type === 'uniformMagnetic' ? (
+              <>
+                <PropertyRow
+                  icon={<Gauge size={14} />}
+                  label="磁场方向"
+                  value={entity.field.bzTesla >= 0 ? '⊙ 出屏' : '⊗ 入屏'}
+                />
+                <NumberProperty
+                  label="磁感应强度 Bz"
+                  value={entity.field.bzTesla}
+                  unit="T"
+                  disabled={disabled}
+                  onCommit={(bzTesla) => {
+                    if (entity.kind !== 'field' || entity.field.type !== 'uniformMagnetic') return
+                    replace({ ...entity, field: { ...entity.field, bzTesla } }, '修改磁场')
+                  }}
+                />
+              </>
+            ) : null}
           </>
         ) : null}
 
         {entity.kind === 'connector' ? (
-          <PropertyRow
-            icon={<Gauge size={14} />}
-            label="连接类型"
-            value={
-              entity.connector.type === 'rope'
-                ? `绳 · ${formatNumber(entity.connector.maxLength)} m`
-                : entity.connector.type === 'rod'
-                  ? '杆'
-                  : '弹簧'
-            }
-          />
+          <>
+            <PropertyRow
+              icon={<Gauge size={14} />}
+              label="连接类型"
+              value={
+                entity.connector.type === 'rope'
+                  ? '绳'
+                  : entity.connector.type === 'rod'
+                    ? '杆'
+                    : '弹簧'
+              }
+            />
+            {entity.connector.type === 'rope' ? (
+              <NumberProperty
+                label="最大长度"
+                value={entity.connector.maxLength}
+                unit="m"
+                min={0.001}
+                disabled={disabled}
+                onCommit={(maxLength) => {
+                  if (entity.kind !== 'connector' || entity.connector.type !== 'rope') return
+                  replace({ ...entity, connector: { ...entity.connector, maxLength } }, '修改绳长')
+                }}
+              />
+            ) : null}
+            {entity.connector.type === 'rod' ? (
+              <>
+                <NumberProperty
+                  label="杆长"
+                  value={entity.connector.length}
+                  unit="m"
+                  min={0.001}
+                  disabled={disabled}
+                  onCommit={(length) => {
+                    if (entity.kind !== 'connector' || entity.connector.type !== 'rod') return
+                    replace({ ...entity, connector: { ...entity.connector, length } }, '修改杆长')
+                  }}
+                />
+                <ToggleProperty
+                  label="端点自由转动"
+                  checked={entity.connector.freeRotation}
+                  disabled={disabled}
+                  onChange={(freeRotation) => {
+                    if (entity.kind !== 'connector' || entity.connector.type !== 'rod') return
+                    replace(
+                      { ...entity, connector: { ...entity.connector, freeRotation } },
+                      '修改杆端转动',
+                    )
+                  }}
+                />
+              </>
+            ) : null}
+            {entity.connector.type === 'spring' ? (
+              <>
+                <NumberProperty
+                  label="弹簧原长"
+                  value={entity.connector.restLength}
+                  unit="m"
+                  min={0.001}
+                  disabled={disabled}
+                  onCommit={(restLength) => {
+                    if (entity.kind !== 'connector' || entity.connector.type !== 'spring') return
+                    replace(
+                      { ...entity, connector: { ...entity.connector, restLength } },
+                      '修改弹簧原长',
+                    )
+                  }}
+                />
+                <NumberProperty
+                  label="劲度系数"
+                  value={entity.connector.stiffness}
+                  unit="N/m"
+                  min={0}
+                  disabled={disabled}
+                  onCommit={(stiffness) => {
+                    if (entity.kind !== 'connector' || entity.connector.type !== 'spring') return
+                    replace(
+                      { ...entity, connector: { ...entity.connector, stiffness } },
+                      '修改弹簧刚度',
+                    )
+                  }}
+                />
+                <NumberProperty
+                  label="阻尼系数"
+                  value={entity.connector.damping}
+                  unit="N·s/m"
+                  min={0}
+                  disabled={disabled}
+                  onCommit={(damping) => {
+                    if (entity.kind !== 'connector' || entity.connector.type !== 'spring') return
+                    replace(
+                      { ...entity, connector: { ...entity.connector, damping } },
+                      '修改弹簧阻尼',
+                    )
+                  }}
+                />
+              </>
+            ) : null}
+            {(['a', 'b'] as const).flatMap((endpointKey) => {
+              const endpoint = entity[endpointKey]
+              const label = endpointKey.toUpperCase()
+              return [
+                <NumberProperty
+                  key={`${endpointKey}-x`}
+                  label={`${label} 锚点 X`}
+                  value={endpoint.localAnchor.x}
+                  unit="m"
+                  disabled={disabled}
+                  onCommit={(x) =>
+                    replace(
+                      {
+                        ...entity,
+                        [endpointKey]: {
+                          ...endpoint,
+                          localAnchor: { ...endpoint.localAnchor, x },
+                        },
+                      },
+                      '修改连接锚点',
+                    )
+                  }
+                />,
+                <NumberProperty
+                  key={`${endpointKey}-y`}
+                  label={`${label} 锚点 Y`}
+                  value={endpoint.localAnchor.y}
+                  unit="m"
+                  disabled={disabled}
+                  onCommit={(y) =>
+                    replace(
+                      {
+                        ...entity,
+                        [endpointKey]: {
+                          ...endpoint,
+                          localAnchor: { ...endpoint.localAnchor, y },
+                        },
+                      },
+                      '修改连接锚点',
+                    )
+                  }
+                />,
+              ]
+            })}
+          </>
         ) : null}
       </section>
       {disabled ? (
@@ -531,11 +814,26 @@ export function InspectorPanel() {
                 label="主网格"
                 value={`${scene.settings.gridStep} m`}
               />
+              <ToggleProperty
+                label="点电荷间作用"
+                checked={scene.settings.pairwiseElectrostatics}
+                disabled={runtimeLocked}
+                onChange={(pairwiseElectrostatics) => {
+                  const document = useDocumentStore.getState()
+                  document.executeCommand(
+                    createReplaceSceneSettingsCommand(
+                      document.scene,
+                      { ...document.scene.settings, pairwiseElectrostatics },
+                      '修改点电荷间作用',
+                    ),
+                  )
+                }}
+              />
             </section>
             <section className={styles.propertyGroup}>
               <h3>物理世界</h3>
               <div className={styles.readonlyCallout}>
-                内部统一使用米、千克、秒和弧度。阶段 2 采用固定 1/120
+                内部统一使用米、千克、秒和弧度。阶段 3 采用固定 1/120
                 秒计算步长；播放倍速只改变每秒执行的步数，不会放大单步误差。
               </div>
             </section>

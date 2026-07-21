@@ -1,13 +1,11 @@
-import { CURRENT_SCHEMA_VERSION, type SceneDocument } from './types'
-
-const appVersion = '0.2.0'
+import { CURRENT_APP_VERSION, CURRENT_SCHEMA_VERSION, type SceneDocument } from './types'
 
 export function createEmptyScene(name = '未命名场景', now = new Date()): SceneDocument {
   const timestamp = now.toISOString()
 
   return {
     schemaVersion: CURRENT_SCHEMA_VERSION,
-    appVersion,
+    appVersion: CURRENT_APP_VERSION,
     metadata: {
       name,
       createdAt: timestamp,
@@ -18,6 +16,8 @@ export function createEmptyScene(name = '未命名场景', now = new Date()): Sc
       gridStep: 1,
       snapStep: 0.1,
       pairwiseElectrostatics: true,
+      recordingSampleRate: 60,
+      recordingDurationSeconds: 300,
     },
     layers: [
       {

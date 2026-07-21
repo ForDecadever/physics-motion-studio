@@ -1,0 +1,215 @@
+.chartPanel {
+  display: grid;
+  min-height: 0;
+  grid-template-rows: 35px minmax(0, 1fr);
+  overflow: hidden;
+  background: #171a1e;
+}
+
+.chartPanel[data-collapsed='true'] {
+  grid-template-rows: 35px;
+}
+
+.chartHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 9px 0 12px;
+  border-bottom: 1px solid var(--color-border);
+  background: #1d2025;
+}
+
+.chartTitle,
+.chartActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.chartTitle > svg {
+  color: var(--color-accent);
+}
+
+.chartTitle h2 {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.chartBadge {
+  min-width: 20px;
+  padding: 2px 6px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 999px;
+  color: var(--color-text-dim);
+  font-size: 9px;
+  text-align: center;
+}
+
+.chartActions button,
+.legend button,
+.addForm button {
+  display: inline-flex;
+  height: 27px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+}
+
+.chartActions button:not(:disabled):hover,
+.legend button:not(:disabled):hover,
+.addForm button:not(:disabled):hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text);
+}
+
+.collapseIcon {
+  transition: transform 120ms ease-out;
+}
+
+.chartPanel[data-collapsed='true'] .collapseIcon {
+  transform: rotate(180deg);
+}
+
+.chartBody {
+  display: grid;
+  min-height: 0;
+  grid-template-columns: 220px minmax(0, 1fr);
+}
+
+.legend {
+  min-height: 0;
+  padding: 7px;
+  overflow: auto;
+  border-right: 1px solid var(--color-border);
+  background: #191c20;
+}
+
+.legendItem {
+  display: grid;
+  min-height: 26px;
+  align-items: center;
+  border-radius: var(--radius-sm);
+  grid-template-columns: 9px minmax(0, 1fr) 25px 25px;
+}
+
+.legendItem:hover {
+  background: rgb(255 255 255 / 3%);
+}
+
+.legendItem[data-hidden='true'] {
+  opacity: 0.5;
+}
+
+.swatch {
+  width: 7px;
+  height: 7px;
+  border: 1px solid rgb(255 255 255 / 35%);
+  border-radius: 50%;
+}
+
+.legendName {
+  overflow: hidden;
+  color: var(--color-text-muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.legendName small {
+  margin-left: 5px;
+  color: var(--color-text-dim);
+  font-size: 9px;
+}
+
+.legendItem button {
+  width: 23px;
+  height: 23px;
+  padding: 0;
+}
+
+.addForm {
+  display: grid;
+  gap: 6px;
+  padding: 7px;
+  margin-bottom: 7px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: #22262c;
+}
+
+.addForm label {
+  display: grid;
+  gap: 3px;
+  grid-template-columns: 44px minmax(0, 1fr);
+  align-items: center;
+  color: var(--color-text-dim);
+  font-size: 9px;
+}
+
+.addForm select {
+  width: 100%;
+  height: 24px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: #15171b;
+  color: var(--color-text);
+  font-size: 10px;
+}
+
+.addForm button {
+  border-color: rgb(88 166 255 / 35%);
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
+}
+
+.plotArea {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+}
+
+.chartCanvas {
+  width: 100%;
+  height: 100%;
+}
+
+.chartEmpty {
+  position: absolute;
+  inset: 10px 14px 18px 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border-left: 1px solid #4b535f;
+  border-bottom: 1px solid #4b535f;
+  background-image:
+    linear-gradient(rgb(255 255 255 / 4%) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(255 255 255 / 4%) 1px, transparent 1px);
+  background-size: 56px 28px;
+  color: var(--color-text-dim);
+  font-size: 10px;
+}
+
+.message,
+.limitMessage {
+  margin: 6px 4px 0;
+  color: var(--color-text-muted);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.limitMessage {
+  color: var(--color-warning);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .collapseIcon {
+    transition: none;
+  }
+}

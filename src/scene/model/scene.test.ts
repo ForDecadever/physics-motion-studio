@@ -21,6 +21,27 @@ describe('场景文档', () => {
     expect(() => parseSceneText(JSON.stringify(futureScene))).toThrow('该场景来自更新版本')
   })
 
+  it('把格式 1 逐级迁移到格式 2，并保留未知字段', () => {
+    const scene = createEmptyScene()
+    const oldSettings: Record<string, unknown> = { ...scene.settings }
+    delete oldSettings.recordingSampleRate
+    delete oldSettings.recordingDurationSeconds
+    const oldScene = {
+      ...scene,
+      schemaVersion: 1,
+      settings: { ...oldSettings, futurePreference: 'preserve-me' },
+      futureTopLevel: { enabled: true },
+    }
+
+    const migrated = parseSceneText(JSON.stringify(oldScene))
+
+    expect(migrated.schemaVersion).toBe(2)
+    expect(migrated.settings.recordingSampleRate).toBe(60)
+    expect(migrated.settings.recordingDurationSeconds).toBe(300)
+    expect(migrated).toMatchObject({ futureTopLevel: { enabled: true } })
+    expect(migrated.settings).toMatchObject({ futurePreference: 'preserve-me' })
+  })
+
   it('拒绝非法物理参数', () => {
     const scene = createEmptyScene()
     const invalidScene = {

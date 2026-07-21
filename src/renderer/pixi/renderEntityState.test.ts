@@ -13,6 +13,11 @@ describe('resolveRenderedEntity', () => {
       angleRad: 0.25,
       linearVelocity: { x: 0, y: 0 },
       angularVelocityRad: 0,
+      netForce: { x: 0, y: 0 },
+      acceleration: { x: 0, y: 0 },
+      translationalKineticEnergyJ: 0,
+      rotationalKineticEnergyJ: 0,
+      kineticEnergyJ: 0,
     }
     const preview = {
       ...body,
@@ -34,6 +39,11 @@ describe('resolveRenderedEntity', () => {
       angleRad: 1.25,
       linearVelocity: { x: 0, y: 0 },
       angularVelocityRad: 0,
+      netForce: { x: 0, y: 0 },
+      acceleration: { x: 0, y: 0 },
+      translationalKineticEnergyJ: 0,
+      rotationalKineticEnergyJ: 0,
+      kineticEnergyJ: 0,
     }
 
     const rendered = resolveRenderedEntity(body, { [body.id]: runtime }, {})

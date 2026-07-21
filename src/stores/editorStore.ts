@@ -1,32 +1,44 @@
 import { create } from 'zustand'
 
 import { defaultCamera, type Camera2D } from '../editor/camera/viewport'
-import type { EntityId, SceneEntity, Vec2 } from '../scene/model/types'
+import type { EntityId, LayerId, SceneEntity, Vec2 } from '../scene/model/types'
 
 export type EditorTool =
   'select' | 'rotate' | 'hand' | 'zoom' | 'ground' | 'body' | 'field' | 'connector'
+export type BodyToolPreset = 'particle' | 'ball' | 'block' | 'pointCharge'
+export type FieldToolPreset = 'uniformGravity' | 'uniformElectric' | 'uniformMagnetic'
+export type FieldRegionToolShape = 'rectangle' | 'circle' | 'polygon' | 'infinite'
+export type ConnectorToolPreset = 'rope' | 'rod' | 'spring'
 
 interface EditorState {
   activeTool: EditorTool
   groundToolShape: 'line' | 'arc' | 'cubicBezier'
-  bodyToolPreset: 'particle' | 'ball' | 'block'
+  bodyToolPreset: BodyToolPreset
+  fieldToolPreset: FieldToolPreset
+  fieldRegionToolShape: FieldRegionToolShape
+  connectorToolPreset: ConnectorToolPreset
   gridVisible: boolean
   snapEnabled: boolean
   camera: Camera2D
   cursorWorld: Vec2
   selectedIds: EntityId[]
+  activeLayerId: LayerId | null
   previewEntities: Record<EntityId, SceneEntity>
   draftEntity: SceneEntity | null
   marquee: { start: Vec2; end: Vec2 } | null
   connectorStartBodyId: EntityId | null
   setActiveTool: (tool: EditorTool) => void
   setGroundToolShape: (shape: 'line' | 'arc' | 'cubicBezier') => void
-  setBodyToolPreset: (preset: 'particle' | 'ball' | 'block') => void
+  setBodyToolPreset: (preset: BodyToolPreset) => void
+  setFieldToolPreset: (preset: FieldToolPreset) => void
+  setFieldRegionToolShape: (shape: FieldRegionToolShape) => void
+  setConnectorToolPreset: (preset: ConnectorToolPreset) => void
   toggleGrid: () => void
   toggleSnap: () => void
   setCamera: (camera: Camera2D) => void
   setCursorWorld: (cursorWorld: Vec2) => void
   setSelectedIds: (selectedIds: EntityId[]) => void
+  setActiveLayerId: (layerId: LayerId | null) => void
   toggleSelectedId: (entityId: EntityId) => void
   clearSelection: () => void
   setPreviewEntities: (entities: SceneEntity[]) => void
@@ -41,11 +53,15 @@ export const useEditorStore = create<EditorState>((set) => ({
   activeTool: 'select',
   groundToolShape: 'line',
   bodyToolPreset: 'ball',
+  fieldToolPreset: 'uniformGravity',
+  fieldRegionToolShape: 'rectangle',
+  connectorToolPreset: 'rope',
   gridVisible: true,
   snapEnabled: true,
   camera: defaultCamera,
   cursorWorld: { x: 0, y: 0 },
   selectedIds: [],
+  activeLayerId: null,
   previewEntities: {},
   draftEntity: null,
   marquee: null,
@@ -60,11 +76,15 @@ export const useEditorStore = create<EditorState>((set) => ({
     })),
   setGroundToolShape: (groundToolShape) => set({ groundToolShape }),
   setBodyToolPreset: (bodyToolPreset) => set({ bodyToolPreset }),
+  setFieldToolPreset: (fieldToolPreset) => set({ fieldToolPreset }),
+  setFieldRegionToolShape: (fieldRegionToolShape) => set({ fieldRegionToolShape }),
+  setConnectorToolPreset: (connectorToolPreset) => set({ connectorToolPreset }),
   toggleGrid: () => set((state) => ({ gridVisible: !state.gridVisible })),
   toggleSnap: () => set((state) => ({ snapEnabled: !state.snapEnabled })),
   setCamera: (camera) => set({ camera }),
   setCursorWorld: (cursorWorld) => set({ cursorWorld }),
   setSelectedIds: (selectedIds) => set({ selectedIds }),
+  setActiveLayerId: (activeLayerId) => set({ activeLayerId }),
   toggleSelectedId: (entityId) =>
     set((state) => ({
       selectedIds: state.selectedIds.includes(entityId)
@@ -83,6 +103,7 @@ export const useEditorStore = create<EditorState>((set) => ({
       camera: defaultCamera,
       cursorWorld: { x: 0, y: 0 },
       selectedIds: [],
+      activeLayerId: null,
       previewEntities: {},
       draftEntity: null,
       marquee: null,

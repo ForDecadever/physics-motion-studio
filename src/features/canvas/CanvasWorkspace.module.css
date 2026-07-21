@@ -120,3 +120,37 @@
 .cursorReadout {
   right: 10px;
 }
+
+.vectorLegend {
+  position: absolute;
+  z-index: 5;
+  top: 10px;
+  right: 10px;
+  display: flex;
+  gap: 9px;
+  padding: 5px 8px;
+  border: 1px solid rgb(255 255 255 / 8%);
+  border-radius: 4px;
+  background: rgb(25 28 32 / 82%);
+  color: var(--color-text-dim);
+  font-size: 10px;
+  pointer-events: none;
+}
+
+.vectorLegend span::before {
+  display: inline-block;
+  width: 12px;
+  height: 2px;
+  margin-right: 4px;
+  background: #78d6c6;
+  content: '';
+  vertical-align: middle;
+}
+
+.vectorLegend span[data-tone='velocity']::before {
+  background: #73c7ff;
+}
+
+.vectorLegend span[data-tone='force']::before {
+  background: #ffb45e;
+}

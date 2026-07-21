@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import { getAdaptiveGridStep } from '../../editor/camera/viewport'
 import { useDocumentStore } from '../../stores/documentStore'
 import { useEditorStore } from '../../stores/editorStore'
+import { useSimulationStore } from '../../stores/simulationStore'
 import { PixiCanvas } from './PixiCanvas'
 import styles from './CanvasWorkspace.module.css'
 
@@ -15,6 +16,7 @@ export function CanvasWorkspace() {
   const camera = useEditorStore((state) => state.camera)
   const cursorWorld = useEditorStore((state) => state.cursorWorld)
   const selectedCount = useEditorStore((state) => state.selectedIds.length)
+  const simulationTime = useSimulationStore((state) => state.simulationTime)
   const gridStep = useDocumentStore((state) => state.scene.settings.gridStep)
   const visualGridStep = getAdaptiveGridStep(gridStep / 10, camera.pixelsPerMeter, 14) * 5
 
@@ -57,6 +59,14 @@ export function CanvasWorkspace() {
           </span>
           <span>{snapEnabled ? '吸附已开启' : '自由定位'}</span>
         </div>
+
+        {selectedCount > 0 && simulationTime > 0 ? (
+          <div className={styles.vectorLegend} role="region" aria-label="运动矢量图例">
+            <span data-tone="trajectory">轨迹</span>
+            <span data-tone="velocity">速度</span>
+            <span data-tone="force">合外力</span>
+          </div>
+        ) : null}
 
         <div className={styles.cursorReadout}>
           <MousePointer2 size={12} />

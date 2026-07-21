@@ -1,4 +1,5 @@
 import type { SceneDocument } from '../../scene/model/types'
+import { useChartStore } from '../../stores/chartStore'
 import { useSimulationStore } from '../../stores/simulationStore'
 import type { MainToPhysicsMessage, PhysicsToMainMessage } from '../worker/messages'
 
@@ -20,6 +21,7 @@ class PhysicsClient {
         store.setRuntimeState(message.status, message.simulationTime, message.playbackRate)
       } else if (message.type === 'frame') {
         store.setFrame(message.simulationTime, message.bodies)
+        useChartStore.getState().appendSamples(message.samples)
       } else if (message.type === 'warning') {
         store.addWarning(message.message)
       } else {
@@ -38,6 +40,12 @@ class PhysicsClient {
 
   initialize(scene: SceneDocument): void {
     useSimulationStore.getState().beginInitialization()
+    const chartStore = useChartStore.getState()
+    chartStore.configureLimit(
+      scene.settings.recordingSampleRate,
+      scene.settings.recordingDurationSeconds,
+    )
+    chartStore.clearHistory()
     this.send({ type: 'initialize', scene })
   }
 
@@ -54,11 +62,16 @@ class PhysicsClient {
   }
 
   reset(): void {
+    useChartStore.getState().clearHistory()
     this.send({ type: 'reset' })
   }
 
   setPlaybackRate(rate: number): void {
     this.send({ type: 'setPlaybackRate', rate })
+  }
+
+  setRecordedBodyIds(entityIds: string[]): void {
+    this.send({ type: 'setRecordedBodyIds', entityIds })
   }
 
   private send(message: MainToPhysicsMessage): void {

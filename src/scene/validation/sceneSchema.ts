@@ -198,6 +198,8 @@ export const sceneDocumentSchema = z
         gridStep: positiveNumber,
         snapStep: positiveNumber,
         pairwiseElectrostatics: z.boolean(),
+        recordingSampleRate: finiteNumber.int().min(1).max(120),
+        recordingDurationSeconds: finiteNumber.int().min(1).max(3600),
       })
       .passthrough(),
     layers: z

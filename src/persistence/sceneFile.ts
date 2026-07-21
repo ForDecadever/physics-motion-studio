@@ -1,4 +1,8 @@
-import type { SceneDocument } from '../scene/model/types'
+import {
+  CURRENT_APP_VERSION,
+  CURRENT_SCHEMA_VERSION,
+  type SceneDocument,
+} from '../scene/model/types'
 import { migrateScene, SceneVersionError } from '../scene/migrations/migrateScene'
 import { validateSceneDocument } from '../scene/validation/sceneSchema'
 
@@ -34,7 +38,11 @@ export function parseSceneText(text: string): SceneDocument {
 }
 
 export function serializeScene(scene: SceneDocument): string {
-  const validated = validateSceneDocument(scene)
+  const validated = validateSceneDocument({
+    ...scene,
+    schemaVersion: CURRENT_SCHEMA_VERSION,
+    appVersion: CURRENT_APP_VERSION,
+  })
   return `${JSON.stringify(validated, null, 2)}\n`
 }
 

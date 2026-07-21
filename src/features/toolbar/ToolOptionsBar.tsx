@@ -1,7 +1,14 @@
 import { Check, Focus, Grid2X2, Magnet, MousePointer2 } from 'lucide-react'
 
 import { defaultCamera } from '../../editor/camera/viewport'
-import { useEditorStore, type EditorTool } from '../../stores/editorStore'
+import {
+  useEditorStore,
+  type BodyToolPreset,
+  type ConnectorToolPreset,
+  type EditorTool,
+  type FieldToolPreset,
+  type FieldRegionToolShape,
+} from '../../stores/editorStore'
 import styles from './Toolbar.module.css'
 
 const toolNames: Record<EditorTool, string> = {
@@ -25,8 +32,14 @@ export function ToolOptionsBar() {
   const setCamera = useEditorStore((state) => state.setCamera)
   const groundToolShape = useEditorStore((state) => state.groundToolShape)
   const bodyToolPreset = useEditorStore((state) => state.bodyToolPreset)
+  const fieldToolPreset = useEditorStore((state) => state.fieldToolPreset)
+  const fieldRegionToolShape = useEditorStore((state) => state.fieldRegionToolShape)
+  const connectorToolPreset = useEditorStore((state) => state.connectorToolPreset)
   const setGroundToolShape = useEditorStore((state) => state.setGroundToolShape)
   const setBodyToolPreset = useEditorStore((state) => state.setBodyToolPreset)
+  const setFieldToolPreset = useEditorStore((state) => state.setFieldToolPreset)
+  const setFieldRegionToolShape = useEditorStore((state) => state.setFieldRegionToolShape)
+  const setConnectorToolPreset = useEditorStore((state) => state.setConnectorToolPreset)
 
   const toolDetail: Record<EditorTool, string> = {
     select: '拖动移动 · Shift 多选',
@@ -35,8 +48,13 @@ export function ToolOptionsBar() {
     zoom: '点击放大 · Alt 点击缩小',
     ground: '拖动生成地面曲线',
     body: '拖动设置物体尺寸',
-    field: '矩形重力场',
-    connector: connectorStartBodyId ? '请选择第二个物体' : '绳：依次选择两个物体',
+    field:
+      fieldRegionToolShape === 'infinite'
+        ? '点击创建覆盖整个空间的场'
+        : fieldRegionToolShape === 'polygon'
+          ? '拖动创建六边形作用范围'
+          : `拖动绘制${fieldRegionToolShape === 'circle' ? '圆形' : '矩形'}作用范围`,
+    connector: connectorStartBodyId ? '请选择第二个物体' : '依次选择两个物体',
   }
 
   return (
@@ -67,13 +85,55 @@ export function ToolOptionsBar() {
           <span>物体</span>
           <select
             value={bodyToolPreset}
-            onChange={(event) =>
-              setBodyToolPreset(event.target.value as 'particle' | 'ball' | 'block')
-            }
+            onChange={(event) => setBodyToolPreset(event.target.value as BodyToolPreset)}
           >
             <option value="particle">质点</option>
             <option value="ball">小球</option>
             <option value="block">物块</option>
+            <option value="pointCharge">点电荷</option>
+          </select>
+        </label>
+      ) : null}
+      {activeTool === 'field' ? (
+        <>
+          <label className={styles.toolSelect}>
+            <span>场类型</span>
+            <select
+              value={fieldToolPreset}
+              onChange={(event) => setFieldToolPreset(event.target.value as FieldToolPreset)}
+            >
+              <option value="uniformGravity">匀强重力场</option>
+              <option value="uniformElectric">匀强电场</option>
+              <option value="uniformMagnetic">匀强磁场</option>
+            </select>
+          </label>
+          <label className={styles.toolSelect}>
+            <span>范围</span>
+            <select
+              aria-label="场范围形状"
+              value={fieldRegionToolShape}
+              onChange={(event) =>
+                setFieldRegionToolShape(event.target.value as FieldRegionToolShape)
+              }
+            >
+              <option value="rectangle">矩形</option>
+              <option value="circle">圆形</option>
+              <option value="polygon">多边形</option>
+              <option value="infinite">无限范围</option>
+            </select>
+          </label>
+        </>
+      ) : null}
+      {activeTool === 'connector' ? (
+        <label className={styles.toolSelect}>
+          <span>连接</span>
+          <select
+            value={connectorToolPreset}
+            onChange={(event) => setConnectorToolPreset(event.target.value as ConnectorToolPreset)}
+          >
+            <option value="rope">绳</option>
+            <option value="rod">杆</option>
+            <option value="spring">弹簧</option>
           </select>
         </label>
       ) : null}

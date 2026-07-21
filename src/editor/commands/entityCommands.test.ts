@@ -2,7 +2,11 @@ import { describe, expect, it } from 'vitest'
 
 import { createBall, createRope } from '../../scene/model/entityFactories'
 import { createEmptyScene } from '../../scene/model/createEmptyScene'
-import { createAddEntityCommand, createDeleteEntitiesCommand } from './entityCommands'
+import {
+  createAddEntityCommand,
+  createDeleteEntitiesCommand,
+  createReplaceSceneSettingsCommand,
+} from './entityCommands'
 
 describe('实体命令', () => {
   it('创建命令可以执行和撤销', () => {
@@ -31,5 +35,18 @@ describe('实体命令', () => {
     expect(command).not.toBeNull()
     expect(command?.execute(populated).entities).toEqual([second])
     expect(command?.undo(populated).entities).toEqual([first, second, rope])
+  })
+
+  it('场景级点电荷开关可以撤销', () => {
+    const scene = createEmptyScene()
+    const command = createReplaceSceneSettingsCommand(
+      scene,
+      { ...scene.settings, pairwiseElectrostatics: false },
+      '关闭点电荷间作用',
+    )
+
+    const after = command.execute(scene)
+    expect(after.settings.pairwiseElectrostatics).toBe(false)
+    expect(command.undo(after).settings.pairwiseElectrostatics).toBe(true)
   })
 })

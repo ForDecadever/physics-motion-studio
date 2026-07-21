@@ -12,6 +12,7 @@ interface DocumentState {
   redoStack: DocumentCommand[]
   createNewScene: () => void
   replaceScene: (scene: SceneDocument, fileName: string | null) => void
+  restoreDraft: (scene: SceneDocument, fileName: string | null) => void
   markSaved: (fileName: string) => void
   executeCommand: (command: DocumentCommand) => void
   undo: () => void
@@ -41,6 +42,8 @@ export const useDocumentStore = create<DocumentState>((set) => ({
     }),
   replaceScene: (scene, fileName) =>
     set({ scene, fileName, isDirty: false, undoStack: [], redoStack: [] }),
+  restoreDraft: (scene, fileName) =>
+    set({ scene, fileName, isDirty: true, undoStack: [], redoStack: [] }),
   markSaved: (fileName) => set({ fileName, isDirty: false }),
   executeCommand: (command) =>
     set((state) => ({

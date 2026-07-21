@@ -105,6 +105,27 @@ export function createParticle(
   }
 }
 
+export function createPointCharge(
+  layerId: LayerId,
+  position: Vec2,
+  collisionRadius: number,
+  index: number,
+): BodyEntity {
+  return {
+    ...baseEntity(layerId, `点电荷 ${index}`),
+    kind: 'body',
+    preset: 'pointCharge',
+    shape: { type: 'particle', collisionRadius, collisionEnabled: false },
+    transform: { position, angleRad: 0 },
+    massKg: 1,
+    chargeC: 1e-6,
+    material: { friction: 0, restitution: 0 },
+    initialVelocity: { x: 0, y: 0 },
+    initialAngularVelocityRad: 0,
+    continuousCollisionDetection: false,
+  }
+}
+
 export function createBlock(
   layerId: LayerId,
   position: Vec2,
@@ -142,6 +163,36 @@ export function createGravityField(
   }
 }
 
+export function createElectricField(
+  layerId: LayerId,
+  center: Vec2,
+  width: number,
+  height: number,
+  index: number,
+): FieldEntity {
+  return {
+    ...baseEntity(layerId, `电场 ${index}`),
+    kind: 'field',
+    region: { type: 'rectangle', center, width, height, angleRad: 0 },
+    field: { type: 'uniformElectric', strength: { x: 1e6, y: 0 } },
+  }
+}
+
+export function createMagneticField(
+  layerId: LayerId,
+  center: Vec2,
+  width: number,
+  height: number,
+  index: number,
+): FieldEntity {
+  return {
+    ...baseEntity(layerId, `磁场 ${index}`),
+    kind: 'field',
+    region: { type: 'rectangle', center, width, height, angleRad: 0 },
+    field: { type: 'uniformMagnetic', bzTesla: 1 },
+  }
+}
+
 export function createRope(
   layerId: LayerId,
   firstBodyId: string,
@@ -155,5 +206,37 @@ export function createRope(
     a: { bodyId: firstBodyId, localAnchor: { x: 0, y: 0 } },
     b: { bodyId: secondBodyId, localAnchor: { x: 0, y: 0 } },
     connector: { type: 'rope', maxLength: length },
+  }
+}
+
+export function createRod(
+  layerId: LayerId,
+  firstBodyId: string,
+  secondBodyId: string,
+  length: number,
+  index: number,
+): ConnectorEntity {
+  return {
+    ...baseEntity(layerId, `杆 ${index}`),
+    kind: 'connector',
+    a: { bodyId: firstBodyId, localAnchor: { x: 0, y: 0 } },
+    b: { bodyId: secondBodyId, localAnchor: { x: 0, y: 0 } },
+    connector: { type: 'rod', length, freeRotation: true },
+  }
+}
+
+export function createSpring(
+  layerId: LayerId,
+  firstBodyId: string,
+  secondBodyId: string,
+  restLength: number,
+  index: number,
+): ConnectorEntity {
+  return {
+    ...baseEntity(layerId, `弹簧 ${index}`),
+    kind: 'connector',
+    a: { bodyId: firstBodyId, localAnchor: { x: 0, y: 0 } },
+    b: { bodyId: secondBodyId, localAnchor: { x: 0, y: 0 } },
+    connector: { type: 'spring', restLength, stiffness: 20, damping: 0.5 },
   }
 }

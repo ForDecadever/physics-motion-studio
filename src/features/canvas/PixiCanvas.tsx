@@ -28,14 +28,25 @@ import {
   createBall,
   createBezierGround,
   createBlock,
+  createElectricField,
   createGravityField,
   createLineGround,
+  createMagneticField,
   createParticle,
+  createPointCharge,
+  createRod,
   createRope,
+  createSpring,
 } from '../../scene/model/entityFactories'
 import type { EntityId, LayerId, SceneEntity, Vec2 } from '../../scene/model/types'
 import { useDocumentStore } from '../../stores/documentStore'
-import { useEditorStore, type EditorTool } from '../../stores/editorStore'
+import {
+  useEditorStore,
+  type BodyToolPreset,
+  type EditorTool,
+  type FieldToolPreset,
+  type FieldRegionToolShape,
+} from '../../stores/editorStore'
 import { isSimulationRuntimeLocked, useSimulationStore } from '../../stores/simulationStore'
 import styles from './CanvasWorkspace.module.css'
 
@@ -58,7 +69,9 @@ type Interaction =
       layerId: LayerId
       index: number
       groundShape: 'line' | 'arc' | 'cubicBezier'
-      bodyPreset: 'particle' | 'ball' | 'block'
+      bodyPreset: BodyToolPreset
+      fieldPreset: FieldToolPreset
+      fieldRegionShape: FieldRegionToolShape
     }
 
 function localPoint(event: PointerEvent | WheelEvent, canvas: HTMLCanvasElement): Vec2 {
@@ -75,6 +88,9 @@ function toolCursor(tool: EditorTool): string {
 
 function activeLayerId(): LayerId | null {
   const scene = useDocumentStore.getState().scene
+  const requestedId = useEditorStore.getState().activeLayerId
+  const requestedLayer = scene.layers.find((layer) => layer.id === requestedId)
+  if (requestedLayer?.visible && !requestedLayer.locked) return requestedLayer.id
   return (
     scene.layers.find((layer) => layer.visible && !layer.locked)?.id ?? scene.layers[0]?.id ?? null
   )
@@ -157,6 +173,9 @@ function getDraft(
         id: draftId,
       }
     }
+    if (interaction.bodyPreset === 'pointCharge') {
+      return { ...createPointCharge(layerId, start, 0.15, index), id: draftId }
+    }
     const radius =
       useDefaultSize && distance(start, end) < 0.05 ? 0.5 : Math.max(0.15, distance(start, end))
     return { ...createBall(layerId, start, radius, index), id: draftId }
@@ -170,7 +189,31 @@ function getDraft(
     x: (start.x + resolvedEnd.x) / 2,
     y: (start.y + resolvedEnd.y) / 2,
   }
-  return { ...createGravityField(layerId, center, width, height, index), id: draftId }
+  const field =
+    interaction.fieldPreset === 'uniformElectric'
+      ? createElectricField(layerId, center, width, height, index)
+      : interaction.fieldPreset === 'uniformMagnetic'
+        ? createMagneticField(layerId, center, width, height, index)
+        : createGravityField(layerId, center, width, height, index)
+  if (interaction.fieldRegionShape === 'infinite') {
+    return { ...field, id: draftId, region: { type: 'infinite' } }
+  }
+  if (interaction.fieldRegionShape === 'circle') {
+    const radius =
+      useDefaultSize && distance(start, end) < 0.05 ? 2 : Math.max(0.1, distance(start, end))
+    return { ...field, id: draftId, region: { type: 'circle', center: start, radius } }
+  }
+  if (interaction.fieldRegionShape === 'polygon') {
+    const radius =
+      useDefaultSize && distance(start, end) < 0.05 ? 2 : Math.max(0.1, distance(start, end))
+    const startAngle = Math.atan2(end.y - start.y, end.x - start.x)
+    const points = Array.from({ length: 6 }, (_, pointIndex) => {
+      const angle = startAngle + (pointIndex * Math.PI) / 3
+      return { x: start.x + radius * Math.cos(angle), y: start.y + radius * Math.sin(angle) }
+    })
+    return { ...field, id: draftId, region: { type: 'polygon', points } }
+  }
+  return { ...field, id: draftId }
 }
 
 function editableEntities(entities: SceneEntity[]): SceneEntity[] {
@@ -211,6 +254,7 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
   const marquee = useEditorStore((state) => state.marquee)
   const connectorStartBodyId = useEditorStore((state) => state.connectorStartBodyId)
   const runtimeBodies = useSimulationStore((state) => state.runtimeBodies)
+  const runtimeTrajectories = useSimulationStore((state) => state.runtimeTrajectories)
 
   useEffect(() => {
     sizeRef.current = size
@@ -262,6 +306,7 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
       marquee,
       connectorStartBodyId,
       runtimeBodies,
+      runtimeTrajectories,
     })
     if (canvasRef.current && interactionRef.current.type === 'idle' && !spacePressedRef.current) {
       canvasRef.current.style.cursor = toolCursor(activeTool)
@@ -276,6 +321,7 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
     previewEntities,
     ready,
     runtimeBodies,
+    runtimeTrajectories,
     scene,
     selectedIds,
     size,
@@ -328,6 +374,8 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
         index: nextEntityIndex(kind),
         groundShape: editor.groundToolShape,
         bodyPreset: editor.bodyToolPreset,
+        fieldPreset: editor.fieldToolPreset,
+        fieldRegionShape: editor.fieldRegionToolShape,
       }
       interactionRef.current = interaction
       useEditorStore.getState().setDraftEntity(getDraft(interaction, world))
@@ -385,17 +433,18 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
         const first = getEntityById(entities, editor.connectorStartBodyId)
         const layerId = activeLayerId()
         if (first?.kind === 'body' && layerId) {
-          const rope = createRope(
-            layerId,
-            first.id,
-            hit.id,
-            distance(first.transform.position, hit.transform.position),
-            nextEntityIndex('connector'),
-          )
+          const length = distance(first.transform.position, hit.transform.position)
+          const index = nextEntityIndex('connector')
+          const connector =
+            editor.connectorToolPreset === 'rod'
+              ? createRod(layerId, first.id, hit.id, length, index)
+              : editor.connectorToolPreset === 'spring'
+                ? createSpring(layerId, first.id, hit.id, length, index)
+                : createRope(layerId, first.id, hit.id, length, index)
           useDocumentStore
             .getState()
-            .executeCommand(createAddEntityCommand(useDocumentStore.getState().scene, rope))
-          editor.setSelectedIds([rope.id])
+            .executeCommand(createAddEntityCommand(useDocumentStore.getState().scene, connector))
+          editor.setSelectedIds([connector.id])
           editor.setConnectorStartBodyId(null)
         }
         return

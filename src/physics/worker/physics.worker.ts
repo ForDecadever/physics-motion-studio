@@ -1,5 +1,10 @@
 import { SimulationWorld } from '../core/SimulationWorld'
-import type { MainToPhysicsMessage, PhysicsToMainMessage, SimulationStatus } from './messages'
+import type {
+  MainToPhysicsMessage,
+  PhysicsToMainMessage,
+  RuntimeSample,
+  SimulationStatus,
+} from './messages'
 import type { SceneDocument } from '../../scene/model/types'
 
 const MAX_CATCH_UP_STEPS = 16
@@ -15,6 +20,10 @@ let accumulatorSeconds = 0
 let lastRealTimeMs = performance.now()
 let lastFrameTimeMs = 0
 let lastCatchUpWarningMs = -Infinity
+let nextRecordTime = 0
+let recordedBodyIds = new Set<string>()
+let pendingSamples: RuntimeSample[] = []
+let recordIntervalSeconds = 1 / 60
 
 function post(message: PhysicsToMainMessage): void {
   self.postMessage(message)
@@ -35,17 +44,33 @@ function postFrame(): void {
     type: 'frame',
     simulationTime: simulation.simulationTime,
     bodies: simulation.getBodyStates(),
+    samples: pendingSamples,
   })
+  pendingSamples = []
+}
+
+function recordCurrentState(force = false): void {
+  if (!simulation || recordedBodyIds.size === 0) return
+  if (!force && simulation.simulationTime + Number.EPSILON < nextRecordTime) return
+  const bodies = simulation.getBodyStates().filter((body) => recordedBodyIds.has(body.entityId))
+  if (bodies.length > 0) {
+    pendingSamples.push({ simulationTime: simulation.simulationTime, bodies })
+  }
+  nextRecordTime = simulation.simulationTime + recordIntervalSeconds
 }
 
 function buildSimulation(scene: SceneDocument): void {
   simulation?.dispose()
   simulation = new SimulationWorld(scene)
+  recordIntervalSeconds = 1 / scene.settings.recordingSampleRate
   accumulatorSeconds = 0
+  pendingSamples = []
+  nextRecordTime = 0
   status = 'ready'
   lastRealTimeMs = performance.now()
   post({ type: 'ready', fixedTimeStep: simulation.fixedTimeStep })
   for (const warning of simulation.warnings) post({ type: 'warning', ...warning })
+  recordCurrentState(true)
   postFrame()
   postState()
 }
@@ -70,6 +95,7 @@ function handleMessage(message: MainToPhysicsMessage): void {
   } else if (message.type === 'step') {
     if (status !== 'playing') {
       simulation.step()
+      recordCurrentState()
       status = 'paused'
       postFrame()
       postState()
@@ -79,6 +105,11 @@ function handleMessage(message: MainToPhysicsMessage): void {
   } else if (message.type === 'setPlaybackRate') {
     if (ALLOWED_RATES.has(message.rate)) playbackRate = message.rate
     postState()
+  } else if (message.type === 'setRecordedBodyIds') {
+    recordedBodyIds = new Set(message.entityIds)
+    pendingSamples = []
+    recordCurrentState(true)
+    postFrame()
   }
 }
 
@@ -90,6 +121,7 @@ function tick(nowMs: number): void {
 
     while (accumulatorSeconds >= simulation.fixedTimeStep && stepCount < MAX_CATCH_UP_STEPS) {
       simulation.step()
+      recordCurrentState()
       accumulatorSeconds -= simulation.fixedTimeStep
       stepCount += 1
     }

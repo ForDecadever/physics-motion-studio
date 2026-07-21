@@ -7,6 +7,7 @@ export type MainToPhysicsMessage =
   | { type: 'step' }
   | { type: 'reset' }
   | { type: 'setPlaybackRate'; rate: number }
+  | { type: 'setRecordedBodyIds'; entityIds: EntityId[] }
 
 export interface RuntimeBodyState {
   entityId: EntityId
@@ -14,6 +15,16 @@ export interface RuntimeBodyState {
   angleRad: number
   linearVelocity: Vec2
   angularVelocityRad: number
+  netForce: Vec2
+  acceleration: Vec2
+  translationalKineticEnergyJ: number
+  rotationalKineticEnergyJ: number
+  kineticEnergyJ: number
+}
+
+export interface RuntimeSample {
+  simulationTime: number
+  bodies: RuntimeBodyState[]
 }
 
 export type SimulationStatus = 'initializing' | 'ready' | 'playing' | 'paused' | 'error'
@@ -26,6 +37,11 @@ export type PhysicsToMainMessage =
       simulationTime: number
       playbackRate: number
     }
-  | { type: 'frame'; simulationTime: number; bodies: RuntimeBodyState[] }
+  | {
+      type: 'frame'
+      simulationTime: number
+      bodies: RuntimeBodyState[]
+      samples: RuntimeSample[]
+    }
   | { type: 'warning'; message: string; entityId?: EntityId }
   | { type: 'fatalError'; message: string }

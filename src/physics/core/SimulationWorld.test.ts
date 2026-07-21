@@ -3,6 +3,9 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { createEmptyScene } from '../../scene/model/createEmptyScene'
 import type {
   BodyEntity,
+  ConnectorEntity,
+  ConnectorDefinition,
+  FieldDefinition,
   FieldEntity,
   GroundEntity,
   SceneDocument,
@@ -51,18 +54,50 @@ function makeBody(
 }
 
 function makeGravity(scene: SceneDocument, acceleration: Vec2): FieldEntity {
+  return makeField(scene, 'gravity', { type: 'uniformGravity', acceleration })
+}
+
+function makeField(
+  scene: SceneDocument,
+  id: string,
+  field: FieldDefinition,
+  region: FieldEntity['region'] = { type: 'infinite' },
+): FieldEntity {
   const layerId = scene.layers[0]?.id
   if (!layerId) throw new Error('测试场景缺少图层')
   return {
-    id: 'gravity',
-    name: '重力',
+    id,
+    name: id,
     layerId,
     visible: true,
     locked: false,
     simulationEnabled: true,
     kind: 'field',
-    region: { type: 'infinite' },
-    field: { type: 'uniformGravity', acceleration },
+    region,
+    field,
+  }
+}
+
+function makeConnector(
+  scene: SceneDocument,
+  id: string,
+  firstBodyId: string,
+  secondBodyId: string,
+  connector: ConnectorDefinition,
+): ConnectorEntity {
+  const layerId = scene.layers[0]?.id
+  if (!layerId) throw new Error('测试场景缺少图层')
+  return {
+    id,
+    name: id,
+    layerId,
+    visible: true,
+    locked: false,
+    simulationEnabled: true,
+    kind: 'connector',
+    a: { bodyId: firstBodyId, localAnchor: { x: 0, y: 0 } },
+    b: { bodyId: secondBodyId, localAnchor: { x: 0, y: 0 } },
+    connector,
   }
 }
 
@@ -101,6 +136,32 @@ function stateOf(world: SimulationWorld, id: string) {
 }
 
 describe('SimulationWorld 物理规律验证', () => {
+  it('运行快照直接给出实际加速度、合外力和动能', () => {
+    const scene = baseScene()
+    scene.entities = [
+      makeBody(
+        scene,
+        'measured',
+        { x: 0, y: 5 },
+        { x: 3, y: 4 },
+        { massKg: 2, initialAngularVelocityRad: 2 },
+      ),
+      makeGravity(scene, { x: 0, y: -9.80665 }),
+    ]
+    const world = createWorld(scene)
+    world.step()
+    const state = stateOf(world, 'measured')
+
+    expect(state.acceleration.y).toBeCloseTo(-9.80665, 4)
+    expect(state.netForce.y).toBeCloseTo(-19.6133, 3)
+    expect(state.translationalKineticEnergyJ).toBeGreaterThan(24)
+    expect(state.rotationalKineticEnergyJ).toBeCloseTo(0.5, 5)
+    expect(state.kineticEnergyJ).toBeCloseTo(
+      state.translationalKineticEnergyJ + state.rotationalKineticEnergyJ,
+      10,
+    )
+  })
+
   it('使用固定 1/120 秒步长，且自由落体符合解析解', () => {
     const scene = baseScene()
     const gravity = -9.80665
@@ -198,6 +259,21 @@ describe('SimulationWorld 物理规律验证', () => {
       stateOf(world, 'heavy').linearVelocity.y,
       6,
     )
+  })
+
+  it('隐藏或锁定图层只影响编辑显示，不会关闭物理模拟', () => {
+    const scene = baseScene()
+    const layer = scene.layers[0]
+    if (!layer) throw new Error('测试场景缺少图层')
+    scene.layers = [{ ...layer, visible: false, locked: true }]
+    scene.entities = [
+      makeBody(scene, 'hidden-ball', { x: 0, y: 5 }),
+      makeGravity(scene, { x: 0, y: -9.80665 }),
+    ]
+    const world = createWorld(scene)
+    world.step(120)
+
+    expect(stateOf(world, 'hidden-ball').linearVelocity.y).toBeCloseTo(-9.80665, 3)
   })
 
   it('滑动摩擦产生约为 μg 的减速度', () => {
@@ -378,6 +454,159 @@ describe('SimulationWorld 物理规律验证', () => {
     }
 
     expect(maximumRelativeDrift).toBeLessThan(0.005)
+  })
+
+  it('匀强电场产生 qE/m 的加速度', () => {
+    const scene = baseScene()
+    scene.entities = [
+      makeBody(scene, 'charge', { x: 0, y: 0 }, { x: 0, y: 0 }, { massKg: 4, chargeC: 2 }),
+      makeField(scene, 'electric', {
+        type: 'uniformElectric',
+        strength: { x: 6, y: -2 },
+      }),
+    ]
+    const world = createWorld(scene)
+
+    world.step(120)
+    const state = stateOf(world, 'charge')
+    expect(state.linearVelocity.x).toBeCloseTo(3, 4)
+    expect(state.linearVelocity.y).toBeCloseTo(-1, 4)
+    expect(state.netForce.x).toBeCloseTo(12, 3)
+    expect(state.netForce.y).toBeCloseTo(-4, 3)
+  })
+
+  it('匀强磁场保持速率，并产生符合理论半径的圆周运动', () => {
+    const scene = baseScene()
+    scene.entities = [
+      makeBody(scene, 'charge', { x: 0, y: 0 }, { x: 2, y: 0 }, { massKg: 1, chargeC: 1 }),
+      makeField(scene, 'magnetic', { type: 'uniformMagnetic', bzTesla: 1 }),
+    ]
+    const world = createWorld(scene)
+
+    world.step(Math.round((Math.PI / 2) * 120))
+    const state = stateOf(world, 'charge')
+    expect(Math.hypot(state.linearVelocity.x, state.linearVelocity.y)).toBeCloseTo(2, 8)
+    expect(state.position.x).toBeCloseTo(2, 1)
+    expect(state.position.y).toBeCloseTo(-2, 1)
+  })
+
+  it('点电荷间作用力大小相等、方向相反', () => {
+    const scene = baseScene()
+    scene.entities = [
+      makeBody(scene, 'left-charge', { x: -1, y: 0 }, { x: 0, y: 0 }, { chargeC: 1e-6 }),
+      makeBody(scene, 'right-charge', { x: 1, y: 0 }, { x: 0, y: 0 }, { chargeC: 1e-6 }),
+    ]
+    const world = createWorld(scene)
+
+    world.step()
+    const left = stateOf(world, 'left-charge')
+    const right = stateOf(world, 'right-charge')
+    expect(left.netForce.x).toBeLessThan(0)
+    expect(right.netForce.x).toBeCloseTo(-left.netForce.x, 12)
+    expect(left.netForce.y).toBeCloseTo(0, 12)
+    expect(right.linearVelocity.x).toBeCloseTo(-left.linearVelocity.x, 12)
+  })
+
+  it('绳只限制最大长度，不会把松弛的端点推开', () => {
+    const scene = baseScene()
+    scene.entities = [
+      makeBody(scene, 'first', { x: -1, y: 0 }, { x: -2, y: 0 }),
+      makeBody(scene, 'second', { x: 1, y: 0 }, { x: 2, y: 0 }),
+      makeConnector(scene, 'rope', 'first', 'second', { type: 'rope', maxLength: 2 }),
+    ]
+    const world = createWorld(scene)
+
+    world.step(240)
+    const first = stateOf(world, 'first')
+    const second = stateOf(world, 'second')
+    expect(
+      Math.hypot(second.position.x - first.position.x, second.position.y - first.position.y),
+    ).toBeLessThan(2.01)
+  })
+
+  it('小角度单摆周期接近 2π√(L/g)', () => {
+    const scene = baseScene()
+    const length = 2
+    const gravity = 9.80665
+    const startAngle = 0.1
+    const initialBobPosition = {
+      x: length * Math.sin(startAngle),
+      y: -length * Math.cos(startAngle),
+    }
+    scene.entities = [
+      makeBody(scene, 'anchor', { x: 0, y: 0 }, { x: 0, y: 0 }, { massKg: 1e9 }),
+      makeBody(scene, 'bob', initialBobPosition),
+      makeField(
+        scene,
+        'gravity',
+        { type: 'uniformGravity', acceleration: { x: 0, y: -gravity } },
+        {
+          type: 'rectangle',
+          center: { x: 0, y: -2 },
+          width: 10,
+          height: 3,
+          angleRad: 0,
+        },
+      ),
+      makeConnector(scene, 'rope', 'anchor', 'bob', { type: 'rope', maxLength: length }),
+    ]
+    const world = createWorld(scene)
+    const theoreticalPeriod = 2 * Math.PI * Math.sqrt(length / gravity)
+
+    world.step(Math.round(theoreticalPeriod * 120))
+    const anchor = stateOf(world, 'anchor')
+    const bob = stateOf(world, 'bob')
+    expect(bob.position.x).toBeCloseTo(initialBobPosition.x, 1)
+    expect(
+      Math.hypot(bob.position.x - anchor.position.x, bob.position.y - anchor.position.y),
+    ).toBeLessThan(length + 0.01)
+  })
+
+  it('杆在受拉和受压时都保持固定长度', () => {
+    const scene = baseScene()
+    scene.entities = [
+      makeBody(scene, 'first', { x: -1, y: 0 }, { x: -1, y: 0 }),
+      makeBody(scene, 'second', { x: 1, y: 0 }, { x: 1, y: 0 }),
+      makeConnector(scene, 'rod', 'first', 'second', {
+        type: 'rod',
+        length: 2,
+        freeRotation: true,
+      }),
+    ]
+    const world = createWorld(scene)
+
+    world.step(240)
+    const first = stateOf(world, 'first')
+    const second = stateOf(world, 'second')
+    expect(
+      Math.hypot(second.position.x - first.position.x, second.position.y - first.position.y),
+    ).toBeCloseTo(2, 6)
+    expect(first.linearVelocity.x + second.linearVelocity.x).toBeCloseTo(0, 10)
+  })
+
+  it('无阻尼弹簧振子的周期符合双质量解析解', () => {
+    const scene = baseScene()
+    const particle = {
+      preset: 'particle' as const,
+      shape: { type: 'particle' as const, collisionRadius: 0.1, collisionEnabled: false },
+    }
+    scene.entities = [
+      makeBody(scene, 'first', { x: -1.5, y: 0 }, { x: 0, y: 0 }, particle),
+      makeBody(scene, 'second', { x: 1.5, y: 0 }, { x: 0, y: 0 }, particle),
+      makeConnector(scene, 'spring', 'first', 'second', {
+        type: 'spring',
+        restLength: 2,
+        stiffness: 8,
+        damping: 0,
+      }),
+    ]
+    const world = createWorld(scene)
+    const theoreticalPeriod = 2 * Math.PI * Math.sqrt(1 / (2 * 8))
+
+    world.step(Math.round(theoreticalPeriod * 120))
+    const first = stateOf(world, 'first')
+    const second = stateOf(world, 'second')
+    expect(second.position.x - first.position.x).toBeCloseTo(3, 1)
   })
 
   it('相同初始条件和步数会得到可复现结果', () => {

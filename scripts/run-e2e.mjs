@@ -48,7 +48,7 @@ let exitCode = 1
 try {
   await waitForServer(server)
 
-  const testRunner = spawn(process.execPath, [playwrightEntry, 'test'], {
+  const testRunner = spawn(process.execPath, [playwrightEntry, 'test', ...process.argv.slice(2)], {
     stdio: 'inherit',
     windowsHide: true,
   })

@@ -157,6 +157,12 @@
   white-space: nowrap;
 }
 
+.saveState {
+  color: var(--color-text-dim);
+  font-size: 9px;
+  white-space: nowrap;
+}
+
 .stageBadge {
   padding: 2px 6px;
   border: 1px solid var(--color-border-strong);

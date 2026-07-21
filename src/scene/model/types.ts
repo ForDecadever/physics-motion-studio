@@ -1,4 +1,5 @@
-export const CURRENT_SCHEMA_VERSION = 1 as const
+export const CURRENT_SCHEMA_VERSION = 2 as const
+export const CURRENT_APP_VERSION = '0.4.0'
 
 export type EntityId = string
 export type LayerId = string
@@ -139,6 +140,8 @@ export interface SceneSettings {
   gridStep: number
   snapStep: number
   pairwiseElectrostatics: boolean
+  recordingSampleRate: number
+  recordingDurationSeconds: number
 }
 
 export interface SceneDocument {
