@@ -1,0 +1,69 @@
+import { spawn } from 'node:child_process'
+import { resolve } from 'node:path'
+
+const host = '127.0.0.1'
+const port = '4173'
+const baseUrl = `http://${host}:${port}`
+const viteEntry = resolve('node_modules/vite/bin/vite.js')
+const playwrightEntry = resolve('node_modules/@playwright/test/cli.js')
+
+function waitForExit(child) {
+  return new Promise((resolveExit) => {
+    child.once('exit', (code, signal) => resolveExit({ code, signal }))
+  })
+}
+
+async function waitForServer(server) {
+  const deadline = Date.now() + 20_000
+
+  while (Date.now() < deadline) {
+    if (server.exitCode !== null) {
+      throw new Error(`开发服务器提前退出，退出码为 ${server.exitCode}。`)
+    }
+
+    try {
+      const response = await fetch(baseUrl)
+      if (response.ok) return
+    } catch {
+      // 启动阶段连接失败是正常现象，短暂等待后重试。
+    }
+
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 200))
+  }
+
+  throw new Error('开发服务器在 20 秒内没有准备完成。')
+}
+
+const server = spawn(
+  process.execPath,
+  [viteEntry, '--host', host, '--port', port, '--strictPort'],
+  {
+    stdio: 'ignore',
+    windowsHide: true,
+  },
+)
+
+let exitCode = 1
+
+try {
+  await waitForServer(server)
+
+  const testRunner = spawn(process.execPath, [playwrightEntry, 'test'], {
+    stdio: 'inherit',
+    windowsHide: true,
+  })
+  const testResult = await waitForExit(testRunner)
+  exitCode = testResult.code ?? 1
+} catch (error) {
+  console.error(error instanceof Error ? error.message : error)
+} finally {
+  if (server.exitCode === null) {
+    server.kill()
+    await Promise.race([
+      waitForExit(server),
+      new Promise((resolveDelay) => setTimeout(resolveDelay, 2_000)),
+    ])
+  }
+}
+
+process.exitCode = exitCode

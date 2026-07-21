@@ -1,0 +1,167 @@
+.header {
+  position: relative;
+  z-index: 30;
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  border-bottom: 1px solid #0b0c0e;
+  background: var(--color-bg-top);
+  box-shadow: inset 0 -1px rgb(255 255 255 / 3%);
+  user-select: none;
+}
+
+.brand {
+  display: flex;
+  width: 176px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 9px;
+  padding-left: 10px;
+  color: #f2f5f8;
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+
+.brandMark {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  border: 1px solid rgb(255 255 255 / 16%);
+  border-radius: 5px;
+  place-items: center;
+  background: linear-gradient(145deg, #348fef, #1c64bd);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 35%);
+  color: white;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.menuBar {
+  display: flex;
+  align-self: stretch;
+  align-items: center;
+}
+
+.menu {
+  position: relative;
+  height: 100%;
+}
+
+.menu summary {
+  display: flex;
+  height: 100%;
+  align-items: center;
+  padding: 0 9px;
+  color: var(--color-text-muted);
+  cursor: default;
+  font-size: 12px;
+  list-style: none;
+}
+
+.menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.menu summary:hover,
+.menu[open] summary {
+  background: var(--color-bg-hover);
+  color: var(--color-text);
+}
+
+.menuPopover {
+  position: absolute;
+  top: 32px;
+  left: 0;
+  width: 224px;
+  padding: 6px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
+  background: #20242a;
+  box-shadow: var(--shadow-menu);
+}
+
+.menuAction {
+  display: grid;
+  width: 100%;
+  min-height: 30px;
+  padding: 0 8px;
+  align-items: center;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text);
+  cursor: pointer;
+  grid-template-columns: 22px 1fr auto;
+  text-align: left;
+}
+
+.menuAction:not(:disabled):hover {
+  background: var(--color-accent-strong);
+  color: white;
+}
+
+.menuActionIcon {
+  display: flex;
+  color: var(--color-text-muted);
+}
+
+.menuAction:hover .menuActionIcon {
+  color: inherit;
+}
+
+.menuAction kbd {
+  color: var(--color-text-dim);
+  font: inherit;
+  font-size: 11px;
+}
+
+.menuAction:hover kbd {
+  color: rgb(255 255 255 / 75%);
+}
+
+.menuDivider {
+  height: 1px;
+  margin: 5px 6px;
+  background: var(--color-border);
+}
+
+.sceneStatus {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  margin-left: auto;
+  padding: 0 12px;
+  color: var(--color-text-muted);
+  font-size: 11px;
+}
+
+.statusDot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--color-success);
+  box-shadow: 0 0 7px rgb(88 214 141 / 35%);
+}
+
+.statusDot[data-dirty='true'] {
+  background: var(--color-warning);
+}
+
+.sceneName {
+  overflow: hidden;
+  max-width: 170px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stageBadge {
+  padding: 2px 6px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 999px;
+  color: var(--color-text-dim);
+  font-size: 9px;
+  letter-spacing: 0.05em;
+}

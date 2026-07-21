@@ -1,0 +1,202 @@
+.playbackBar {
+  position: relative;
+  z-index: 11;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 10px;
+  border-top: 1px solid #0f1114;
+  border-bottom: 1px solid var(--color-border);
+  background: #1a1d22;
+  box-shadow: 0 -2px 8px rgb(0 0 0 / 14%);
+  user-select: none;
+}
+
+.transport {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.transport button,
+.chartActions button {
+  display: inline-flex;
+  height: 27px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+}
+
+.transport button:first-child {
+  width: 31px;
+  border-color: rgb(88 166 255 / 30%);
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
+}
+
+.timeReadout {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding-left: 14px;
+  border-left: 1px solid var(--color-border);
+}
+
+.timeLabel {
+  color: var(--color-text-dim);
+  font-size: 10px;
+}
+
+.timeReadout output {
+  min-width: 64px;
+  color: #d7e9fb;
+  font-family: 'Cascadia Mono', 'SFMono-Regular', Consolas, monospace;
+  font-size: 11px;
+}
+
+.playbackStatus {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-text-dim);
+  font-size: 10px;
+}
+
+.readyDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-success);
+}
+
+.playbackBar[data-status='playing'] .readyDot {
+  background: var(--color-accent);
+  box-shadow: 0 0 5px rgb(88 166 255 / 70%);
+}
+
+.playbackBar[data-status='paused'] .readyDot {
+  background: var(--color-warning);
+}
+
+.playbackBar[data-status='error'] .readyDot {
+  background: var(--color-danger);
+}
+
+.rateControl {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-left: auto;
+  color: var(--color-text-dim);
+  font-size: 10px;
+}
+
+.rateControl select {
+  height: 26px;
+  padding: 0 24px 0 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: #15171b;
+  color: var(--color-text);
+}
+
+.chartPanel {
+  display: grid;
+  min-height: 0;
+  grid-template-rows: 35px minmax(0, 1fr);
+  overflow: hidden;
+  background: #171a1e;
+}
+
+.chartHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 9px 0 12px;
+  border-bottom: 1px solid var(--color-border);
+  background: #1d2025;
+}
+
+.chartTitle,
+.chartActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.chartTitle > svg {
+  color: var(--color-accent);
+}
+
+.chartTitle h2 {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.chartBadge {
+  min-width: 20px;
+  padding: 2px 6px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 999px;
+  color: var(--color-text-dim);
+  font-size: 9px;
+  text-align: center;
+}
+
+.chartActions button:not(:disabled):hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text);
+}
+
+.chartBody {
+  position: relative;
+  display: grid;
+  min-height: 0;
+  padding: 10px 14px 18px 34px;
+}
+
+.chartGrid {
+  position: relative;
+  min-height: 0;
+  border-left: 1px solid #4b535f;
+  border-bottom: 1px solid #4b535f;
+  background-image:
+    linear-gradient(rgb(255 255 255 / 4%) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(255 255 255 / 4%) 1px, transparent 1px);
+  background-size: 56px 28px;
+}
+
+.chartEmpty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  color: var(--color-text-dim);
+  font-size: 10px;
+}
+
+.xAxisLabel,
+.yAxisLabel {
+  position: absolute;
+  color: var(--color-text-dim);
+  font-size: 9px;
+}
+
+.xAxisLabel {
+  right: 14px;
+  bottom: 4px;
+}
+
+.yAxisLabel {
+  top: 10px;
+  left: 7px;
+  writing-mode: vertical-rl;
+}

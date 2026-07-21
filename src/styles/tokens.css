@@ -1,0 +1,32 @@
+:root {
+  color-scheme: dark;
+  font-family: Inter, 'SF Pro Text', 'Segoe UI', 'Microsoft YaHei UI', system-ui, sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+
+  --color-bg-app: #111316;
+  --color-bg-top: #17191d;
+  --color-bg-panel: #1b1e23;
+  --color-bg-panel-raised: #22262c;
+  --color-bg-hover: #2a2f36;
+  --color-bg-active: #303741;
+  --color-bg-canvas: #292d33;
+  --color-border: #30343b;
+  --color-border-strong: #3d434d;
+  --color-text: #e7e9ed;
+  --color-text-muted: #a4aab4;
+  --color-text-dim: #737b87;
+  --color-accent: #58a6ff;
+  --color-accent-strong: #2188ff;
+  --color-accent-soft: rgb(88 166 255 / 14%);
+  --color-success: #58d68d;
+  --color-danger: #ff6b7a;
+  --color-warning: #f2c94c;
+
+  --shadow-menu: 0 12px 34px rgb(0 0 0 / 42%);
+  --shadow-float: 0 8px 28px rgb(0 0 0 / 28%);
+  --radius-sm: 4px;
+  --radius-md: 7px;
+  --radius-lg: 12px;
+  --focus-ring: 0 0 0 2px rgb(88 166 255 / 40%);
+}

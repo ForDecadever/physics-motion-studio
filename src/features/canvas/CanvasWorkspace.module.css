@@ -1,0 +1,122 @@
+.canvasWorkspace {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  grid-template-rows: 27px minmax(0, 1fr);
+  overflow: hidden;
+  background: #202329;
+}
+
+.canvasTopline {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px;
+  border-bottom: 1px solid #17191d;
+  background: #24272d;
+  color: var(--color-text-dim);
+  font-size: 10px;
+  user-select: none;
+}
+
+.toplineSeparator {
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: #5e6672;
+}
+
+.canvasViewport {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--color-bg-canvas);
+  box-shadow: inset 0 0 40px rgb(0 0 0 / 14%);
+  touch-action: none;
+}
+
+.pixiHost {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background: #30343a;
+}
+
+.pixiHost :global(.pixi-editor-canvas) {
+  display: block;
+  width: 100%;
+  height: 100%;
+  outline: none;
+}
+
+.canvasLoading,
+.canvasError {
+  position: absolute;
+  z-index: 2;
+  top: 50%;
+  left: 50%;
+  min-width: 260px;
+  padding: 14px 17px;
+  border: 1px solid rgb(255 255 255 / 9%);
+  border-radius: var(--radius-md);
+  background: rgb(27 30 35 / 90%);
+  box-shadow: var(--shadow-float);
+  color: var(--color-text-muted);
+  text-align: center;
+  transform: translate(-50%, -50%);
+}
+
+.canvasError {
+  border-color: rgb(255 107 122 / 35%);
+  color: #ffadb5;
+}
+
+.pixiHost[data-ready='false']::before {
+  position: absolute;
+  top: calc(50% - 38px);
+  left: calc(50% - 7px);
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgb(88 166 255 / 25%);
+  border-top-color: var(--color-accent);
+  border-radius: 50%;
+  content: '';
+  animation: spin 700ms linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.canvasBadges,
+.cursorReadout {
+  position: absolute;
+  z-index: 5;
+  bottom: 9px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--color-text-dim);
+  font-size: 10px;
+  pointer-events: none;
+  user-select: none;
+}
+
+.canvasBadges {
+  left: 10px;
+}
+
+.canvasBadges span,
+.cursorReadout {
+  padding: 4px 7px;
+  border: 1px solid rgb(255 255 255 / 7%);
+  border-radius: 4px;
+  background: rgb(25 28 32 / 78%);
+}
+
+.cursorReadout {
+  right: 10px;
+}
