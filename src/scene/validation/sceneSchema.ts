@@ -64,20 +64,48 @@ const groundEntitySchema = z
     kind: z.literal('ground'),
     geometry: groundGeometrySchema,
     material: materialSchema,
-    collisionSide: z.enum(['normal', 'both']),
-    normalFlipped: z.boolean(),
+    collisionSide: z.literal('both'),
+    normalFlipped: z.literal(false),
+  })
+  .passthrough()
+
+const groundEndpointSchema = z
+  .object({
+    groundId: entityId,
+    endpoint: z.enum(['start', 'end']),
+  })
+  .passthrough()
+
+const groundJointTransitionSchema = z.discriminatedUnion('mode', [
+  z
+    .object({
+      mode: z.literal('auto'),
+      directionFlipped: z.boolean(),
+    })
+    .passthrough(),
+  z
+    .object({
+      mode: z.literal('manual'),
+      lengthM: finiteNumber.min(0),
+      directionFlipped: z.boolean(),
+    })
+    .passthrough(),
+])
+
+const groundJointEntitySchema = z
+  .object({
+    ...baseEntityShape,
+    kind: z.literal('groundJoint'),
+    a: groundEndpointSchema,
+    b: groundEndpointSchema,
+    transition: groundJointTransitionSchema,
   })
   .passthrough()
 
 const bodyShapeSchema = z.discriminatedUnion('type', [
   z
-    .object({
-      type: z.literal('particle'),
-      collisionRadius: positiveNumber,
-      collisionEnabled: z.boolean(),
-    })
+    .object({ type: z.literal('circle'), radius: positiveNumber, collisionEnabled: z.boolean() })
     .passthrough(),
-  z.object({ type: z.literal('circle'), radius: positiveNumber }).passthrough(),
   z
     .object({
       type: z.literal('box'),
@@ -91,7 +119,7 @@ const bodyEntitySchema = z
   .object({
     ...baseEntityShape,
     kind: z.literal('body'),
-    preset: z.enum(['particle', 'ball', 'block', 'pointCharge']),
+    preset: z.enum(['ball', 'block']),
     shape: bodyShapeSchema,
     transform: transformSchema,
     massKg: positiveNumber,
@@ -99,6 +127,7 @@ const bodyEntitySchema = z
     material: materialSchema,
     initialVelocity: vec2Schema,
     initialAngularVelocityRad: finiteNumber,
+    rotationEnabled: z.boolean(),
     continuousCollisionDetection: z.boolean(),
   })
   .passthrough()
@@ -114,11 +143,35 @@ const fieldRegionSchema = z.discriminatedUnion('type', [
       angleRad: finiteNumber,
     })
     .passthrough(),
-  z.object({ type: z.literal('circle'), center: vec2Schema, radius: positiveNumber }).passthrough(),
+  z
+    .object({
+      type: z.literal('circle'),
+      center: vec2Schema,
+      radius: positiveNumber,
+      startRad: finiteNumber,
+      sweepRad: finiteNumber.min(-Math.PI * 2).max(Math.PI * 2),
+    })
+    .passthrough(),
   z
     .object({
       type: z.literal('polygon'),
       points: z.array(vec2Schema).min(3),
+    })
+    .passthrough(),
+  z
+    .object({
+      type: z.literal('bezierPath'),
+      nodes: z
+        .array(
+          z
+            .object({
+              anchor: vec2Schema,
+              inHandle: vec2Schema,
+              outHandle: vec2Schema,
+            })
+            .passthrough(),
+        )
+        .min(3),
     })
     .passthrough(),
 ])
@@ -176,6 +229,7 @@ const connectorEntitySchema = z
 
 const sceneEntitySchema = z.discriminatedUnion('kind', [
   groundEntitySchema,
+  groundJointEntitySchema,
   bodyEntitySchema,
   fieldEntitySchema,
   connectorEntitySchema,

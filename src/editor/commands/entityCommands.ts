@@ -99,6 +99,12 @@ export function createDeleteEntitiesCommand(
     if (entity.kind === 'connector' && (ids.has(entity.a.bodyId) || ids.has(entity.b.bodyId))) {
       ids.add(entity.id)
     }
+    if (
+      entity.kind === 'groundJoint' &&
+      (ids.has(entity.a.groundId) || ids.has(entity.b.groundId))
+    ) {
+      ids.add(entity.id)
+    }
   }
 
   const after = document.entities.filter((entity) => !ids.has(entity.id))

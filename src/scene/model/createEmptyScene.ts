@@ -13,9 +13,9 @@ export function createEmptyScene(name = '未命名场景', now = new Date()): Sc
     },
     settings: {
       fixedTimeStep: 1 / 120,
-      gridStep: 1,
+      gridStep: 5,
       snapStep: 0.1,
-      pairwiseElectrostatics: true,
+      pairwiseElectrostatics: false,
       recordingSampleRate: 60,
       recordingDurationSeconds: 300,
     },

@@ -1,5 +1,5 @@
-export const CURRENT_SCHEMA_VERSION = 2 as const
-export const CURRENT_APP_VERSION = '0.4.0'
+export const CURRENT_SCHEMA_VERSION = 6 as const
+export const CURRENT_APP_VERSION = '0.8.0'
 
 export type EntityId = string
 export type LayerId = string
@@ -17,6 +17,12 @@ export interface Transform2D {
 export interface Material2D {
   friction: number
   restitution: number
+}
+
+export interface BezierPathNode {
+  anchor: Vec2
+  inHandle: Vec2
+  outHandle: Vec2
 }
 
 export interface Layer {
@@ -56,22 +62,35 @@ export interface GroundEntity extends BaseEntity {
   kind: 'ground'
   geometry: GroundGeometry
   material: Material2D
-  collisionSide: 'normal' | 'both'
-  normalFlipped: boolean
+  collisionSide: 'both'
+  normalFlipped: false
+}
+
+export type GroundEndpointKey = 'start' | 'end'
+
+export interface GroundEndpointRef {
+  groundId: EntityId
+  endpoint: GroundEndpointKey
+}
+
+export type GroundJointTransition =
+  | { mode: 'auto'; directionFlipped: boolean }
+  | { mode: 'manual'; lengthM: number; directionFlipped: boolean }
+
+export interface GroundJointEntity extends BaseEntity {
+  kind: 'groundJoint'
+  a: GroundEndpointRef
+  b: GroundEndpointRef
+  transition: GroundJointTransition
 }
 
 export type BodyShape =
-  | {
-      type: 'particle'
-      collisionRadius: number
-      collisionEnabled: boolean
-    }
-  | { type: 'circle'; radius: number }
+  | { type: 'circle'; radius: number; collisionEnabled: boolean }
   | { type: 'box'; width: number; height: number }
 
 export interface BodyEntity extends BaseEntity {
   kind: 'body'
-  preset: 'particle' | 'ball' | 'block' | 'pointCharge'
+  preset: 'ball' | 'block'
   shape: BodyShape
   transform: Transform2D
   massKg: number
@@ -79,6 +98,7 @@ export interface BodyEntity extends BaseEntity {
   material: Material2D
   initialVelocity: Vec2
   initialAngularVelocityRad: number
+  rotationEnabled: boolean
   continuousCollisionDetection: boolean
 }
 
@@ -91,8 +111,15 @@ export type FieldRegion =
       height: number
       angleRad: number
     }
-  | { type: 'circle'; center: Vec2; radius: number }
+  | {
+      type: 'circle'
+      center: Vec2
+      radius: number
+      startRad: number
+      sweepRad: number
+    }
   | { type: 'polygon'; points: Vec2[] }
+  | { type: 'bezierPath'; nodes: BezierPathNode[] }
 
 export type FieldDefinition =
   | { type: 'uniformGravity'; acceleration: Vec2 }
@@ -127,7 +154,8 @@ export interface ConnectorEntity extends BaseEntity {
   connector: ConnectorDefinition
 }
 
-export type SceneEntity = GroundEntity | BodyEntity | FieldEntity | ConnectorEntity
+export type SceneEntity =
+  GroundEntity | GroundJointEntity | BodyEntity | FieldEntity | ConnectorEntity
 
 export interface SceneMetadata {
   name: string

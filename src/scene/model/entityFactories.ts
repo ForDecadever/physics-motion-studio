@@ -1,4 +1,13 @@
-import type { BodyEntity, ConnectorEntity, FieldEntity, GroundEntity, LayerId, Vec2 } from './types'
+import type {
+  BodyEntity,
+  ConnectorEntity,
+  FieldEntity,
+  GroundEndpointRef,
+  GroundEntity,
+  GroundJointEntity,
+  LayerId,
+  Vec2,
+} from './types'
 
 function baseEntity(layerId: LayerId, name: string) {
   return {
@@ -21,8 +30,8 @@ export function createLineGround(
     ...baseEntity(layerId, `直线地面 ${index}`),
     kind: 'ground',
     geometry: { type: 'line', start, end },
-    material: { friction: 0.5, restitution: 0.2 },
-    collisionSide: 'normal',
+    material: { friction: 0, restitution: 0 },
+    collisionSide: 'both',
     normalFlipped: false,
   }
 }
@@ -39,8 +48,8 @@ export function createArcGround(
     ...baseEntity(layerId, `圆弧地面 ${index}`),
     kind: 'ground',
     geometry: { type: 'arc', center, radius, startRad, endRad },
-    material: { friction: 0.5, restitution: 0.2 },
-    collisionSide: 'normal',
+    material: { friction: 0, restitution: 0 },
+    collisionSide: 'both',
     normalFlipped: false,
   }
 }
@@ -57,9 +66,24 @@ export function createBezierGround(
     ...baseEntity(layerId, `贝塞尔地面 ${index}`),
     kind: 'ground',
     geometry: { type: 'cubicBezier', p0, p1, p2, p3 },
-    material: { friction: 0.5, restitution: 0.2 },
-    collisionSide: 'normal',
+    material: { friction: 0, restitution: 0 },
+    collisionSide: 'both',
     normalFlipped: false,
+  }
+}
+
+export function createGroundJoint(
+  layerId: LayerId,
+  a: GroundEndpointRef,
+  b: GroundEndpointRef,
+  index: number,
+): GroundJointEntity {
+  return {
+    ...baseEntity(layerId, `地面连接点 ${index}`),
+    kind: 'groundJoint',
+    a,
+    b,
+    transition: { mode: 'auto', directionFlipped: false },
   }
 }
 
@@ -73,55 +97,14 @@ export function createBall(
     ...baseEntity(layerId, `小球 ${index}`),
     kind: 'body',
     preset: 'ball',
-    shape: { type: 'circle', radius },
-    transform: { position, angleRad: 0 },
-    massKg: 1,
-    chargeC: 0,
-    material: { friction: 0.4, restitution: 0.5 },
-    initialVelocity: { x: 0, y: 0 },
-    initialAngularVelocityRad: 0,
-    continuousCollisionDetection: false,
-  }
-}
-
-export function createParticle(
-  layerId: LayerId,
-  position: Vec2,
-  collisionRadius: number,
-  index: number,
-): BodyEntity {
-  return {
-    ...baseEntity(layerId, `质点 ${index}`),
-    kind: 'body',
-    preset: 'particle',
-    shape: { type: 'particle', collisionRadius, collisionEnabled: false },
+    shape: { type: 'circle', radius, collisionEnabled: true },
     transform: { position, angleRad: 0 },
     massKg: 1,
     chargeC: 0,
     material: { friction: 0, restitution: 0 },
     initialVelocity: { x: 0, y: 0 },
     initialAngularVelocityRad: 0,
-    continuousCollisionDetection: false,
-  }
-}
-
-export function createPointCharge(
-  layerId: LayerId,
-  position: Vec2,
-  collisionRadius: number,
-  index: number,
-): BodyEntity {
-  return {
-    ...baseEntity(layerId, `点电荷 ${index}`),
-    kind: 'body',
-    preset: 'pointCharge',
-    shape: { type: 'particle', collisionRadius, collisionEnabled: false },
-    transform: { position, angleRad: 0 },
-    massKg: 1,
-    chargeC: 1e-6,
-    material: { friction: 0, restitution: 0 },
-    initialVelocity: { x: 0, y: 0 },
-    initialAngularVelocityRad: 0,
+    rotationEnabled: true,
     continuousCollisionDetection: false,
   }
 }
@@ -141,9 +124,10 @@ export function createBlock(
     transform: { position, angleRad: 0 },
     massKg: 1,
     chargeC: 0,
-    material: { friction: 0.5, restitution: 0.2 },
+    material: { friction: 0, restitution: 0 },
     initialVelocity: { x: 0, y: 0 },
     initialAngularVelocityRad: 0,
+    rotationEnabled: true,
     continuousCollisionDetection: false,
   }
 }
@@ -237,6 +221,6 @@ export function createSpring(
     kind: 'connector',
     a: { bodyId: firstBodyId, localAnchor: { x: 0, y: 0 } },
     b: { bodyId: secondBodyId, localAnchor: { x: 0, y: 0 } },
-    connector: { type: 'spring', restLength, stiffness: 20, damping: 0.5 },
+    connector: { type: 'spring', restLength, stiffness: 20, damping: 0 },
   }
 }

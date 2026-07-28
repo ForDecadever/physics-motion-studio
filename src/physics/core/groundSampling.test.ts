@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
 import { sampleGroundGeometry } from './groundSampling'
-import { isOnPolylineNormalSide } from './SimulationWorld'
 
 describe('sampleGroundGeometry', () => {
   it('保留圆弧端点，并把弦高误差限制在给定范围内', () => {
@@ -47,16 +46,5 @@ describe('sampleGroundGeometry', () => {
       if (!first || !second) continue
       expect(Math.hypot(second.x - first.x, second.y - first.y)).toBeLessThanOrEqual(0.101)
     }
-  })
-
-  it('按曲线绘制方向区分地面的法线侧和背面', () => {
-    const points = [
-      { x: -2, y: 0 },
-      { x: 0, y: -1 },
-      { x: 2, y: 0 },
-    ]
-    expect(isOnPolylineNormalSide(points, { x: 0, y: 0 })).toBe(true)
-    expect(isOnPolylineNormalSide(points, { x: 0, y: -2 })).toBe(false)
-    expect(isOnPolylineNormalSide([...points].reverse(), { x: 0, y: 0 })).toBe(false)
   })
 })

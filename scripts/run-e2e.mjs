@@ -18,7 +18,7 @@ async function waitForServer(server) {
 
   while (Date.now() < deadline) {
     if (server.exitCode !== null) {
-      throw new Error(`开发服务器提前退出，退出码为 ${server.exitCode}。`)
+      throw new Error(`预览服务器提前退出，退出码为 ${server.exitCode}。`)
     }
 
     try {
@@ -31,21 +31,30 @@ async function waitForServer(server) {
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 200))
   }
 
-  throw new Error('开发服务器在 20 秒内没有准备完成。')
+  throw new Error('预览服务器在 20 秒内没有准备完成。')
 }
 
-const server = spawn(
-  process.execPath,
-  [viteEntry, '--host', host, '--port', port, '--strictPort'],
-  {
-    stdio: 'ignore',
-    windowsHide: true,
-  },
-)
-
 let exitCode = 1
+let server = null
 
 try {
+  const build = spawn(process.execPath, [viteEntry, 'build'], {
+    stdio: 'inherit',
+    windowsHide: true,
+  })
+  const buildResult = await waitForExit(build)
+  if (buildResult.code !== 0) {
+    throw new Error(`生产构建失败，退出码为 ${buildResult.code ?? 'unknown'}。`)
+  }
+
+  server = spawn(
+    process.execPath,
+    [viteEntry, 'preview', '--host', host, '--port', port, '--strictPort'],
+    {
+      stdio: 'ignore',
+      windowsHide: true,
+    },
+  )
   await waitForServer(server)
 
   const testRunner = spawn(process.execPath, [playwrightEntry, 'test', ...process.argv.slice(2)], {
@@ -57,7 +66,7 @@ try {
 } catch (error) {
   console.error(error instanceof Error ? error.message : error)
 } finally {
-  if (server.exitCode === null) {
+  if (server?.exitCode === null) {
     server.kill()
     await Promise.race([
       waitForExit(server),

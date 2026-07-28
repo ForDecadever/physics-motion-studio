@@ -29,4 +29,12 @@
   --radius-md: 7px;
   --radius-lg: 12px;
   --focus-ring: 0 0 0 2px rgb(88 166 255 / 40%);
+
+  --z-resizer: 10;
+  --z-options: 20;
+  --z-playback: 30;
+  --z-tool-flyout-host: 100;
+  --z-menu-host: 110;
+  --z-modal: 1000;
+  --z-notice: 1100;
 }

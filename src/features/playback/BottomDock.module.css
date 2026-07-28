@@ -1,6 +1,6 @@
 .playbackBar {
   position: relative;
-  z-index: 11;
+  z-index: var(--z-playback);
   display: flex;
   align-items: center;
   gap: 14px;

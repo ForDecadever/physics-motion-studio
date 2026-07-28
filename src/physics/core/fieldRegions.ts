@@ -1,6 +1,20 @@
 import type { FieldRegion, Vec2 } from '../../scene/model/types'
+import { sampleClosedBezierPath } from '../../scene/model/bezierPath'
 
 const EPSILON = 1e-9
+const TAU = Math.PI * 2
+
+function normalizePositiveAngle(angle: number): number {
+  return ((angle % TAU) + TAU) % TAU
+}
+
+export function angleWithinSweep(angle: number, startRad: number, sweepRad: number): boolean {
+  if (Math.abs(sweepRad) >= TAU - EPSILON) return true
+  if (sweepRad >= 0) {
+    return normalizePositiveAngle(angle - startRad) <= sweepRad + EPSILON
+  }
+  return normalizePositiveAngle(startRad - angle) <= -sweepRad + EPSILON
+}
 
 function pointOnSegment(point: Vec2, start: Vec2, end: Vec2): boolean {
   const cross = (point.y - start.y) * (end.x - start.x) - (point.x - start.x) * (end.y - start.y)
@@ -29,11 +43,17 @@ function pointInPolygon(point: Vec2, points: Vec2[]): boolean {
 export function regionContainsPoint(region: FieldRegion, point: Vec2): boolean {
   if (region.type === 'infinite') return true
   if (region.type === 'circle') {
+    const dx = point.x - region.center.x
+    const dy = point.y - region.center.y
     return (
-      Math.hypot(point.x - region.center.x, point.y - region.center.y) <= region.radius + EPSILON
+      Math.hypot(dx, dy) <= region.radius + EPSILON &&
+      angleWithinSweep(Math.atan2(dy, dx), region.startRad, region.sweepRad)
     )
   }
   if (region.type === 'polygon') return pointInPolygon(point, region.points)
+  if (region.type === 'bezierPath') {
+    return pointInPolygon(point, sampleClosedBezierPath(region.nodes))
+  }
 
   const cosine = Math.cos(-region.angleRad)
   const sine = Math.sin(-region.angleRad)

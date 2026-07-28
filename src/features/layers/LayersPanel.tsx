@@ -3,6 +3,7 @@ import {
   ChevronDown,
   Eye,
   EyeOff,
+  GitMerge,
   Layers3,
   Link2,
   Lock,
@@ -15,12 +16,18 @@ import {
 
 import { useDocumentStore } from '../../stores/documentStore'
 import { useEditorStore } from '../../stores/editorStore'
-import { createReplaceLayersCommand } from '../../editor/commands/entityCommands'
+import {
+  createDeleteEntitiesCommand,
+  createReplaceEntitiesCommand,
+  createReplaceLayersCommand,
+} from '../../editor/commands/entityCommands'
+import type { SceneEntity } from '../../scene/model/types'
 import { isSimulationRuntimeLocked, useSimulationStore } from '../../stores/simulationStore'
 import styles from '../panels/Panels.module.css'
 
 const entityIcons = {
   ground: Spline,
+  groundJoint: GitMerge,
   body: Box,
   field: Magnet,
   connector: Link2,
@@ -41,6 +48,44 @@ export function LayersPanel() {
     if (runtimeLocked) return
     const document = useDocumentStore.getState()
     document.executeCommand(createReplaceLayersCommand(document.scene, nextLayers, label))
+  }
+
+  const replaceEntity = (nextEntity: SceneEntity, label: string) => {
+    if (runtimeLocked) return
+    const document = useDocumentStore.getState()
+    document.executeCommand(createReplaceEntitiesCommand(document.scene, [nextEntity], label))
+  }
+
+  const deleteEntity = (entityId: string) => {
+    if (runtimeLocked) return
+    const document = useDocumentStore.getState()
+    const command = createDeleteEntitiesCommand(document.scene, [entityId])
+    if (!command) return
+    document.executeCommand(command)
+
+    const validEntities = useDocumentStore.getState().scene.entities
+    const validIds = new Set(validEntities.map((entity) => entity.id))
+    const editor = useEditorStore.getState()
+    editor.setSelectedIds(editor.selectedIds.filter((id) => validIds.has(id)))
+    if (editor.connectorStartBodyId && !validIds.has(editor.connectorStartBodyId)) {
+      editor.setConnectorStartBodyId(null)
+    }
+    const validGroundIds = new Set(
+      validEntities.filter((entity) => entity.kind === 'ground').map((entity) => entity.id),
+    )
+    const groundJointStartInvalid =
+      editor.groundJointStart && !validGroundIds.has(editor.groundJointStart.groundId)
+    const groundJointHoverInvalid =
+      editor.groundJointHover && !validGroundIds.has(editor.groundJointHover.groundId)
+    if (groundJointStartInvalid) {
+      editor.setGroundJointStart(null)
+    }
+    if (groundJointHoverInvalid) {
+      editor.setGroundJointHover(null)
+    }
+    if (groundJointStartInvalid || groundJointHoverInvalid) {
+      editor.setGroundJointMessage(null)
+    }
   }
 
   const addLayer = () => {
@@ -137,21 +182,52 @@ export function LayersPanel() {
                 {layerEntities.map((entity) => {
                   const EntityIcon = entityIcons[entity.kind]
                   return (
-                    <button
+                    <div
                       className={styles.entityRow}
-                      type="button"
                       data-selected={selectedIds.includes(entity.id)}
-                      onClick={(event) =>
-                        event.shiftKey
-                          ? useEditorStore.getState().toggleSelectedId(entity.id)
-                          : setSelectedIds([entity.id])
-                      }
+                      data-visible={entity.visible}
                       key={entity.id}
                     >
-                      <EntityIcon size={13} />
-                      <span>{entity.name}</span>
-                      {entity.locked ? <Lock size={11} /> : null}
-                    </button>
+                      <button
+                        className={styles.entitySelect}
+                        type="button"
+                        onClick={(event) =>
+                          event.shiftKey
+                            ? useEditorStore.getState().toggleSelectedId(entity.id)
+                            : setSelectedIds([entity.id])
+                        }
+                      >
+                        <EntityIcon size={13} />
+                        <span>{entity.name}</span>
+                        {entity.locked ? <Lock size={11} /> : null}
+                      </button>
+                      <div className={styles.entityActions}>
+                        <button
+                          type="button"
+                          className={styles.entityAction}
+                          disabled={runtimeLocked}
+                          aria-label={`${entity.visible ? '隐藏' : '显示'}对象 ${entity.name}`}
+                          aria-pressed={entity.visible}
+                          onClick={() =>
+                            replaceEntity(
+                              { ...entity, visible: !entity.visible },
+                              entity.visible ? '隐藏对象' : '显示对象',
+                            )
+                          }
+                        >
+                          {entity.visible ? <Eye size={13} /> : <EyeOff size={13} />}
+                        </button>
+                        <button
+                          type="button"
+                          className={`${styles.entityAction} ${styles.entityDelete}`}
+                          disabled={runtimeLocked}
+                          aria-label={`删除对象 ${entity.name}`}
+                          onClick={() => deleteEntity(entity.id)}
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
+                    </div>
                   )
                 })}
                 {layerEntities.length === 0 ? (

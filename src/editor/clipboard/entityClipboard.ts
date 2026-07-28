@@ -46,6 +46,19 @@ function offsetEntity(entity: SceneEntity, offset: Vec2): SceneEntity {
         region: { ...region, points: region.points.map((point) => offsetPoint(point, offset)) },
       }
     }
+    if (region.type === 'bezierPath') {
+      return {
+        ...entity,
+        region: {
+          ...region,
+          nodes: region.nodes.map((node) => ({
+            anchor: offsetPoint(node.anchor, offset),
+            inHandle: offsetPoint(node.inHandle, offset),
+            outHandle: offsetPoint(node.outHandle, offset),
+          })),
+        },
+      }
+    }
     return { ...entity, region: { ...region, center: offsetPoint(region.center, offset) } }
   }
   return entity
@@ -62,6 +75,19 @@ export function duplicateEntities(
   for (const original of source) {
     const id = idMap.get(original.id)
     if (!id) continue
+    if (original.kind === 'groundJoint') {
+      const firstGroundId = idMap.get(original.a.groundId)
+      const secondGroundId = idMap.get(original.b.groundId)
+      if (!firstGroundId || !secondGroundId) continue
+      duplicated.push({
+        ...structuredClone(original),
+        id,
+        name: `${original.name} 副本`,
+        a: { ...original.a, groundId: firstGroundId },
+        b: { ...original.b, groundId: secondGroundId },
+      })
+      continue
+    }
     if (original.kind === 'connector') {
       const firstBodyId = idMap.get(original.a.bodyId)
       const secondBodyId = idMap.get(original.b.bodyId)

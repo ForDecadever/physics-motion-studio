@@ -10,12 +10,12 @@ export interface ViewportSize {
   height: number
 }
 
-export const MIN_PIXELS_PER_METER = 5
-export const MAX_PIXELS_PER_METER = 2_000
+export const MIN_PIXELS_PER_METER = 0.1
+export const MAX_PIXELS_PER_METER = 20_000
 
 export const defaultCamera: Camera2D = {
   center: { x: 0, y: 0 },
-  pixelsPerMeter: 100,
+  pixelsPerMeter: 20,
 }
 
 export function worldToScreen(point: Vec2, camera: Camera2D, size: ViewportSize): Vec2 {
@@ -78,6 +78,15 @@ export function getAdaptiveGridStep(
   }
 
   return magnitude * 10
+}
+
+export function getVisibleGridSteps(baseMajorStep: number, pixelsPerMeter: number) {
+  const minorStep = getAdaptiveGridStep(baseMajorStep / 10, pixelsPerMeter, 14)
+  return { minorStep, majorStep: minorStep * 5 }
+}
+
+export function getVisibleSnapStep(baseMajorStep: number, pixelsPerMeter: number): number {
+  return getVisibleGridSteps(baseMajorStep, pixelsPerMeter).minorStep
 }
 
 export function snapValue(value: number, step: number): number {

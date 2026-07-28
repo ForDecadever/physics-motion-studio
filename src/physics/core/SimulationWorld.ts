@@ -6,11 +6,19 @@ import type {
   EntityId,
   FieldEntity,
   GroundEntity,
+  GroundJointEntity,
   Material2D,
   SceneDocument,
   Vec2,
 } from '../../scene/model/types'
+import { resolveGroundJoint } from '../../scene/model/groundEndpoints'
 import type { RuntimeBodyState } from '../worker/messages'
+import {
+  buildGroundPathNetwork,
+  type GroundCollisionPathPiece,
+  type GroundNetworkSegment,
+  type GroundPathNetwork,
+} from '../../scene/model/groundPath'
 import { regionContainsPoint } from './fieldRegions'
 import {
   addForce,
@@ -21,13 +29,57 @@ import {
   scaleForce,
   springForceOnFirst,
 } from './forces'
-import { flattenGroundPoints, sampleGroundGeometry } from './groundSampling'
+import { flattenGroundPoints } from './groundSampling'
+import {
+  applyCoulombPathFriction,
+  combinedMaterialRestitution,
+  combinedPathFriction,
+  dotVectors,
+  findGroundPathContactCandidate,
+  requiredGroundSupportForceN,
+  resolveGroundPathContactFrame,
+  traverseGroundPathCenterDistance,
+  type GroundPathContactCandidate,
+  type GroundPathContactFrame,
+  type PersistentGroundPathContact,
+} from './groundPathMotion'
+import { buildGroundCollisionChains } from './groundCollisionChains'
 
 await RAPIER.init()
 
 const MIN_FIXED_TIME_STEP = 1 / 1000
 const MAX_FIXED_TIME_STEP = 1 / 30
-const ROD_POSITION_SOLVER_ITERATIONS = 4
+const ROD_SOLVER_ITERATIONS = 8
+const ROD_POSITION_TOLERANCE_M = 1e-6
+const ROD_VELOCITY_TOLERANCE_MPS = 1e-6
+const ARC_CONTACT_DISTANCE_TOLERANCE = 0.003
+const ARC_RADIAL_SEPARATION_SPEED_TOLERANCE = 0.001
+const PATH_ENTRY_SEPARATION_SPEED_TOLERANCE = 0.005
+const PATH_RELEASE_CLEARANCE_M = ARC_CONTACT_DISTANCE_TOLERANCE * 2
+const PATH_SUPPORT_FORCE_TOLERANCE_N = 1e-6
+const BLOCK_GROUND_HALF_THICKNESS_M = 0.0005
+const BLOCK_GROUND_CAP_CLEARANCE_M = 0.002
+const MAX_SPRING_PHASE_STEP = 0.1
+const MAX_SPRING_INTERNAL_SUBSTEPS = 32
+const MIN_SPRING_IMPULSE_NS = 1e-12
+const DYNAMIC_BODY_GROUP = 0x0001
+const CIRCLE_GROUND_GROUP = 0x0002
+const BOX_GROUND_GROUP = 0x0004
+
+function interactionGroups(membership: number, filter: number): number {
+  return (membership << 16) | filter
+}
+
+const CIRCLE_BODY_COLLISION_GROUPS = interactionGroups(
+  DYNAMIC_BODY_GROUP,
+  DYNAMIC_BODY_GROUP | CIRCLE_GROUND_GROUP,
+)
+const BOX_BODY_COLLISION_GROUPS = interactionGroups(
+  DYNAMIC_BODY_GROUP,
+  DYNAMIC_BODY_GROUP | BOX_GROUND_GROUP,
+)
+const CIRCLE_GROUND_COLLISION_GROUPS = interactionGroups(CIRCLE_GROUND_GROUP, DYNAMIC_BODY_GROUP)
+const BOX_GROUND_COLLISION_GROUPS = interactionGroups(BOX_GROUND_GROUP, DYNAMIC_BODY_GROUP)
 
 interface DynamicBodyRecord {
   entity: BodyEntity
@@ -35,19 +87,53 @@ interface DynamicBodyRecord {
   collider: RAPIER.Collider | null
   boundingRadius: number
   netForce: Vec2
+  pathForce: Vec2
+  constraintForce: Vec2
+  magneticFieldTesla: number
 }
 
-interface ArcGroundRecord {
-  entity: GroundEntity & { geometry: Extract<GroundEntity['geometry'], { type: 'arc' }> }
+interface GroundRecord {
+  entity: GroundEntity
+  colliders: GroundColliderRecord[]
+}
+
+interface GroundColliderRecord {
+  ground: GroundRecord
   collider: RAPIER.Collider
+  segment: GroundNetworkSegment
+  piece: GroundCollisionPathPiece
 }
 
-interface OneSidedGroundRecord {
-  points: Vec2[]
+interface BlockGroundColliderRecord {
+  colliderHandle: number
+  start: Vec2
+  end: Vec2
+  collisionStart: Vec2
+  collisionEnd: Vec2
+}
+
+interface BlockGroundColliderChain {
+  colliders: BlockGroundColliderRecord[]
+  closed: boolean
   minX: number
   minY: number
   maxX: number
   maxY: number
+}
+
+interface GroundContactProposal {
+  colliderRecord: GroundColliderRecord
+  candidate: GroundPathContactCandidate
+  contact: PersistentGroundPathContact
+  frame: GroundPathContactFrame
+  separatingSpeedMps: number
+  preStepSeparatingSpeedMps: number
+  mayProjectSolverSeparation: boolean
+  supportForceN: number
+}
+
+interface ReleasedGroundContact {
+  naturalSide: 1 | -1
 }
 
 interface PreviousBodyState {
@@ -65,13 +151,41 @@ interface RodConnectorRecord extends ConnectorRecord {
   entity: ConnectorEntity & {
     connector: Extract<ConnectorEntity['connector'], { type: 'rod' }>
   }
-  initialAngleDifference: number
 }
 
 interface SpringConnectorRecord extends ConnectorRecord {
   entity: ConnectorEntity & {
     connector: Extract<ConnectorEntity['connector'], { type: 'spring' }>
   }
+  effectiveStiffness: number
+  effectiveInverseMassUpperBound: number
+}
+
+interface SpringFrame {
+  firstEndpoint: ConnectorEndpointState
+  secondEndpoint: ConnectorEndpointState
+  direction: Vec2
+  length: number
+  effectiveInverseMass: number
+}
+
+interface ConnectorEndpointState {
+  position: Vec2
+  velocity: Vec2
+  offset: Vec2
+}
+
+interface RodFrame {
+  firstEndpoint: ConnectorEndpointState
+  secondEndpoint: ConnectorEndpointState
+  direction: Vec2
+  distance: number
+  effectiveInverseMass: number
+}
+
+interface RodAngularMomentumTarget {
+  records: DynamicBodyRecord[]
+  angularMomentum: number
 }
 
 export interface SimulationWarning {
@@ -86,85 +200,56 @@ function validatedTimeStep(value: number): number {
 }
 
 function applyMaterial(desc: RAPIER.ColliderDesc, material: Material2D): RAPIER.ColliderDesc {
-  // Rapier 的 Multiply 规则作用于两个碰撞体。存入 sqrt(mu)，接触时便得到 sqrt(mu1 * mu2)。
+  // Rapier 的 Multiply 规则作用于两个碰撞体。分别存入 sqrt(mu) 与 sqrt(e)，接触时得到几何平均值。
   return desc
     .setFriction(Math.sqrt(Math.max(0, material.friction)))
-    .setRestitution(Math.min(1, Math.max(0, material.restitution)))
+    .setRestitution(Math.sqrt(Math.min(1, Math.max(0, material.restitution))))
     .setFrictionCombineRule(RAPIER.CoefficientCombineRule.Multiply)
-    .setRestitutionCombineRule(RAPIER.CoefficientCombineRule.Max)
+    .setRestitutionCombineRule(RAPIER.CoefficientCombineRule.Multiply)
 }
 
 function colliderForBody(entity: BodyEntity): RAPIER.ColliderDesc | null {
   const shape = entity.shape
-  if (shape.type === 'particle') {
-    return shape.collisionEnabled ? RAPIER.ColliderDesc.ball(shape.collisionRadius) : null
+  if (shape.type === 'circle') {
+    return shape.collisionEnabled ? RAPIER.ColliderDesc.ball(shape.radius) : null
   }
-  if (shape.type === 'circle') return RAPIER.ColliderDesc.ball(shape.radius)
   return RAPIER.ColliderDesc.cuboid(shape.width / 2, shape.height / 2)
 }
 
-function addVectors(a: Vec2, b: Vec2): Vec2 {
-  return { x: a.x + b.x, y: a.y + b.y }
+function scaleVector(vector: Vec2, factor: number): Vec2 {
+  return { x: vector.x * factor, y: vector.y * factor }
 }
 
-function dot(a: Vec2, b: Vec2): number {
-  return a.x * b.x + a.y * b.y
+function colliderPairKey(firstHandle: number, secondHandle: number): string {
+  return firstHandle < secondHandle
+    ? `${firstHandle}:${secondHandle}`
+    : `${secondHandle}:${firstHandle}`
 }
 
-function unwrapAngleWithinArc(angle: number, startRad: number, endRad: number): number | null {
-  const lower = Math.min(startRad, endRad)
-  const upper = Math.max(startRad, endRad)
-  if (upper - lower >= Math.PI * 2 - 1e-8) return angle
-
-  const midpoint = (startRad + endRad) / 2
-  const unwrapped = angle + Math.round((midpoint - angle) / (Math.PI * 2)) * Math.PI * 2
-  return unwrapped >= lower - 1e-8 && unwrapped <= upper + 1e-8 ? unwrapped : null
+function travelTimeForDistance(
+  distanceM: number,
+  initialSpeedMps: number,
+  accelerationMps2: number,
+  maximumTimeS: number,
+): number {
+  if (distanceM <= 0 || maximumTimeS <= 0) return 0
+  if (Math.abs(accelerationMps2) <= 1e-10) {
+    return Math.min(maximumTimeS, distanceM / Math.max(initialSpeedMps, 1e-10))
+  }
+  const discriminant = initialSpeedMps ** 2 + 2 * accelerationMps2 * distanceM
+  if (discriminant < 0) return maximumTimeS
+  const denominator = initialSpeedMps + Math.sqrt(discriminant)
+  if (denominator <= 1e-10) return maximumTimeS
+  return Math.min(maximumTimeS, Math.max(0, (2 * distanceM) / denominator))
 }
 
 function collisionRadius(entity: BodyEntity): number | null {
-  if (entity.shape.type === 'circle') return entity.shape.radius
-  if (entity.shape.type === 'particle' && entity.shape.collisionEnabled) {
-    return entity.shape.collisionRadius
-  }
+  if (entity.shape.type === 'circle' && entity.shape.collisionEnabled) return entity.shape.radius
   return null
-}
-
-export function signedDistanceToPolyline(points: Vec2[], point: Vec2): number {
-  let nearestDistanceSquared = Infinity
-  let signedDistance = 0
-
-  for (let index = 1; index < points.length; index += 1) {
-    const start = points[index - 1]
-    const end = points[index]
-    if (!start || !end) continue
-    const dx = end.x - start.x
-    const dy = end.y - start.y
-    const lengthSquared = dx * dx + dy * dy
-    if (lengthSquared <= Number.EPSILON) continue
-    const projection = Math.min(
-      1,
-      Math.max(0, ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared),
-    )
-    const closestX = start.x + projection * dx
-    const closestY = start.y + projection * dy
-    const distanceSquared = (point.x - closestX) ** 2 + (point.y - closestY) ** 2
-    if (distanceSquared < nearestDistanceSquared) {
-      nearestDistanceSquared = distanceSquared
-      signedDistance =
-        (dx * (point.y - start.y) - dy * (point.x - start.x)) / Math.sqrt(lengthSquared)
-    }
-  }
-
-  return signedDistance
-}
-
-export function isOnPolylineNormalSide(points: Vec2[], point: Vec2): boolean {
-  return signedDistanceToPolyline(points, point) >= -1e-5
 }
 
 function bodyBoundingRadius(entity: BodyEntity): number {
   if (entity.shape.type === 'circle') return entity.shape.radius
-  if (entity.shape.type === 'particle') return entity.shape.collisionRadius
   return Math.hypot(entity.shape.width, entity.shape.height) / 2
 }
 
@@ -173,65 +258,155 @@ export class SimulationWorld {
   readonly warnings: SimulationWarning[] = []
 
   private world: RAPIER.World
+  private currentTimeStep: number
+  private springSubstepCount = 1
   private readonly eventQueue = new RAPIER.EventQueue(true)
+  private readonly suppressedContactPairs = new Set<string>()
+  private readonly physicsHooks: RAPIER.PhysicsHooks = {
+    filterContactPair: (collider1, collider2) =>
+      this.suppressedContactPairs.has(colliderPairKey(collider1, collider2))
+        ? RAPIER.SolverFlags.EMPTY
+        : RAPIER.SolverFlags.COMPUTE_IMPULSE,
+    filterIntersectionPair: () => true,
+  }
   private readonly dynamicBodies = new Map<EntityId, DynamicBodyRecord>()
   private readonly dynamicColliders = new Map<number, DynamicBodyRecord>()
   private readonly fields: FieldEntity[] = []
   private readonly rods: RodConnectorRecord[] = []
   private readonly springs: SpringConnectorRecord[] = []
-  private readonly oneSidedGrounds = new Map<number, OneSidedGroundRecord>()
-  private readonly arcGrounds = new Map<number, ArcGroundRecord>()
-  private readonly allowedOneSidedPairs = new Set<string>()
-  private readonly ignoredOneSidedPairs = new Set<string>()
-  private readonly frictionlessArcContacts = new Set<string>()
+  private readonly groundsById = new Map<EntityId, GroundRecord>()
+  private readonly groundsByCollider = new Map<number, GroundColliderRecord>()
+  private readonly groundCollidersByPieceId = new Map<string, GroundColliderRecord>()
+  private readonly blockGroundColliderChains: BlockGroundColliderChain[] = []
+  private groundPathNetwork!: GroundPathNetwork
+  private readonly persistentGroundContacts = new Map<EntityId, PersistentGroundPathContact>()
+  private readonly releasedContactPairs = new Map<string, ReleasedGroundContact>()
   private simulationTimeValue = 0
-  private readonly physicsHooks: RAPIER.PhysicsHooks = {
-    filterContactPair: (collider1, collider2) => {
-      if (!this.oneSidedGrounds.has(collider1) && !this.oneSidedGrounds.has(collider2)) {
-        return RAPIER.SolverFlags.COMPUTE_IMPULSE
-      }
-      const groundHandle = this.oneSidedGrounds.has(collider1) ? collider1 : collider2
-      const otherHandle = groundHandle === collider1 ? collider2 : collider1
-      if (this.allowedOneSidedPairs.has(`${groundHandle}:${otherHandle}`)) {
-        return RAPIER.SolverFlags.COMPUTE_IMPULSE
-      }
-      return null
-    },
-    filterIntersectionPair: () => true,
-  }
 
   constructor(private readonly scene: SceneDocument) {
     this.fixedTimeStep = validatedTimeStep(scene.settings.fixedTimeStep)
+    this.currentTimeStep = this.fixedTimeStep
     this.world = new RAPIER.World({ x: 0, y: 0 })
     this.world.timestep = this.fixedTimeStep
     this.buildScene()
-    this.initializeFrictionlessArcContacts()
   }
 
   get simulationTime(): number {
     return this.simulationTimeValue
   }
 
-  step(stepCount = 1): RuntimeBodyState[] {
-    const count = Math.max(0, Math.floor(stepCount))
-    for (let index = 0; index < count; index += 1) {
-      const previousBodyStates = this.captureBodyStates()
-      this.resetExternalForces()
-      this.applyFieldForces()
-      this.applyPairwiseElectrostatics()
-      this.applySpringForces()
-      this.updateOneSidedContactPairs()
-      if (this.oneSidedGrounds.size > 0) {
-        this.world.step(this.eventQueue, this.physicsHooks)
-      } else {
-        this.world.step()
+  private refreshSuppressedContactPairs(): void {
+    this.suppressedContactPairs.clear()
+    for (const [entityId, contact] of this.persistentGroundContacts) {
+      const record = this.dynamicBodies.get(entityId)
+      if (!record?.collider) continue
+      for (const groundCollider of this.colliderRecordsForContactSuppression(contact)) {
+        this.suppressedContactPairs.add(
+          colliderPairKey(groundCollider.collider.handle, record.collider.handle),
+        )
       }
-      this.stabilizeFrictionlessArcMotion(previousBodyStates)
-      this.solveRodConstraints()
-      this.updateNetForcesFromMomentum(previousBodyStates)
-      this.simulationTimeValue += this.fixedTimeStep
     }
-    return this.getBodyStates()
+    for (const record of this.dynamicBodies.values()) {
+      if (record.entity.shape.type !== 'box' || !record.collider) continue
+      const position = record.rigidBody.translation()
+      const possibleContactDistance =
+        record.boundingRadius + BLOCK_GROUND_HALF_THICKNESS_M + BLOCK_GROUND_CAP_CLEARANCE_M
+      const possibleContactDistanceSquared = possibleContactDistance ** 2
+      const velocity = record.rigidBody.linvel()
+      const sweepX = possibleContactDistance + Math.abs(velocity.x) * this.currentTimeStep
+      const sweepY = possibleContactDistance + Math.abs(velocity.y) * this.currentTimeStep
+      for (const chainRecord of this.blockGroundColliderChains) {
+        if (
+          position.x + sweepX < chainRecord.minX ||
+          position.x - sweepX > chainRecord.maxX ||
+          position.y + sweepY < chainRecord.minY ||
+          position.y - sweepY > chainRecord.maxY
+        ) {
+          continue
+        }
+        const chain = chainRecord.colliders
+        let selectedIndex = -1
+        let selectedDistanceSquared = Infinity
+        for (let index = 0; index < chain.length; index += 1) {
+          const ground = chain[index]!
+          const distanceSquared = this.blockGroundDistanceSquared(
+            position,
+            ground.start,
+            ground.end,
+          )
+          if (distanceSquared >= selectedDistanceSquared) continue
+          selectedDistanceSquared = distanceSquared
+          selectedIndex = index
+        }
+        for (let index = 0; index < chain.length; index += 1) {
+          const directIndexDistance = Math.abs(index - selectedIndex)
+          const indexDistance = chainRecord.closed
+            ? Math.min(directIndexDistance, chain.length - directIndexDistance)
+            : directIndexDistance
+          if (indexDistance <= 1) continue
+          const ground = chain[index]!
+          const collisionDistanceSquared = this.blockGroundDistanceSquared(
+            position,
+            ground.collisionStart,
+            ground.collisionEnd,
+          )
+          if (collisionDistanceSquared > possibleContactDistanceSquared) continue
+          this.suppressedContactPairs.add(
+            colliderPairKey(record.collider.handle, ground.colliderHandle),
+          )
+        }
+      }
+    }
+  }
+
+  private blockGroundDistanceSquared(position: Vec2, start: Vec2, end: Vec2): number {
+    const dx = end.x - start.x
+    const dy = end.y - start.y
+    const lengthSquared = dx * dx + dy * dy
+    if (lengthSquared <= 1e-18) return Infinity
+    const t = Math.min(
+      1,
+      Math.max(0, ((position.x - start.x) * dx + (position.y - start.y) * dy) / lengthSquared),
+    )
+    const closestX = start.x + dx * t
+    const closestY = start.y + dy * t
+    return (position.x - closestX) ** 2 + (position.y - closestY) ** 2
+  }
+
+  step(stepCount = 1): void {
+    const count = Math.max(0, Math.floor(stepCount))
+    if (count === 0) return
+    this.currentTimeStep = this.fixedTimeStep / this.springSubstepCount
+    this.world.timestep = this.currentTimeStep
+
+    try {
+      for (let index = 0; index < count; index += 1) {
+        const logicalPreviousBodyStates = this.captureBodyStates()
+        for (let substep = 0; substep < this.springSubstepCount; substep += 1) {
+          const previousBodyStates = this.captureBodyStates()
+          this.resetExternalForces()
+          this.applyFieldForces()
+          this.applyPairwiseElectrostatics()
+          this.recordSpringConstraintForces()
+          this.applySpringDampingImpulse(this.currentTimeStep / 2)
+          this.applySpringElasticImpulse(this.currentTimeStep / 2)
+          this.preparePersistentGroundContacts()
+          this.refreshSuppressedContactPairs()
+          this.world.step(this.eventQueue, this.physicsHooks)
+          this.applySpringElasticImpulse(this.currentTimeStep / 2)
+          this.applySpringDampingImpulse(this.currentTimeStep / 2)
+          this.advancePersistentGroundContacts(previousBodyStates)
+          this.refreshReleasedContactPairs()
+          this.acquirePersistentGroundContacts(previousBodyStates)
+          this.solveRodConstraints()
+        }
+        this.updateNetForcesFromMomentum(logicalPreviousBodyStates)
+        this.simulationTimeValue += this.fixedTimeStep
+      }
+    } finally {
+      this.currentTimeStep = this.fixedTimeStep
+      this.world.timestep = this.fixedTimeStep
+    }
   }
 
   getBodyStates(): RuntimeBodyState[] {
@@ -271,50 +446,139 @@ export class SimulationWorld {
     this.fields.length = 0
     this.rods.length = 0
     this.springs.length = 0
-    this.oneSidedGrounds.clear()
-    this.arcGrounds.clear()
-    this.allowedOneSidedPairs.clear()
-    this.ignoredOneSidedPairs.clear()
-    this.frictionlessArcContacts.clear()
-    this.world.free()
+    this.groundsById.clear()
+    this.groundsByCollider.clear()
+    this.groundCollidersByPieceId.clear()
+    this.blockGroundColliderChains.length = 0
+    this.persistentGroundContacts.clear()
+    this.releasedContactPairs.clear()
+    this.suppressedContactPairs.clear()
     this.eventQueue.free()
+    this.world.free()
   }
 
   private buildScene(): void {
     const enabledEntities = this.scene.entities.filter((entity) => entity.simulationEnabled)
+    this.groundPathNetwork = buildGroundPathNetwork(enabledEntities)
+    const hasCircleColliders = enabledEntities.some(
+      (entity) =>
+        entity.kind === 'body' && entity.shape.type === 'circle' && entity.shape.collisionEnabled,
+    )
+    const hasBoxColliders = enabledEntities.some(
+      (entity) => entity.kind === 'body' && entity.shape.type === 'box',
+    )
+    const maximumBoxRadius = enabledEntities.reduce(
+      (maximum, entity) =>
+        entity.kind === 'body' && entity.shape.type === 'box'
+          ? Math.max(maximum, Math.hypot(entity.shape.width, entity.shape.height) / 2)
+          : maximum,
+      0,
+    )
 
     const connectors: ConnectorEntity[] = []
+    const groundJoints: GroundJointEntity[] = []
     for (const entity of enabledEntities) {
-      if (entity.kind === 'ground') {
-        const points = sampleGroundGeometry(entity.geometry)
-        if (entity.normalFlipped) points.reverse()
-        if (points.length < 2) {
-          this.warnings.push({ message: '地面长度为零，已忽略。', entityId: entity.id })
-          continue
+      if (entity.kind !== 'ground') continue
+      this.groundsById.set(entity.id, { entity, colliders: [] })
+    }
+
+    if (hasCircleColliders) {
+      for (const segment of this.groundPathNetwork.segments) {
+        for (const piece of segment.collisionPieces) {
+          const ground = this.groundsById.get(piece.sourceGroundId)
+          if (!ground) continue
+          const points = piece.path.sample()
+          if (points.length < 2) continue
+          const collider = this.world.createCollider(
+            applyMaterial(
+              RAPIER.ColliderDesc.polyline(flattenGroundPoints(points)),
+              piece.material,
+            ).setCollisionGroups(CIRCLE_GROUND_COLLISION_GROUPS),
+          )
+          const colliderRecord: GroundColliderRecord = { ground, collider, segment, piece }
+          ground.colliders.push(colliderRecord)
+          this.groundsByCollider.set(collider.handle, colliderRecord)
+          this.groundCollidersByPieceId.set(piece.id, colliderRecord)
         }
-        let collider = applyMaterial(
-          RAPIER.ColliderDesc.polyline(flattenGroundPoints(points)),
-          entity.material,
-        )
-        if (entity.collisionSide === 'normal') {
-          collider = collider.setActiveHooks(RAPIER.ActiveHooks.FILTER_CONTACT_PAIRS)
-        }
-        const createdCollider = this.world.createCollider(collider)
-        if (entity.geometry.type === 'arc') {
-          this.arcGrounds.set(createdCollider.handle, {
-            entity: entity as ArcGroundRecord['entity'],
-            collider: createdCollider,
+      }
+    }
+
+    if (hasBoxColliders) {
+      for (const chain of buildGroundCollisionChains(this.groundPathNetwork)) {
+        const chainColliders: BlockGroundColliderRecord[] = []
+        for (let index = 0; index < chain.points.length - 1; index += 1) {
+          const start = chain.points[index]!
+          const end = chain.points[index + 1]!
+          const dx = end.x - start.x
+          const dy = end.y - start.y
+          const length = Math.hypot(dx, dy)
+          if (length <= 1e-9) continue
+          const tangentX = dx / length
+          const tangentY = dy / length
+          const startConnected = index > 0 || chain.startConnected
+          const endConnected = index < chain.points.length - 2 || chain.endConnected
+          const startExtension = startConnected
+            ? maximumBoxRadius + BLOCK_GROUND_CAP_CLEARANCE_M
+            : 0
+          const endExtension = endConnected ? maximumBoxRadius + BLOCK_GROUND_CAP_CLEARANCE_M : 0
+          const extendedStart = {
+            x: start.x - tangentX * startExtension,
+            y: start.y - tangentY * startExtension,
+          }
+          const extendedEnd = {
+            x: end.x + tangentX * endExtension,
+            y: end.y + tangentY * endExtension,
+          }
+          const extendedLength = length + startExtension + endExtension
+          const collider = this.world.createCollider(
+            applyMaterial(
+              RAPIER.ColliderDesc.cuboid(extendedLength / 2, BLOCK_GROUND_HALF_THICKNESS_M)
+                .setTranslation(
+                  (extendedStart.x + extendedEnd.x) / 2,
+                  (extendedStart.y + extendedEnd.y) / 2,
+                )
+                .setRotation(Math.atan2(dy, dx)),
+              chain.material,
+            ).setCollisionGroups(BOX_GROUND_COLLISION_GROUPS),
+          )
+          chainColliders.push({
+            colliderHandle: collider.handle,
+            start,
+            end,
+            collisionStart: extendedStart,
+            collisionEnd: extendedEnd,
           })
         }
-        if (entity.collisionSide === 'normal') {
-          this.oneSidedGrounds.set(createdCollider.handle, {
-            points,
-            minX: Math.min(...points.map((point) => point.x)),
-            minY: Math.min(...points.map((point) => point.y)),
-            maxX: Math.max(...points.map((point) => point.x)),
-            maxY: Math.max(...points.map((point) => point.y)),
+        if (chainColliders.length > 3) {
+          const collisionPoints = chainColliders.flatMap((record) => [
+            record.collisionStart,
+            record.collisionEnd,
+          ])
+          this.blockGroundColliderChains.push({
+            colliders: chainColliders,
+            closed: chain.closed,
+            minX:
+              Math.min(...collisionPoints.map((point) => point.x)) - BLOCK_GROUND_HALF_THICKNESS_M,
+            minY:
+              Math.min(...collisionPoints.map((point) => point.y)) - BLOCK_GROUND_HALF_THICKNESS_M,
+            maxX:
+              Math.max(...collisionPoints.map((point) => point.x)) + BLOCK_GROUND_HALF_THICKNESS_M,
+            maxY:
+              Math.max(...collisionPoints.map((point) => point.y)) + BLOCK_GROUND_HALF_THICKNESS_M,
           })
         }
+      }
+    }
+
+    for (const ground of this.groundsById.values()) {
+      if (!this.groundPathNetwork.groundPaths.has(ground.entity.id)) {
+        this.warnings.push({ message: '地面长度为零，已忽略。', entityId: ground.entity.id })
+      }
+    }
+
+    for (const entity of enabledEntities) {
+      if (entity.kind === 'groundJoint') {
+        groundJoints.push(entity)
       } else if (entity.kind === 'body') {
         this.createBody(entity)
       } else if (entity.kind === 'field') {
@@ -325,6 +589,61 @@ export class SimulationWorld {
     }
 
     for (const connector of connectors) this.createConnector(connector)
+    this.configureSpringIntegration()
+    this.validateGroundJoints(enabledEntities, groundJoints)
+  }
+
+  private validateGroundJoints(
+    enabledEntities: SceneDocument['entities'],
+    joints: GroundJointEntity[],
+  ): void {
+    for (const joint of joints) {
+      const resolved = resolveGroundJoint(enabledEntities, joint)
+      if (resolved.issue || !resolved.a || !resolved.b || !resolved.position) {
+        const reason =
+          resolved.issue === 'same-ground'
+            ? '两个端点属于同一块地面'
+            : resolved.issue === 'endpoint-conflict'
+              ? '至少一个端点已被其他连接点占用'
+              : resolved.issue === 'degenerate-tangent'
+                ? '端点切线无法确定'
+                : '引用的地面不存在'
+        this.warnings.push({
+          message: `地面连接点无效（${reason}），已按普通独立地面处理。`,
+          entityId: joint.id,
+        })
+        continue
+      }
+
+      const jointPath = this.groundPathNetwork.jointPaths.get(joint.id)
+      if (jointPath?.issue) {
+        const reason =
+          jointPath.issue === 'angle-too-small'
+            ? '两块地面的方向几乎重合'
+            : jointPath.issue === 'linear-zero-length'
+              ? '反向端点重合，直线长度为零'
+              : '无法生成满足曲率、长度与无自交要求的安全过渡'
+        this.warnings.push({
+          message: `地面连接点无效（${reason}），已保留两块独立地面。`,
+          entityId: joint.id,
+        })
+        continue
+      }
+
+      const firstGround = this.groundsById.get(resolved.a.ground.id)
+      const secondGround = this.groundsById.get(resolved.b.ground.id)
+      if (
+        !firstGround ||
+        !secondGround ||
+        !this.groundPathNetwork.groundPaths.has(resolved.a.ground.id) ||
+        !this.groundPathNetwork.groundPaths.has(resolved.b.ground.id)
+      ) {
+        this.warnings.push({
+          message: '地面连接点引用的地面没有有效碰撞几何，已忽略。',
+          entityId: joint.id,
+        })
+      }
+    }
   }
 
   private createBody(entity: BodyEntity): void {
@@ -332,8 +651,9 @@ export class SimulationWorld {
       .setTranslation(entity.transform.position.x, entity.transform.position.y)
       .setRotation(entity.transform.angleRad)
       .setLinvel(entity.initialVelocity.x, entity.initialVelocity.y)
-      .setAngvel(entity.initialAngularVelocityRad)
+      .setAngvel(entity.rotationEnabled ? entity.initialAngularVelocityRad : 0)
       .setCcdEnabled(entity.continuousCollisionDetection)
+    if (!entity.rotationEnabled) bodyDesc.lockRotations()
     const rigidBody = this.world.createRigidBody(bodyDesc)
     const colliderDesc = colliderForBody(entity)
     const record: DynamicBodyRecord = {
@@ -342,17 +662,28 @@ export class SimulationWorld {
       collider: null,
       boundingRadius: bodyBoundingRadius(entity),
       netForce: { x: 0, y: 0 },
+      pathForce: { x: 0, y: 0 },
+      constraintForce: { x: 0, y: 0 },
+      magneticFieldTesla: 0,
     }
 
     if (colliderDesc) {
-      const collider = this.world.createCollider(
-        applyMaterial(colliderDesc, entity.material).setMass(entity.massKg),
-        rigidBody,
-      )
+      const preparedCollider = applyMaterial(colliderDesc, entity.material)
+        .setMass(entity.massKg)
+        .setCollisionGroups(
+          entity.shape.type === 'circle' ? CIRCLE_BODY_COLLISION_GROUPS : BOX_BODY_COLLISION_GROUPS,
+        )
+      preparedCollider.setActiveHooks(RAPIER.ActiveHooks.FILTER_CONTACT_PAIRS)
+      const collider = this.world.createCollider(preparedCollider, rigidBody)
       record.collider = collider
       this.dynamicColliders.set(collider.handle, record)
     } else {
       rigidBody.setAdditionalMass(entity.massKg, false)
+    }
+    rigidBody.recomputeMassPropertiesFromColliders()
+    if (!entity.rotationEnabled) {
+      rigidBody.lockRotations(true, false)
+      rigidBody.setAngvel(0, false)
     }
     this.dynamicBodies.set(entity.id, record)
   }
@@ -373,17 +704,112 @@ export class SimulationWorld {
       )
       this.world.createImpulseJoint(joint, first.rigidBody, second.rigidBody, true)
     } else if (entity.connector.type === 'rod') {
-      this.rods.push({
+      const rod = {
         entity: entity as RodConnectorRecord['entity'],
         first,
         second,
-        initialAngleDifference: second.rigidBody.rotation() - first.rigidBody.rotation(),
-      })
+      }
+      if (entity.connector.freeRotation) {
+        this.rods.push(rod)
+      } else {
+        this.createFixedRodJoint(rod)
+      }
     } else {
       this.springs.push({
         entity: entity as SpringConnectorRecord['entity'],
         first,
         second,
+        effectiveStiffness: entity.connector.stiffness,
+        effectiveInverseMassUpperBound: 0,
+      })
+    }
+  }
+
+  private createFixedRodJoint(rod: RodConnectorRecord): void {
+    const firstEndpoint = this.connectorEndpointState(rod.first, rod.entity.a.localAnchor)
+    const secondEndpoint = this.connectorEndpointState(rod.second, rod.entity.b.localAnchor)
+    const delta = {
+      x: secondEndpoint.position.x - firstEndpoint.position.x,
+      y: secondEndpoint.position.y - firstEndpoint.position.y,
+    }
+    const distance = Math.hypot(delta.x, delta.y)
+    const firstAngle = rod.first.rigidBody.rotation()
+    const secondAngle = rod.second.rigidBody.rotation()
+    const direction =
+      distance > Number.EPSILON
+        ? { x: delta.x / distance, y: delta.y / distance }
+        : { x: Math.cos(firstAngle), y: Math.sin(firstAngle) }
+    const desiredOffsetWorld = {
+      x: direction.x * rod.entity.connector.length,
+      y: direction.y * rod.entity.connector.length,
+    }
+    const cosine = Math.cos(secondAngle)
+    const sine = Math.sin(secondAngle)
+    const desiredOffsetLocalToSecond = {
+      x: cosine * desiredOffsetWorld.x + sine * desiredOffsetWorld.y,
+      y: -sine * desiredOffsetWorld.x + cosine * desiredOffsetWorld.y,
+    }
+    const secondVirtualAnchor = {
+      x: rod.entity.b.localAnchor.x - desiredOffsetLocalToSecond.x,
+      y: rod.entity.b.localAnchor.y - desiredOffsetLocalToSecond.y,
+    }
+    const fixed = RAPIER.JointData.fixed(
+      rod.entity.a.localAnchor,
+      0,
+      secondVirtualAnchor,
+      firstAngle - secondAngle,
+    )
+    const joint = this.world.createImpulseJoint(
+      fixed,
+      rod.first.rigidBody,
+      rod.second.rigidBody,
+      true,
+    )
+    joint.setContactsEnabled(true)
+  }
+
+  private configureSpringIntegration(): void {
+    let requiredSubsteps = 1
+    for (const spring of this.springs) {
+      const firstInverseMass = spring.first.rigidBody.effectiveInvMass()
+      const secondInverseMass = spring.second.rigidBody.effectiveInvMass()
+      const firstInertia = spring.first.rigidBody.effectiveAngularInertia()
+      const secondInertia = spring.second.rigidBody.effectiveAngularInertia()
+      const firstAnchorRadiusSquared =
+        spring.entity.a.localAnchor.x ** 2 + spring.entity.a.localAnchor.y ** 2
+      const secondAnchorRadiusSquared =
+        spring.entity.b.localAnchor.x ** 2 + spring.entity.b.localAnchor.y ** 2
+      const inverseMassUpperBound =
+        Math.max(firstInverseMass.x, firstInverseMass.y) +
+        Math.max(secondInverseMass.x, secondInverseMass.y) +
+        (firstInertia > Number.EPSILON ? firstAnchorRadiusSquared / firstInertia : 0) +
+        (secondInertia > Number.EPSILON ? secondAnchorRadiusSquared / secondInertia : 0)
+      spring.effectiveInverseMassUpperBound = inverseMassUpperBound
+      if (inverseMassUpperBound <= Number.EPSILON || spring.effectiveStiffness === 0) continue
+      const phaseStep =
+        this.fixedTimeStep * Math.sqrt(spring.effectiveStiffness) * Math.sqrt(inverseMassUpperBound)
+      const springSubsteps = Number.isFinite(phaseStep)
+        ? Math.max(1, Math.ceil(phaseStep / MAX_SPRING_PHASE_STEP))
+        : MAX_SPRING_INTERNAL_SUBSTEPS + 1
+      requiredSubsteps = Math.max(requiredSubsteps, springSubsteps)
+    }
+
+    this.springSubstepCount = Math.min(requiredSubsteps, MAX_SPRING_INTERNAL_SUBSTEPS)
+    for (const spring of this.springs) {
+      const inverseMass = spring.effectiveInverseMassUpperBound
+      if (inverseMass <= Number.EPSILON) continue
+      const maximumStiffness =
+        (MAX_SPRING_PHASE_STEP * this.springSubstepCount) ** 2 /
+        (this.fixedTimeStep ** 2 * inverseMass)
+      if (spring.effectiveStiffness <= maximumStiffness) continue
+      const requestedStiffness = spring.effectiveStiffness
+      spring.effectiveStiffness = maximumStiffness
+      this.warnings.push({
+        message:
+          `弹簧刚度 ${requestedStiffness.toPrecision(6)} N/m 超出实时稳定范围，` +
+          `本次模拟使用 ${maximumStiffness.toPrecision(6)} N/m 和 ` +
+          `${MAX_SPRING_INTERNAL_SUBSTEPS} 个内部子步。`,
+        entityId: spring.entity.id,
       })
     }
   }
@@ -391,6 +817,9 @@ export class SimulationWorld {
   private resetExternalForces(): void {
     for (const record of this.dynamicBodies.values()) {
       record.netForce = { x: 0, y: 0 }
+      record.pathForce = { x: 0, y: 0 }
+      record.constraintForce = { x: 0, y: 0 }
+      record.magneticFieldTesla = 0
       record.rigidBody.resetForces(false)
       record.rigidBody.resetTorques(false)
     }
@@ -398,6 +827,8 @@ export class SimulationWorld {
 
   private applyForceToBody(record: DynamicBodyRecord, force: Vec2, point?: Vec2): void {
     record.netForce = addForce(record.netForce, force)
+    record.pathForce = addForce(record.pathForce, force)
+    record.constraintForce = addForce(record.constraintForce, force)
     if (point) record.rigidBody.addForceAtPoint(force, point, false)
     else record.rigidBody.addForce(force, false)
   }
@@ -420,20 +851,22 @@ export class SimulationWorld {
       }
 
       if (combinedMagneticField !== 0 && record.entity.chargeC !== 0) {
-        record.netForce = addForce(
-          record.netForce,
-          magneticForce(record.entity.chargeC, velocity, combinedMagneticField),
-        )
-        record.rigidBody.setLinvel(
-          rotateVelocityInMagneticField(
-            velocity,
-            record.entity.chargeC,
-            combinedMagneticField,
-            record.entity.massKg,
-            this.fixedTimeStep,
-          ),
-          true,
-        )
+        record.magneticFieldTesla = combinedMagneticField
+        const force = magneticForce(record.entity.chargeC, velocity, combinedMagneticField)
+        record.netForce = addForce(record.netForce, force)
+        record.constraintForce = addForce(record.constraintForce, force)
+        if (!this.persistentGroundContacts.has(record.entity.id)) {
+          record.rigidBody.setLinvel(
+            rotateVelocityInMagneticField(
+              velocity,
+              record.entity.chargeC,
+              combinedMagneticField,
+              record.entity.massKg,
+              this.currentTimeStep,
+            ),
+            true,
+          )
+        }
       }
     }
   }
@@ -466,7 +899,7 @@ export class SimulationWorld {
   private connectorEndpointState(
     record: DynamicBodyRecord,
     localAnchor: Vec2,
-  ): { position: Vec2; velocity: Vec2 } {
+  ): ConnectorEndpointState {
     const angle = record.rigidBody.rotation()
     const cosine = Math.cos(angle)
     const sine = Math.sin(angle)
@@ -476,17 +909,328 @@ export class SimulationWorld {
     }
     const translation = record.rigidBody.translation()
     const linearVelocity = record.rigidBody.linvel()
-    const angularVelocity = record.rigidBody.angvel()
+    const angularVelocity = record.entity.rotationEnabled ? record.rigidBody.angvel() : 0
     return {
       position: { x: translation.x + offset.x, y: translation.y + offset.y },
       velocity: {
         x: linearVelocity.x - angularVelocity * offset.y,
         y: linearVelocity.y + angularVelocity * offset.x,
       },
+      offset,
     }
   }
 
-  private applySpringForces(): void {
+  private directionalInverseMassAtPoint(
+    record: DynamicBodyRecord,
+    point: Vec2,
+    direction: Vec2,
+  ): number {
+    const inverseMass = record.rigidBody.effectiveInvMass()
+    const translational = direction.x ** 2 * inverseMass.x + direction.y ** 2 * inverseMass.y
+    const center = record.rigidBody.translation()
+    const offset = { x: point.x - center.x, y: point.y - center.y }
+    const leverArm = offset.x * direction.y - offset.y * direction.x
+    const inertia = record.rigidBody.effectiveAngularInertia()
+    const rotational = inertia > Number.EPSILON ? leverArm ** 2 / inertia : 0
+    return translational + rotational
+  }
+
+  private setConstrainedAngularVelocity(
+    record: DynamicBodyRecord,
+    angularVelocityRad: number,
+    wakeUp = true,
+  ): void {
+    record.rigidBody.setAngvel(
+      record.entity.rotationEnabled && Number.isFinite(angularVelocityRad) ? angularVelocityRad : 0,
+      wakeUp,
+    )
+  }
+
+  private rodFrame(rod: RodConnectorRecord): RodFrame {
+    const firstEndpoint = this.connectorEndpointState(rod.first, rod.entity.a.localAnchor)
+    const secondEndpoint = this.connectorEndpointState(rod.second, rod.entity.b.localAnchor)
+    const delta = {
+      x: secondEndpoint.position.x - firstEndpoint.position.x,
+      y: secondEndpoint.position.y - firstEndpoint.position.y,
+    }
+    const distance = Math.hypot(delta.x, delta.y)
+    const firstAngle = rod.first.rigidBody.rotation()
+    const direction =
+      distance > Number.EPSILON
+        ? { x: delta.x / distance, y: delta.y / distance }
+        : { x: Math.cos(firstAngle), y: Math.sin(firstAngle) }
+    return {
+      firstEndpoint,
+      secondEndpoint,
+      direction,
+      distance,
+      effectiveInverseMass:
+        this.directionalInverseMassAtPoint(rod.first, firstEndpoint.position, direction) +
+        this.directionalInverseMassAtPoint(rod.second, secondEndpoint.position, direction),
+    }
+  }
+
+  private applyRodPositionImpulse(
+    record: DynamicBodyRecord,
+    endpoint: ConnectorEndpointState,
+    direction: Vec2,
+    jacobianSign: -1 | 1,
+    impulseMagnitude: number,
+  ): void {
+    const signedImpulse = jacobianSign * impulseMagnitude
+    const inverseMass = record.rigidBody.effectiveInvMass()
+    const position = record.rigidBody.translation()
+    record.rigidBody.setTranslation(
+      {
+        x: position.x + direction.x * signedImpulse * inverseMass.x,
+        y: position.y + direction.y * signedImpulse * inverseMass.y,
+      },
+      true,
+    )
+
+    const inertia = record.rigidBody.effectiveAngularInertia()
+    if (!record.entity.rotationEnabled || inertia <= Number.EPSILON) return
+    const leverArm = endpoint.offset.x * direction.y - endpoint.offset.y * direction.x
+    record.rigidBody.setRotation(
+      record.rigidBody.rotation() + (signedImpulse * leverArm) / inertia,
+      true,
+    )
+  }
+
+  private rodBodyComponents(): DynamicBodyRecord[][] {
+    const neighbors = new Map<DynamicBodyRecord, Set<DynamicBodyRecord>>()
+    for (const rod of this.rods) {
+      const firstNeighbors = neighbors.get(rod.first) ?? new Set<DynamicBodyRecord>()
+      const secondNeighbors = neighbors.get(rod.second) ?? new Set<DynamicBodyRecord>()
+      firstNeighbors.add(rod.second)
+      secondNeighbors.add(rod.first)
+      neighbors.set(rod.first, firstNeighbors)
+      neighbors.set(rod.second, secondNeighbors)
+    }
+
+    const components: DynamicBodyRecord[][] = []
+    const visited = new Set<DynamicBodyRecord>()
+    for (const start of neighbors.keys()) {
+      if (visited.has(start)) continue
+      const component: DynamicBodyRecord[] = []
+      const pending = [start]
+      visited.add(start)
+      while (pending.length > 0) {
+        const record = pending.pop()
+        if (!record) continue
+        component.push(record)
+        for (const neighbor of neighbors.get(record) ?? []) {
+          if (visited.has(neighbor)) continue
+          visited.add(neighbor)
+          pending.push(neighbor)
+        }
+      }
+      components.push(component)
+    }
+    return components
+  }
+
+  private componentCenterOfMass(records: readonly DynamicBodyRecord[]): Vec2 {
+    let totalMass = 0
+    let weightedX = 0
+    let weightedY = 0
+    for (const record of records) {
+      const position = record.rigidBody.translation()
+      totalMass += record.entity.massKg
+      weightedX += position.x * record.entity.massKg
+      weightedY += position.y * record.entity.massKg
+    }
+    return totalMass > 0 ? { x: weightedX / totalMass, y: weightedY / totalMass } : { x: 0, y: 0 }
+  }
+
+  private componentAngularMomentum(
+    records: readonly DynamicBodyRecord[],
+    centerOfMass: Vec2,
+  ): number {
+    let angularMomentum = 0
+    for (const record of records) {
+      const position = record.rigidBody.translation()
+      const velocity = record.rigidBody.linvel()
+      const offset = {
+        x: position.x - centerOfMass.x,
+        y: position.y - centerOfMass.y,
+      }
+      angularMomentum +=
+        record.entity.massKg * (offset.x * velocity.y - offset.y * velocity.x) +
+        record.rigidBody.effectiveAngularInertia() * record.rigidBody.angvel()
+    }
+    return angularMomentum
+  }
+
+  private captureRodAngularMomentumTargets(): RodAngularMomentumTarget[] {
+    return this.rodBodyComponents()
+      .filter((records) => records.every((record) => record.entity.rotationEnabled))
+      .map((records) => {
+        const centerOfMass = this.componentCenterOfMass(records)
+        return {
+          records,
+          angularMomentum: this.componentAngularMomentum(records, centerOfMass),
+        }
+      })
+  }
+
+  private restoreRodAngularMomentum(targets: readonly RodAngularMomentumTarget[]): void {
+    for (const target of targets) {
+      const centerOfMass = this.componentCenterOfMass(target.records)
+      const currentAngularMomentum = this.componentAngularMomentum(target.records, centerOfMass)
+      const angularMomentumError = target.angularMomentum - currentAngularMomentum
+      if (Math.abs(angularMomentumError) <= Number.EPSILON) continue
+
+      const componentRecords = new Set(target.records)
+      const correctionMode = new Map<
+        DynamicBodyRecord,
+        { linearVelocity: Vec2; angularVelocity: number }
+      >()
+      for (const record of target.records) {
+        const position = record.rigidBody.translation()
+        correctionMode.set(record, {
+          linearVelocity: {
+            x: -(position.y - centerOfMass.y),
+            y: position.x - centerOfMass.x,
+          },
+          angularVelocity: 0,
+        })
+      }
+
+      for (let iteration = 0; iteration < ROD_SOLVER_ITERATIONS; iteration += 1) {
+        let maximumRelativeSpeed = 0
+        for (const rod of this.rods) {
+          if (!componentRecords.has(rod.first) || !componentRecords.has(rod.second)) continue
+          const frame = this.rodFrame(rod)
+          const firstMode = correctionMode.get(rod.first)
+          const secondMode = correctionMode.get(rod.second)
+          if (!firstMode || !secondMode) continue
+          const firstEndpointVelocity = {
+            x:
+              firstMode.linearVelocity.x - firstMode.angularVelocity * frame.firstEndpoint.offset.y,
+            y:
+              firstMode.linearVelocity.y + firstMode.angularVelocity * frame.firstEndpoint.offset.x,
+          }
+          const secondEndpointVelocity = {
+            x:
+              secondMode.linearVelocity.x -
+              secondMode.angularVelocity * frame.secondEndpoint.offset.y,
+            y:
+              secondMode.linearVelocity.y +
+              secondMode.angularVelocity * frame.secondEndpoint.offset.x,
+          }
+          const relativeSpeed =
+            (secondEndpointVelocity.x - firstEndpointVelocity.x) * frame.direction.x +
+            (secondEndpointVelocity.y - firstEndpointVelocity.y) * frame.direction.y
+          maximumRelativeSpeed = Math.max(maximumRelativeSpeed, Math.abs(relativeSpeed))
+          if (
+            Math.abs(relativeSpeed) <= ROD_VELOCITY_TOLERANCE_MPS ||
+            frame.effectiveInverseMass <= Number.EPSILON
+          ) {
+            continue
+          }
+
+          const impulseMagnitude = -relativeSpeed / frame.effectiveInverseMass
+          const firstInverseMass = rod.first.rigidBody.effectiveInvMass()
+          const secondInverseMass = rod.second.rigidBody.effectiveInvMass()
+          firstMode.linearVelocity.x -= frame.direction.x * impulseMagnitude * firstInverseMass.x
+          firstMode.linearVelocity.y -= frame.direction.y * impulseMagnitude * firstInverseMass.y
+          secondMode.linearVelocity.x += frame.direction.x * impulseMagnitude * secondInverseMass.x
+          secondMode.linearVelocity.y += frame.direction.y * impulseMagnitude * secondInverseMass.y
+
+          const firstInertia = rod.first.rigidBody.effectiveAngularInertia()
+          const secondInertia = rod.second.rigidBody.effectiveAngularInertia()
+          const firstLever =
+            frame.firstEndpoint.offset.x * frame.direction.y -
+            frame.firstEndpoint.offset.y * frame.direction.x
+          const secondLever =
+            frame.secondEndpoint.offset.x * frame.direction.y -
+            frame.secondEndpoint.offset.y * frame.direction.x
+          if (firstInertia > Number.EPSILON) {
+            firstMode.angularVelocity -= (impulseMagnitude * firstLever) / firstInertia
+          }
+          if (secondInertia > Number.EPSILON) {
+            secondMode.angularVelocity += (impulseMagnitude * secondLever) / secondInertia
+          }
+        }
+        if (maximumRelativeSpeed <= ROD_VELOCITY_TOLERANCE_MPS) break
+      }
+
+      let modeAngularMomentum = 0
+      for (const record of target.records) {
+        const mode = correctionMode.get(record)
+        if (!mode) continue
+        const position = record.rigidBody.translation()
+        const offset = {
+          x: position.x - centerOfMass.x,
+          y: position.y - centerOfMass.y,
+        }
+        modeAngularMomentum +=
+          record.entity.massKg *
+            (offset.x * mode.linearVelocity.y - offset.y * mode.linearVelocity.x) +
+          record.rigidBody.effectiveAngularInertia() * mode.angularVelocity
+      }
+      if (Math.abs(modeAngularMomentum) <= Number.EPSILON) continue
+      const correctionScale = angularMomentumError / modeAngularMomentum
+
+      for (const record of target.records) {
+        const mode = correctionMode.get(record)
+        if (!mode) continue
+        const velocity = record.rigidBody.linvel()
+        record.rigidBody.setLinvel(
+          {
+            x: velocity.x + correctionScale * mode.linearVelocity.x,
+            y: velocity.y + correctionScale * mode.linearVelocity.y,
+          },
+          true,
+        )
+        this.setConstrainedAngularVelocity(
+          record,
+          record.rigidBody.angvel() + correctionScale * mode.angularVelocity,
+        )
+      }
+    }
+  }
+
+  private springFrame(spring: SpringConnectorRecord): SpringFrame | null {
+    const firstEndpoint = this.connectorEndpointState(spring.first, spring.entity.a.localAnchor)
+    const secondEndpoint = this.connectorEndpointState(spring.second, spring.entity.b.localAnchor)
+    const delta = {
+      x: secondEndpoint.position.x - firstEndpoint.position.x,
+      y: secondEndpoint.position.y - firstEndpoint.position.y,
+    }
+    const length = Math.hypot(delta.x, delta.y)
+    if (length <= Number.EPSILON) return null
+    const direction = { x: delta.x / length, y: delta.y / length }
+    return {
+      firstEndpoint,
+      secondEndpoint,
+      direction,
+      length,
+      effectiveInverseMass:
+        this.directionalInverseMassAtPoint(spring.first, firstEndpoint.position, direction) +
+        this.directionalInverseMassAtPoint(spring.second, secondEndpoint.position, direction),
+    }
+  }
+
+  private applySpringImpulse(
+    spring: SpringConnectorRecord,
+    impulseMagnitude: number,
+    frame: SpringFrame,
+  ): void {
+    if (!Number.isFinite(impulseMagnitude) || Math.abs(impulseMagnitude) <= MIN_SPRING_IMPULSE_NS) {
+      return
+    }
+    const impulse = scaleForce(frame.direction, impulseMagnitude)
+    spring.first.rigidBody.applyImpulseAtPoint(impulse, frame.firstEndpoint.position, true)
+    spring.second.rigidBody.applyImpulseAtPoint(
+      scaleForce(impulse, -1),
+      frame.secondEndpoint.position,
+      true,
+    )
+  }
+
+  private recordSpringConstraintForces(): void {
     for (const spring of this.springs) {
       const firstEndpoint = this.connectorEndpointState(spring.first, spring.entity.a.localAnchor)
       const secondEndpoint = this.connectorEndpointState(spring.second, spring.entity.b.localAnchor)
@@ -496,104 +1240,105 @@ export class SimulationWorld {
         secondEndpoint.position,
         secondEndpoint.velocity,
         spring.entity.connector.restLength,
-        spring.entity.connector.stiffness,
+        spring.effectiveStiffness,
         spring.entity.connector.damping,
       )
-      this.applyForceToBody(spring.first, force, firstEndpoint.position)
-      this.applyForceToBody(spring.second, scaleForce(force, -1), secondEndpoint.position)
+      spring.first.constraintForce = addForce(spring.first.constraintForce, force)
+      spring.second.constraintForce = addForce(spring.second.constraintForce, scaleForce(force, -1))
+    }
+  }
+
+  private applySpringElasticImpulse(durationSeconds: number): void {
+    for (const spring of this.springs) {
+      if (spring.effectiveStiffness === 0) continue
+      const frame = this.springFrame(spring)
+      if (!frame) continue
+      const forceMagnitude =
+        spring.effectiveStiffness * (frame.length - spring.entity.connector.restLength)
+      this.applySpringImpulse(spring, forceMagnitude * durationSeconds, frame)
+    }
+  }
+
+  private applySpringDampingImpulse(durationSeconds: number): void {
+    for (const spring of this.springs) {
+      const damping = spring.entity.connector.damping
+      if (damping === 0) continue
+      const frame = this.springFrame(spring)
+      if (!frame || frame.effectiveInverseMass <= Number.EPSILON) continue
+      const relativeSpeed =
+        (frame.secondEndpoint.velocity.x - frame.firstEndpoint.velocity.x) * frame.direction.x +
+        (frame.secondEndpoint.velocity.y - frame.firstEndpoint.velocity.y) * frame.direction.y
+      const decay = Math.exp(-damping * frame.effectiveInverseMass * durationSeconds)
+      const impulseMagnitude = (relativeSpeed * (1 - decay)) / frame.effectiveInverseMass
+      this.applySpringImpulse(spring, impulseMagnitude, frame)
     }
   }
 
   private solveRodConstraints(): void {
-    for (let iteration = 0; iteration < ROD_POSITION_SOLVER_ITERATIONS; iteration += 1) {
+    const angularMomentumTargets = this.captureRodAngularMomentumTargets()
+    for (let iteration = 0; iteration < ROD_SOLVER_ITERATIONS; iteration += 1) {
+      let maximumError = 0
       for (const rod of this.rods) {
-        const firstEndpoint = this.connectorEndpointState(rod.first, rod.entity.a.localAnchor)
-        const secondEndpoint = this.connectorEndpointState(rod.second, rod.entity.b.localAnchor)
-        const delta = {
-          x: secondEndpoint.position.x - firstEndpoint.position.x,
-          y: secondEndpoint.position.y - firstEndpoint.position.y,
+        const frame = this.rodFrame(rod)
+        const error = frame.distance - rod.entity.connector.length
+        maximumError = Math.max(maximumError, Math.abs(error))
+        if (
+          Math.abs(error) <= ROD_POSITION_TOLERANCE_M ||
+          frame.effectiveInverseMass <= Number.EPSILON
+        ) {
+          continue
         }
-        const distance = Math.hypot(delta.x, delta.y)
-        if (distance <= Number.EPSILON) continue
-        const direction = { x: delta.x / distance, y: delta.y / distance }
-        const inverseMassFirst = 1 / rod.first.entity.massKg
-        const inverseMassSecond = 1 / rod.second.entity.massKg
-        const inverseMassSum = inverseMassFirst + inverseMassSecond
-        const error = distance - rod.entity.connector.length
-        const firstCorrection = (error * inverseMassFirst) / inverseMassSum
-        const secondCorrection = (error * inverseMassSecond) / inverseMassSum
-        const firstPosition = rod.first.rigidBody.translation()
-        const secondPosition = rod.second.rigidBody.translation()
-        rod.first.rigidBody.setTranslation(
-          {
-            x: firstPosition.x + direction.x * firstCorrection,
-            y: firstPosition.y + direction.y * firstCorrection,
-          },
-          true,
+        const impulseMagnitude = -error / frame.effectiveInverseMass
+        this.applyRodPositionImpulse(
+          rod.first,
+          frame.firstEndpoint,
+          frame.direction,
+          -1,
+          impulseMagnitude,
         )
-        rod.second.rigidBody.setTranslation(
-          {
-            x: secondPosition.x - direction.x * secondCorrection,
-            y: secondPosition.y - direction.y * secondCorrection,
-          },
-          true,
+        this.applyRodPositionImpulse(
+          rod.second,
+          frame.secondEndpoint,
+          frame.direction,
+          1,
+          impulseMagnitude,
         )
       }
+      if (maximumError <= ROD_POSITION_TOLERANCE_M) break
     }
 
-    for (const rod of this.rods) {
-      const firstEndpoint = this.connectorEndpointState(rod.first, rod.entity.a.localAnchor)
-      const secondEndpoint = this.connectorEndpointState(rod.second, rod.entity.b.localAnchor)
-      const delta = {
-        x: secondEndpoint.position.x - firstEndpoint.position.x,
-        y: secondEndpoint.position.y - firstEndpoint.position.y,
-      }
-      const distance = Math.hypot(delta.x, delta.y)
-      if (distance <= Number.EPSILON) continue
-      const direction = { x: delta.x / distance, y: delta.y / distance }
-      const inverseMassFirst = 1 / rod.first.entity.massKg
-      const inverseMassSecond = 1 / rod.second.entity.massKg
-      const inverseMassSum = inverseMassFirst + inverseMassSecond
-      const relativeSpeed =
-        (secondEndpoint.velocity.x - firstEndpoint.velocity.x) * direction.x +
-        (secondEndpoint.velocity.y - firstEndpoint.velocity.y) * direction.y
-      const firstVelocity = rod.first.rigidBody.linvel()
-      const secondVelocity = rod.second.rigidBody.linvel()
-      rod.first.rigidBody.setLinvel(
-        {
-          x: firstVelocity.x + direction.x * relativeSpeed * (inverseMassFirst / inverseMassSum),
-          y: firstVelocity.y + direction.y * relativeSpeed * (inverseMassFirst / inverseMassSum),
-        },
-        true,
-      )
-      rod.second.rigidBody.setLinvel(
-        {
-          x: secondVelocity.x - direction.x * relativeSpeed * (inverseMassSecond / inverseMassSum),
-          y: secondVelocity.y - direction.y * relativeSpeed * (inverseMassSecond / inverseMassSum),
-        },
-        true,
-      )
-
-      if (!rod.entity.connector.freeRotation) {
-        const firstAngle = rod.first.rigidBody.rotation()
-        const secondAngle = rod.second.rigidBody.rotation()
-        const angleError = secondAngle - firstAngle - rod.initialAngleDifference
-        rod.first.rigidBody.setRotation(
-          firstAngle + angleError * (inverseMassFirst / inverseMassSum),
+    for (let iteration = 0; iteration < ROD_SOLVER_ITERATIONS; iteration += 1) {
+      let maximumRelativeSpeed = 0
+      for (const rod of this.rods) {
+        const frame = this.rodFrame(rod)
+        const relativeSpeed =
+          (frame.secondEndpoint.velocity.x - frame.firstEndpoint.velocity.x) * frame.direction.x +
+          (frame.secondEndpoint.velocity.y - frame.firstEndpoint.velocity.y) * frame.direction.y
+        maximumRelativeSpeed = Math.max(maximumRelativeSpeed, Math.abs(relativeSpeed))
+        if (
+          Math.abs(relativeSpeed) <= ROD_VELOCITY_TOLERANCE_MPS ||
+          frame.effectiveInverseMass <= Number.EPSILON
+        ) {
+          continue
+        }
+        const impulseMagnitude = -relativeSpeed / frame.effectiveInverseMass
+        const impulse = scaleForce(frame.direction, impulseMagnitude)
+        rod.first.rigidBody.applyImpulseAtPoint(
+          scaleForce(impulse, -1),
+          frame.firstEndpoint.position,
           true,
         )
-        rod.second.rigidBody.setRotation(
-          secondAngle - angleError * (inverseMassSecond / inverseMassSum),
-          true,
-        )
-        const sharedAngularVelocity =
-          (rod.first.rigidBody.angvel() * rod.first.entity.massKg +
-            rod.second.rigidBody.angvel() * rod.second.entity.massKg) /
-          (rod.first.entity.massKg + rod.second.entity.massKg)
-        rod.first.rigidBody.setAngvel(sharedAngularVelocity, true)
-        rod.second.rigidBody.setAngvel(sharedAngularVelocity, true)
+        rod.second.rigidBody.applyImpulseAtPoint(impulse, frame.secondEndpoint.position, true)
+        if (!rod.first.entity.rotationEnabled) {
+          this.setConstrainedAngularVelocity(rod.first, 0)
+        }
+        if (!rod.second.entity.rotationEnabled) {
+          this.setConstrainedAngularVelocity(rod.second, 0)
+        }
       }
+      if (maximumRelativeSpeed <= ROD_VELOCITY_TOLERANCE_MPS) break
     }
+    this.restoreRodAngularMomentum(angularMomentumTargets)
   }
 
   private updateNetForcesFromMomentum(previousBodyStates: Map<EntityId, PreviousBodyState>): void {
@@ -606,17 +1351,6 @@ export class SimulationWorld {
         y: (record.entity.massKg * (velocity.y - previous.linearVelocity.y)) / this.fixedTimeStep,
       }
     }
-  }
-
-  private accelerationAt(position: Vec2): Vec2 {
-    let acceleration: Vec2 = { x: 0, y: 0 }
-    for (const field of this.fields) {
-      if (field.field.type !== 'uniformGravity') continue
-      if (regionContainsPoint(field.region, position)) {
-        acceleration = addVectors(acceleration, field.field.acceleration)
-      }
-    }
-    return acceleration
   }
 
   private captureBodyStates(): Map<EntityId, PreviousBodyState> {
@@ -635,195 +1369,636 @@ export class SimulationWorld {
     )
   }
 
-  private arcPathAt(
-    arc: ArcGroundRecord,
-    body: BodyEntity,
-    position: Vec2,
-  ): { angle: number; inside: boolean; radius: number } | null {
-    const bodyRadius = collisionRadius(body)
-    if (bodyRadius === null) return null
-
-    const geometry = arc.entity.geometry
-    const relative = {
-      x: position.x - geometry.center.x,
-      y: position.y - geometry.center.y,
-    }
-    const distanceFromCenter = Math.hypot(relative.x, relative.y)
-    if (distanceFromCenter <= Number.EPSILON) return null
-
-    const followsCounterClockwise = geometry.endRad > geometry.startRad
-    const normalSideIsInside = followsCounterClockwise !== arc.entity.normalFlipped
-    const inside =
-      arc.entity.collisionSide === 'normal'
-        ? normalSideIsInside
-        : distanceFromCenter <= geometry.radius
-    const pathRadius = geometry.radius + (inside ? -bodyRadius : bodyRadius)
-    if (pathRadius <= Number.EPSILON) return null
-
-    const angle = unwrapAngleWithinArc(
-      Math.atan2(relative.y, relative.x),
-      geometry.startRad,
-      geometry.endRad,
-    )
-    return angle === null ? null : { angle, inside, radius: pathRadius }
-  }
-
-  private initializeFrictionlessArcContacts(): void {
-    for (const record of this.dynamicBodies.values()) {
-      if (record.entity.material.friction > 1e-10 || !record.collider) continue
-      const position = record.rigidBody.translation()
-      const velocity = record.rigidBody.linvel()
-
-      for (const arc of this.arcGrounds.values()) {
-        if (arc.entity.material.friction > 1e-10) continue
-        const path = this.arcPathAt(arc, record.entity, position)
-        if (!path) continue
-
-        const geometry = arc.entity.geometry
-        const distanceFromCenter = Math.hypot(
-          position.x - geometry.center.x,
-          position.y - geometry.center.y,
-        )
-        const radial = { x: Math.cos(path.angle), y: Math.sin(path.angle) }
-        const isExactlyTouching = Math.abs(distanceFromCenter - path.radius) <= 1e-4
-        const hasNoImpactVelocity = Math.abs(dot(velocity, radial)) <= 1e-5
-        if (isExactlyTouching && hasNoImpactVelocity) {
-          this.frictionlessArcContacts.add(`${arc.collider.handle}:${record.collider.handle}`)
+  private hasValidSolverContact(first: RAPIER.Collider, second: RAPIER.Collider): boolean {
+    let hasValidContact = false
+    this.world.contactPair(first, second, (manifold) => {
+      for (let index = 0; index < manifold.numSolverContacts(); index += 1) {
+        const point = manifold.solverContactPoint(index)
+        const distance = manifold.solverContactDist(index)
+        if (
+          Number.isFinite(point.x) &&
+          Number.isFinite(point.y) &&
+          Number.isFinite(distance) &&
+          distance <= ARC_CONTACT_DISTANCE_TOLERANCE
+        ) {
+          hasValidContact = true
+          return
         }
-      }
-    }
-  }
-
-  private stabilizeFrictionlessArcMotion(
-    previousBodyStates: Map<EntityId, PreviousBodyState>,
-  ): void {
-    const nextContacts = new Set<string>()
-
-    for (const [entityId, record] of this.dynamicBodies) {
-      if (record.entity.material.friction > 1e-10 || !record.collider) continue
-
-      const contacts: RAPIER.Collider[] = []
-      this.world.contactPairsWith(record.collider, (collider) => contacts.push(collider))
-      if (contacts.length !== 1) continue
-
-      const arc = this.arcGrounds.get(contacts[0]?.handle ?? -1)
-      if (!arc || arc.entity.material.friction > 1e-10) continue
-
-      const currentPosition = record.rigidBody.translation()
-      const currentPath = this.arcPathAt(arc, record.entity, currentPosition)
-      if (!currentPath) continue
-
-      const contactKey = `${arc.collider.handle}:${record.collider.handle}`
-      nextContacts.add(contactKey)
-      if (!this.frictionlessArcContacts.has(contactKey)) continue
-
-      const previous = previousBodyStates.get(entityId)
-      if (!previous) continue
-      const previousPath = this.arcPathAt(arc, record.entity, previous.position)
-      if (!previousPath || previousPath.inside !== currentPath.inside) continue
-
-      // Rapier 的折线圆弧会在相邻线段处产生微小非弹性法向冲量。
-      // 持续接触期间改用解析圆弧和 velocity Verlet，避免凭空损失机械能。
-      const geometry = arc.entity.geometry
-      const tangentBefore = {
-        x: -Math.sin(previousPath.angle),
-        y: Math.cos(previousPath.angle),
-      }
-      const angularVelocity = dot(previous.linearVelocity, tangentBefore) / previousPath.radius
-      const accelerationBefore = this.accelerationAt(previous.position)
-      const angularAccelerationBefore = dot(accelerationBefore, tangentBefore) / previousPath.radius
-      const nextAngleCandidate =
-        previousPath.angle +
-        angularVelocity * this.fixedTimeStep +
-        0.5 * angularAccelerationBefore * this.fixedTimeStep ** 2
-      const nextAngle = unwrapAngleWithinArc(nextAngleCandidate, geometry.startRad, geometry.endRad)
-      if (nextAngle === null) {
-        nextContacts.delete(contactKey)
-        continue
-      }
-
-      const radial = { x: Math.cos(nextAngle), y: Math.sin(nextAngle) }
-      const tangentAfter = { x: -radial.y, y: radial.x }
-      const nextPosition = {
-        x: geometry.center.x + previousPath.radius * radial.x,
-        y: geometry.center.y + previousPath.radius * radial.y,
-      }
-      const accelerationAfter = this.accelerationAt(nextPosition)
-      const angularAccelerationAfter = dot(accelerationAfter, tangentAfter) / previousPath.radius
-      const nextAngularVelocity =
-        angularVelocity +
-        0.5 * (angularAccelerationBefore + angularAccelerationAfter) * this.fixedTimeStep
-      const tangentialSpeed = nextAngularVelocity * previousPath.radius
-      const outwardAcceleration = dot(accelerationAfter, radial)
-      // 约束面只能推、不能拉；所需支持力为负时应让物体自然脱离圆弧。
-      const reactionAcceleration = previousPath.inside
-        ? tangentialSpeed ** 2 / previousPath.radius + outwardAcceleration
-        : -(tangentialSpeed ** 2) / previousPath.radius - outwardAcceleration
-      if (reactionAcceleration < -1e-6) {
-        nextContacts.delete(contactKey)
-        continue
-      }
-
-      record.rigidBody.setTranslation(nextPosition, true)
-      record.rigidBody.setLinvel(
-        {
-          x: tangentAfter.x * tangentialSpeed,
-          y: tangentAfter.y * tangentialSpeed,
-        },
-        true,
-      )
-    }
-
-    this.frictionlessArcContacts.clear()
-    for (const contact of nextContacts) this.frictionlessArcContacts.add(contact)
-  }
-
-  private updateOneSidedContactPairs(): void {
-    this.allowedOneSidedPairs.clear()
-    const ignoredColliderHandles = new Set<number>()
-    const bodyStates = [...this.dynamicColliders].map(([colliderHandle, record]) => {
-      const position = record.rigidBody.translation()
-      const velocity = record.rigidBody.linvel()
-      return {
-        colliderHandle,
-        record,
-        position,
-        margin:
-          record.boundingRadius +
-          Math.hypot(velocity.x, velocity.y) * this.fixedTimeStep * 2 +
-          0.05,
       }
     })
-    for (const [groundHandle, ground] of this.oneSidedGrounds) {
-      for (const { colliderHandle, record, position, margin } of bodyStates) {
-        if (
-          position.x < ground.minX - margin ||
-          position.x > ground.maxX + margin ||
-          position.y < ground.minY - margin ||
-          position.y > ground.maxY + margin
-        ) {
+    return hasValidContact
+  }
+
+  private validContactColliders(collider: RAPIER.Collider): RAPIER.Collider[] {
+    const contacts: RAPIER.Collider[] = []
+    this.world.contactPairsWith(collider, (other) => {
+      if (this.hasValidSolverContact(collider, other)) contacts.push(other)
+    })
+    return contacts
+  }
+
+  private externalAcceleration(record: DynamicBodyRecord): Vec2 {
+    return scaleVector(record.pathForce, 1 / record.entity.massKg)
+  }
+
+  private constraintAcceleration(record: DynamicBodyRecord): Vec2 {
+    return scaleVector(record.constraintForce, 1 / record.entity.massKg)
+  }
+
+  private reversedPathContact(contact: PersistentGroundPathContact): PersistentGroundPathContact {
+    return {
+      ...contact,
+      location: {
+        ...contact.location,
+        direction: contact.location.direction === 1 ? -1 : 1,
+      },
+      side: contact.side === 1 ? -1 : 1,
+    }
+  }
+
+  private colliderRecordsForContactSuppression(
+    contact: PersistentGroundPathContact,
+  ): Set<GroundColliderRecord> {
+    const frame = resolveGroundPathContactFrame(this.groundPathNetwork, contact)
+    if (!frame) return new Set()
+    const colliderRecords = new Set<GroundColliderRecord>()
+    const appendSegmentColliders = (segment: GroundNetworkSegment | undefined): void => {
+      for (const piece of segment?.collisionPieces ?? []) {
+        const colliderRecord = this.groundCollidersByPieceId.get(piece.id)
+        if (colliderRecord) colliderRecords.add(colliderRecord)
+      }
+    }
+    appendSegmentColliders(frame.segment)
+
+    for (const endpoint of ['start', 'end'] as const) {
+      const distanceToEndpoint =
+        endpoint === 'start' ? contact.location.s : frame.segment.path.length - contact.location.s
+      const isForwardEndpoint =
+        (contact.location.direction === 1 && endpoint === 'end') ||
+        (contact.location.direction === -1 && endpoint === 'start')
+      const suppressionDistance =
+        contact.radiusM +
+        ARC_CONTACT_DISTANCE_TOLERANCE +
+        (isForwardEndpoint ? (contact.speedMps * this.currentTimeStep) / frame.offsetScale : 0)
+      if (distanceToEndpoint > suppressionDistance) continue
+      const neighbor = frame.segment.neighbors[endpoint]
+      const neighborSegment = neighbor
+        ? this.groundPathNetwork.segmentById.get(neighbor.segmentId)
+        : null
+      appendSegmentColliders(neighborSegment ?? undefined)
+    }
+    return colliderRecords
+  }
+
+  private markReleasedPair(
+    record: DynamicBodyRecord,
+    groundCollider: GroundColliderRecord,
+    naturalSide?: 1 | -1,
+  ): void {
+    if (!record.collider) return
+    const resolvedSide =
+      naturalSide ??
+      (groundCollider.piece.path.closestPoint(record.rigidBody.translation()).signedDistance >= 0
+        ? 1
+        : -1)
+    this.releasedContactPairs.set(
+      colliderPairKey(record.collider.handle, groundCollider.collider.handle),
+      { naturalSide: resolvedSide },
+    )
+  }
+
+  private releasePersistentGroundContact(
+    entityId: EntityId,
+    record: DynamicBodyRecord,
+    contact: PersistentGroundPathContact,
+  ): void {
+    const frame = resolveGroundPathContactFrame(this.groundPathNetwork, contact)
+    for (const groundCollider of this.colliderRecordsForContactSuppression(contact)) {
+      let naturalSide: 1 | -1 | undefined
+      if (frame) {
+        const localClosest = groundCollider.piece.path.closestPoint(record.rigidBody.translation())
+        const segmentS = groundCollider.piece.startS + localClosest.s
+        const naturalNormal = groundCollider.segment.path.normalAt(segmentS)
+        naturalSide = dotVectors(frame.contactNormal, naturalNormal) >= 0 ? 1 : -1
+      }
+      this.markReleasedPair(record, groundCollider, naturalSide)
+    }
+    this.persistentGroundContacts.delete(entityId)
+  }
+
+  private preparePersistentGroundContacts(): void {
+    for (const [entityId, storedContact] of this.persistentGroundContacts) {
+      const record = this.dynamicBodies.get(entityId)
+      if (!record?.collider) {
+        this.persistentGroundContacts.delete(entityId)
+        continue
+      }
+
+      let contact = storedContact
+      let frame = resolveGroundPathContactFrame(this.groundPathNetwork, contact)
+      if (!frame) {
+        this.releasePersistentGroundContact(entityId, record, contact)
+        continue
+      }
+
+      const velocity = record.rigidBody.linvel()
+      if (dotVectors(velocity, frame.tangent) < 0) {
+        contact = this.reversedPathContact(contact)
+        frame = resolveGroundPathContactFrame(this.groundPathNetwork, contact)
+        if (!frame) {
+          this.releasePersistentGroundContact(entityId, record, contact)
           continue
         }
-        const pairKey = `${groundHandle}:${colliderHandle}`
-        const signedDistance = signedDistanceToPolyline(ground.points, position)
-        if (this.ignoredOneSidedPairs.has(pairKey)) {
-          if (signedDistance > record.boundingRadius + 0.001) {
-            this.ignoredOneSidedPairs.delete(pairKey)
-          }
-        } else if (signedDistance < -0.001) {
-          this.ignoredOneSidedPairs.add(pairKey)
+      }
+
+      const separatingSpeed = dotVectors(velocity, frame.contactNormal)
+      const speedMps = Math.max(0, dotVectors(velocity, frame.tangent))
+      contact = { ...contact, speedMps }
+      const supportForceN = requiredGroundSupportForceN(
+        frame,
+        speedMps,
+        this.constraintAcceleration(record),
+        record.entity.massKg,
+      )
+      if (
+        separatingSpeed > ARC_RADIAL_SEPARATION_SPEED_TOLERANCE ||
+        supportForceN < -PATH_SUPPORT_FORCE_TOLERANCE_N
+      ) {
+        this.releasePersistentGroundContact(entityId, record, contact)
+        continue
+      }
+      this.persistentGroundContacts.set(entityId, contact)
+    }
+  }
+
+  private advancePersistentGroundContacts(
+    previousBodyStates: Map<EntityId, PreviousBodyState>,
+  ): void {
+    for (const [entityId, storedContact] of this.persistentGroundContacts) {
+      const record = this.dynamicBodies.get(entityId)
+      const previous = previousBodyStates.get(entityId)
+      if (!record?.collider || !previous) {
+        this.persistentGroundContacts.delete(entityId)
+        continue
+      }
+      let contact = storedContact
+      let beforeFrame = resolveGroundPathContactFrame(this.groundPathNetwork, contact)
+      if (!beforeFrame) {
+        this.releasePersistentGroundContact(entityId, record, contact)
+        continue
+      }
+      const freeVelocity = record.rigidBody.linvel()
+      if (
+        dotVectors(freeVelocity, beforeFrame.contactNormal) > ARC_RADIAL_SEPARATION_SPEED_TOLERANCE
+      ) {
+        this.releasePersistentGroundContact(entityId, record, contact)
+        continue
+      }
+
+      const externalAcceleration = this.externalAcceleration(record)
+      const constraintAcceleration = this.constraintAcceleration(record)
+      const speedBefore = Math.max(0, dotVectors(previous.linearVelocity, beforeFrame.tangent))
+      let accelerationBefore = dotVectors(externalAcceleration, beforeFrame.tangent)
+      const freeTangentialSpeed = dotVectors(freeVelocity, beforeFrame.tangent)
+      const nonPathImpulseSpeed =
+        freeTangentialSpeed - (speedBefore + accelerationBefore * this.currentTimeStep)
+      let instantaneousSpeed = speedBefore + nonPathImpulseSpeed
+      let centerDistance =
+        instantaneousSpeed * this.currentTimeStep +
+        0.5 * accelerationBefore * this.currentTimeStep ** 2
+
+      if (centerDistance < 0 || instantaneousSpeed < 0) {
+        contact = this.reversedPathContact(contact)
+        beforeFrame = resolveGroundPathContactFrame(this.groundPathNetwork, contact)
+        if (!beforeFrame) {
+          this.releasePersistentGroundContact(entityId, record, contact)
+          continue
         }
-        if (this.ignoredOneSidedPairs.has(pairKey)) {
-          ignoredColliderHandles.add(colliderHandle)
-        } else {
-          this.allowedOneSidedPairs.add(pairKey)
+        accelerationBefore = -accelerationBefore
+        instantaneousSpeed = Math.abs(instantaneousSpeed)
+        centerDistance = Math.abs(centerDistance)
+      }
+
+      const traversal = traverseGroundPathCenterDistance(
+        this.groundPathNetwork,
+        contact,
+        centerDistance,
+      )
+      if (!traversal) {
+        this.releasePersistentGroundContact(entityId, record, contact)
+        continue
+      }
+
+      contact = traversal.contact
+      let afterFrame = traversal.frame
+      const accelerationAfter = dotVectors(externalAcceleration, afterFrame.tangent)
+      if (traversal.stoppedAtOpenEnd) {
+        const averageTangentialAcceleration = (accelerationBefore + accelerationAfter) / 2
+        const timeToEndpoint = travelTimeForDistance(
+          traversal.distanceTraveledCenterM,
+          instantaneousSpeed,
+          averageTangentialAcceleration,
+          this.currentTimeStep,
+        )
+        const remainingTime = this.currentTimeStep - timeToEndpoint
+        let endpointSpeed = instantaneousSpeed + averageTangentialAcceleration * timeToEndpoint
+        const supportForceN = requiredGroundSupportForceN(
+          afterFrame,
+          Math.max(0, endpointSpeed),
+          constraintAcceleration,
+          record.entity.massKg,
+        )
+        if (endpointSpeed < 0 || supportForceN < -PATH_SUPPORT_FORCE_TOLERANCE_N) {
+          this.releasePersistentGroundContact(entityId, record, contact)
+          continue
+        }
+        const friction = applyCoulombPathFriction(
+          endpointSpeed,
+          record.entity.rotationEnabled ? record.rigidBody.angvel() : 0,
+          contact.side,
+          contact.radiusM,
+          record.entity.massKg,
+          record.entity.rotationEnabled ? record.rigidBody.effectiveAngularInertia() : 0,
+          Math.max(0, supportForceN),
+          combinedPathFriction(record.entity.material, afterFrame.material),
+          timeToEndpoint,
+        )
+        endpointSpeed = friction.tangentialSpeedMps
+        const postFrictionSupportForceN = requiredGroundSupportForceN(
+          afterFrame,
+          Math.abs(endpointSpeed),
+          constraintAcceleration,
+          record.entity.massKg,
+        )
+        if (postFrictionSupportForceN < -PATH_SUPPORT_FORCE_TOLERANCE_N) {
+          this.releasePersistentGroundContact(entityId, record, contact)
+          continue
+        }
+        const endpointVelocity = scaleVector(afterFrame.tangent, endpointSpeed)
+        const acceleratedVelocity = {
+          x: endpointVelocity.x + externalAcceleration.x * remainingTime,
+          y: endpointVelocity.y + externalAcceleration.y * remainingTime,
+        }
+        const freeVelocity =
+          record.magneticFieldTesla !== 0 && record.entity.chargeC !== 0
+            ? rotateVelocityInMagneticField(
+                acceleratedVelocity,
+                record.entity.chargeC,
+                record.magneticFieldTesla,
+                record.entity.massKg,
+                remainingTime,
+              )
+            : acceleratedVelocity
+        const displacement =
+          record.magneticFieldTesla !== 0 && record.entity.chargeC !== 0
+            ? {
+                x: ((endpointVelocity.x + freeVelocity.x) * remainingTime) / 2,
+                y: ((endpointVelocity.y + freeVelocity.y) * remainingTime) / 2,
+              }
+            : {
+                x:
+                  endpointVelocity.x * remainingTime +
+                  0.5 * externalAcceleration.x * remainingTime ** 2,
+                y:
+                  endpointVelocity.y * remainingTime +
+                  0.5 * externalAcceleration.y * remainingTime ** 2,
+              }
+        record.rigidBody.setTranslation(
+          {
+            x: afterFrame.position.x + displacement.x,
+            y: afterFrame.position.y + displacement.y,
+          },
+          true,
+        )
+        record.rigidBody.setLinvel(freeVelocity, true)
+        this.setConstrainedAngularVelocity(record, friction.angularVelocityRad)
+        this.releasePersistentGroundContact(entityId, record, contact)
+        continue
+      }
+
+      let speedAfter =
+        instantaneousSpeed + 0.5 * (accelerationBefore + accelerationAfter) * this.currentTimeStep
+      if (speedAfter < 0) {
+        contact = this.reversedPathContact(contact)
+        afterFrame = resolveGroundPathContactFrame(this.groundPathNetwork, contact) ?? afterFrame
+        speedAfter = Math.abs(speedAfter)
+      }
+
+      const supportForceN = requiredGroundSupportForceN(
+        afterFrame,
+        speedAfter,
+        constraintAcceleration,
+        record.entity.massKg,
+      )
+      if (supportForceN < -PATH_SUPPORT_FORCE_TOLERANCE_N) {
+        this.releasePersistentGroundContact(entityId, record, contact)
+        continue
+      }
+
+      const friction = applyCoulombPathFriction(
+        speedAfter,
+        record.entity.rotationEnabled ? record.rigidBody.angvel() : 0,
+        contact.side,
+        contact.radiusM,
+        record.entity.massKg,
+        record.entity.rotationEnabled ? record.rigidBody.effectiveAngularInertia() : 0,
+        Math.max(0, supportForceN),
+        combinedPathFriction(record.entity.material, afterFrame.material),
+        this.currentTimeStep,
+      )
+      speedAfter = friction.tangentialSpeedMps
+      if (speedAfter < 0) {
+        contact = this.reversedPathContact(contact)
+        afterFrame = resolveGroundPathContactFrame(this.groundPathNetwork, contact) ?? afterFrame
+        speedAfter = Math.abs(speedAfter)
+      }
+
+      const postFrictionSupportForceN = requiredGroundSupportForceN(
+        afterFrame,
+        speedAfter,
+        constraintAcceleration,
+        record.entity.massKg,
+      )
+      if (postFrictionSupportForceN < -PATH_SUPPORT_FORCE_TOLERANCE_N) {
+        this.releasePersistentGroundContact(entityId, record, contact)
+        continue
+      }
+
+      record.rigidBody.setTranslation(afterFrame.position, true)
+      record.rigidBody.setLinvel(scaleVector(afterFrame.tangent, speedAfter), true)
+      this.setConstrainedAngularVelocity(record, friction.angularVelocityRad)
+      this.persistentGroundContacts.set(entityId, { ...contact, speedMps: speedAfter })
+    }
+  }
+
+  private refreshReleasedContactPairs(): void {
+    for (const [pairKey, released] of this.releasedContactPairs) {
+      const [firstText, secondText] = pairKey.split(':')
+      const firstHandle = Number(firstText)
+      const secondHandle = Number(secondText)
+      const groundCollider =
+        this.groundsByCollider.get(firstHandle) ?? this.groundsByCollider.get(secondHandle)
+      const body = this.dynamicColliders.get(firstHandle) ?? this.dynamicColliders.get(secondHandle)
+      const radius = body ? collisionRadius(body.entity) : null
+      if (!groundCollider || !body || radius === null) {
+        this.releasedContactPairs.delete(pairKey)
+        continue
+      }
+      const position = body.rigidBody.translation()
+      const closest = groundCollider.piece.path.closestPoint(position)
+      const outwardClearance = released.naturalSide * closest.signedDistance - radius
+      if (outwardClearance > PATH_RELEASE_CLEARANCE_M) {
+        this.releasedContactPairs.delete(pairKey)
+      }
+    }
+  }
+
+  private groundContactProposal(
+    record: DynamicBodyRecord,
+    groundCollider: GroundColliderRecord,
+    radiusM: number,
+    previous: PreviousBodyState,
+  ): GroundContactProposal | null {
+    const position = record.rigidBody.translation()
+    const candidate = findGroundPathContactCandidate(
+      this.groundPathNetwork,
+      groundCollider.piece.sourceGroundId,
+      position,
+      radiusM,
+      groundCollider.piece.id,
+    )
+    if (!candidate) return null
+
+    const previousCandidate = findGroundPathContactCandidate(
+      this.groundPathNetwork,
+      groundCollider.piece.sourceGroundId,
+      previous.position,
+      radiusM,
+      groundCollider.piece.id,
+    )
+    if (!previousCandidate) return null
+    if (Math.min(candidate.gapM, previousCandidate.gapM) > ARC_CONTACT_DISTANCE_TOLERANCE) {
+      return null
+    }
+    const naturalTangent = groundCollider.segment.path.tangentAt(candidate.s)
+    const velocity = record.rigidBody.linvel()
+    const previousNaturalNormal = groundCollider.segment.path.normalAt(previousCandidate.s)
+    const previousContactNormal = scaleVector(previousNaturalNormal, candidate.naturalSide)
+    const preStepSeparatingSpeedMps = dotVectors(previous.linearVelocity, previousContactNormal)
+    const mayProjectSolverSeparation =
+      combinedMaterialRestitution(record.entity.material, groundCollider.piece.material) <=
+        Number.EPSILON &&
+      Math.abs(preStepSeparatingSpeedMps) <= ARC_RADIAL_SEPARATION_SPEED_TOLERANCE
+    const mayRestorePreStepTangentialSpeed =
+      mayProjectSolverSeparation &&
+      combinedPathFriction(record.entity.material, groundCollider.piece.material) <= Number.EPSILON
+    const previousNaturalTangent = groundCollider.segment.path.tangentAt(previousCandidate.s)
+    const pathAcceleration = this.externalAcceleration(record)
+    const naturalSpeed = mayRestorePreStepTangentialSpeed
+      ? dotVectors(previous.linearVelocity, previousNaturalTangent) +
+        0.5 *
+          (dotVectors(pathAcceleration, previousNaturalTangent) +
+            dotVectors(pathAcceleration, naturalTangent)) *
+          this.currentTimeStep
+      : dotVectors(velocity, naturalTangent)
+    const direction: 1 | -1 = naturalSpeed < 0 ? -1 : 1
+    const contact: PersistentGroundPathContact = {
+      location: { segmentId: candidate.segmentId, s: candidate.s, direction },
+      side: (candidate.naturalSide * direction) as 1 | -1,
+      radiusM,
+      speedMps: Math.abs(naturalSpeed),
+    }
+    const frame = resolveGroundPathContactFrame(this.groundPathNetwork, contact)
+    if (!frame) return null
+    return {
+      colliderRecord: groundCollider,
+      candidate,
+      contact,
+      frame,
+      separatingSpeedMps: dotVectors(velocity, frame.contactNormal),
+      preStepSeparatingSpeedMps,
+      mayProjectSolverSeparation,
+      supportForceN: requiredGroundSupportForceN(
+        frame,
+        contact.speedMps,
+        this.constraintAcceleration(record),
+        record.entity.massKg,
+      ),
+    }
+  }
+
+  private groundLocationsAreLocallyAdjacent(
+    firstSegment: GroundNetworkSegment,
+    firstS: number,
+    secondSegment: GroundNetworkSegment,
+    secondS: number,
+    radiusM: number,
+  ): boolean {
+    const maximumEndpointDistance = radiusM + ARC_CONTACT_DISTANCE_TOLERANCE
+    if (firstSegment.id === secondSegment.id) {
+      const directDistance = Math.abs(firstS - secondS)
+      const arcDistance = firstSegment.path.closed
+        ? Math.min(directDistance, firstSegment.path.length - directDistance)
+        : directDistance
+      return arcDistance <= maximumEndpointDistance * 2
+    }
+    for (const endpoint of ['start', 'end'] as const) {
+      const neighbor = firstSegment.neighbors[endpoint]
+      if (!neighbor || neighbor.segmentId !== secondSegment.id) continue
+      const firstDistance = endpoint === 'start' ? firstS : firstSegment.path.length - firstS
+      const secondDistance =
+        neighbor.endpoint === 'start' ? secondS : secondSegment.path.length - secondS
+      if (firstDistance <= maximumEndpointDistance && secondDistance <= maximumEndpointDistance) {
+        return true
+      }
+    }
+    return false
+  }
+
+  private groundProposalsAreLocallyAdjacent(
+    first: GroundContactProposal,
+    second: GroundContactProposal,
+    radiusM: number,
+  ): boolean {
+    return this.groundLocationsAreLocallyAdjacent(
+      first.frame.segment,
+      first.candidate.s,
+      second.frame.segment,
+      second.candidate.s,
+      radiusM,
+    )
+  }
+
+  private invalidGroundColliderIsLocalToProposals(
+    groundCollider: GroundColliderRecord,
+    proposals: readonly GroundContactProposal[],
+    bodyPosition: Vec2,
+    radiusM: number,
+  ): boolean {
+    const candidate = findGroundPathContactCandidate(
+      this.groundPathNetwork,
+      groundCollider.piece.sourceGroundId,
+      bodyPosition,
+      radiusM,
+      groundCollider.piece.id,
+    )
+    if (!candidate) return false
+    return proposals.some((proposal) =>
+      this.groundLocationsAreLocallyAdjacent(
+        groundCollider.segment,
+        candidate.s,
+        proposal.frame.segment,
+        proposal.candidate.s,
+        radiusM,
+      ),
+    )
+  }
+
+  private groundProposalsFormLocalContactGroup(
+    proposals: readonly GroundContactProposal[],
+    radiusM: number,
+  ): boolean {
+    if (proposals.length <= 1) return true
+    const visited = new Set<number>([0])
+    let changed = true
+    while (changed) {
+      changed = false
+      for (let candidateIndex = 0; candidateIndex < proposals.length; candidateIndex += 1) {
+        if (visited.has(candidateIndex)) continue
+        for (const visitedIndex of visited) {
+          if (
+            this.groundProposalsAreLocallyAdjacent(
+              proposals[visitedIndex]!,
+              proposals[candidateIndex]!,
+              radiusM,
+            )
+          ) {
+            visited.add(candidateIndex)
+            changed = true
+            break
+          }
         }
       }
     }
-    for (const { colliderHandle, record } of bodyStates) {
-      record.rigidBody.enableCcd(
-        record.entity.continuousCollisionDetection && !ignoredColliderHandles.has(colliderHandle),
+    return visited.size === proposals.length
+  }
+
+  private acquirePersistentGroundContacts(
+    previousBodyStates: Map<EntityId, PreviousBodyState>,
+  ): void {
+    for (const [entityId, record] of this.dynamicBodies) {
+      const radius = collisionRadius(record.entity)
+      if (radius === null || !record.collider || this.persistentGroundContacts.has(entityId)) {
+        continue
+      }
+      const previous = previousBodyStates.get(entityId)
+      if (!previous) continue
+      const contacts = this.validContactColliders(record.collider)
+      if (contacts.length === 0) continue
+      const groundColliders = contacts.map((contact) => this.groundsByCollider.get(contact.handle))
+      if (groundColliders.some((groundCollider) => !groundCollider)) continue
+      if (
+        groundColliders.some((groundCollider) =>
+          this.releasedContactPairs.has(
+            colliderPairKey(record.collider!.handle, groundCollider!.collider.handle),
+          ),
+        )
+      ) {
+        continue
+      }
+
+      const proposals: GroundContactProposal[] = []
+      const invalidGroundColliders: GroundColliderRecord[] = []
+      for (const groundCollider of groundColliders) {
+        const proposal = this.groundContactProposal(record, groundCollider!, radius, previous)
+        if (!proposal) {
+          invalidGroundColliders.push(groundCollider!)
+          continue
+        }
+        proposals.push(proposal)
+      }
+      if (proposals.length === 0) continue
+      const bodyPosition = record.rigidBody.translation()
+      if (
+        invalidGroundColliders.some(
+          (groundCollider) =>
+            !this.invalidGroundColliderIsLocalToProposals(
+              groundCollider,
+              proposals,
+              bodyPosition,
+              radius,
+            ),
+        ) ||
+        !this.groundProposalsFormLocalContactGroup(proposals, radius)
+      ) {
+        continue
+      }
+
+      const qualified = proposals.filter((proposal) => {
+        const accepted =
+          (proposal.separatingSpeedMps <= PATH_ENTRY_SEPARATION_SPEED_TOLERANCE ||
+            proposal.mayProjectSolverSeparation) &&
+          proposal.preStepSeparatingSpeedMps <= ARC_RADIAL_SEPARATION_SPEED_TOLERANCE &&
+          proposal.supportForceN >= -PATH_SUPPORT_FORCE_TOLERANCE_N
+        if (!accepted) {
+          this.markReleasedPair(record, proposal.colliderRecord, proposal.candidate.naturalSide)
+        }
+        return accepted
+      })
+      qualified.sort(
+        (first, second) =>
+          first.candidate.gapM - second.candidate.gapM ||
+          first.separatingSpeedMps - second.separatingSpeedMps,
       )
+      const selected = qualified[0]
+      if (!selected) continue
+
+      record.rigidBody.setTranslation(selected.frame.position, true)
+      record.rigidBody.setLinvel(
+        scaleVector(selected.frame.tangent, selected.contact.speedMps),
+        true,
+      )
+      this.persistentGroundContacts.set(entityId, selected.contact)
     }
   }
 }

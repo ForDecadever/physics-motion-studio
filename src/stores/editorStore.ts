@@ -1,13 +1,13 @@
 import { create } from 'zustand'
 
 import { defaultCamera, type Camera2D } from '../editor/camera/viewport'
-import type { EntityId, LayerId, SceneEntity, Vec2 } from '../scene/model/types'
+import type { EntityId, GroundEndpointRef, LayerId, SceneEntity, Vec2 } from '../scene/model/types'
 
 export type EditorTool =
-  'select' | 'rotate' | 'hand' | 'zoom' | 'ground' | 'body' | 'field' | 'connector'
-export type BodyToolPreset = 'particle' | 'ball' | 'block' | 'pointCharge'
+  'select' | 'rotate' | 'hand' | 'zoom' | 'ground' | 'groundJoint' | 'body' | 'field' | 'connector'
+export type BodyToolPreset = 'ball' | 'block'
 export type FieldToolPreset = 'uniformGravity' | 'uniformElectric' | 'uniformMagnetic'
-export type FieldRegionToolShape = 'rectangle' | 'circle' | 'polygon' | 'infinite'
+export type FieldRegionToolShape = 'rectangle' | 'circle' | 'freeform' | 'infinite'
 export type ConnectorToolPreset = 'rope' | 'rod' | 'spring'
 
 interface EditorState {
@@ -19,6 +19,8 @@ interface EditorState {
   connectorToolPreset: ConnectorToolPreset
   gridVisible: boolean
   snapEnabled: boolean
+  wallSnapEnabled: boolean
+  autoGroundJointEnabled: boolean
   camera: Camera2D
   cursorWorld: Vec2
   selectedIds: EntityId[]
@@ -27,6 +29,10 @@ interface EditorState {
   draftEntity: SceneEntity | null
   marquee: { start: Vec2; end: Vec2 } | null
   connectorStartBodyId: EntityId | null
+  groundJointStart: GroundEndpointRef | null
+  groundJointHover: GroundEndpointRef | null
+  pendingGroundEndpoint: GroundEndpointRef | null
+  groundJointMessage: string | null
   setActiveTool: (tool: EditorTool) => void
   setGroundToolShape: (shape: 'line' | 'arc' | 'cubicBezier') => void
   setBodyToolPreset: (preset: BodyToolPreset) => void
@@ -35,6 +41,8 @@ interface EditorState {
   setConnectorToolPreset: (preset: ConnectorToolPreset) => void
   toggleGrid: () => void
   toggleSnap: () => void
+  toggleWallSnap: () => void
+  toggleAutoGroundJoint: () => void
   setCamera: (camera: Camera2D) => void
   setCursorWorld: (cursorWorld: Vec2) => void
   setSelectedIds: (selectedIds: EntityId[]) => void
@@ -46,6 +54,10 @@ interface EditorState {
   setDraftEntity: (draftEntity: SceneEntity | null) => void
   setMarquee: (marquee: { start: Vec2; end: Vec2 } | null) => void
   setConnectorStartBodyId: (entityId: EntityId | null) => void
+  setGroundJointStart: (endpoint: GroundEndpointRef | null) => void
+  setGroundJointHover: (endpoint: GroundEndpointRef | null) => void
+  setPendingGroundEndpoint: (endpoint: GroundEndpointRef | null) => void
+  setGroundJointMessage: (message: string | null) => void
   resetForDocument: () => void
 }
 
@@ -58,6 +70,8 @@ export const useEditorStore = create<EditorState>((set) => ({
   connectorToolPreset: 'rope',
   gridVisible: true,
   snapEnabled: true,
+  wallSnapEnabled: false,
+  autoGroundJointEnabled: true,
   camera: defaultCamera,
   cursorWorld: { x: 0, y: 0 },
   selectedIds: [],
@@ -66,10 +80,18 @@ export const useEditorStore = create<EditorState>((set) => ({
   draftEntity: null,
   marquee: null,
   connectorStartBodyId: null,
+  groundJointStart: null,
+  groundJointHover: null,
+  pendingGroundEndpoint: null,
+  groundJointMessage: null,
   setActiveTool: (activeTool) =>
     set((state) => ({
       activeTool,
       connectorStartBodyId: activeTool === 'connector' ? state.connectorStartBodyId : null,
+      groundJointStart: activeTool === 'groundJoint' ? state.groundJointStart : null,
+      groundJointHover: activeTool === 'groundJoint' ? state.groundJointHover : null,
+      pendingGroundEndpoint: null,
+      groundJointMessage: activeTool === 'groundJoint' ? state.groundJointMessage : null,
       draftEntity: null,
       marquee: null,
       previewEntities: {},
@@ -81,6 +103,9 @@ export const useEditorStore = create<EditorState>((set) => ({
   setConnectorToolPreset: (connectorToolPreset) => set({ connectorToolPreset }),
   toggleGrid: () => set((state) => ({ gridVisible: !state.gridVisible })),
   toggleSnap: () => set((state) => ({ snapEnabled: !state.snapEnabled })),
+  toggleWallSnap: () => set((state) => ({ wallSnapEnabled: !state.wallSnapEnabled })),
+  toggleAutoGroundJoint: () =>
+    set((state) => ({ autoGroundJointEnabled: !state.autoGroundJointEnabled })),
   setCamera: (camera) => set({ camera }),
   setCursorWorld: (cursorWorld) => set({ cursorWorld }),
   setSelectedIds: (selectedIds) => set({ selectedIds }),
@@ -98,6 +123,10 @@ export const useEditorStore = create<EditorState>((set) => ({
   setDraftEntity: (draftEntity) => set({ draftEntity }),
   setMarquee: (marquee) => set({ marquee }),
   setConnectorStartBodyId: (connectorStartBodyId) => set({ connectorStartBodyId }),
+  setGroundJointStart: (groundJointStart) => set({ groundJointStart }),
+  setGroundJointHover: (groundJointHover) => set({ groundJointHover }),
+  setPendingGroundEndpoint: (pendingGroundEndpoint) => set({ pendingGroundEndpoint }),
+  setGroundJointMessage: (groundJointMessage) => set({ groundJointMessage }),
   resetForDocument: () =>
     set({
       camera: defaultCamera,
@@ -108,5 +137,9 @@ export const useEditorStore = create<EditorState>((set) => ({
       draftEntity: null,
       marquee: null,
       connectorStartBodyId: null,
+      groundJointStart: null,
+      groundJointHover: null,
+      pendingGroundEndpoint: null,
+      groundJointMessage: null,
     }),
 }))

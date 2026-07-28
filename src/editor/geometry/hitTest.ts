@@ -1,4 +1,15 @@
-import type { BodyEntity, SceneEntity, Vec2 } from '../../scene/model/types'
+import type {
+  BodyEntity,
+  EntityId,
+  GroundEndpointRef,
+  GroundEntity,
+  SceneEntity,
+  Vec2,
+} from '../../scene/model/types'
+import { angleWithinSweep } from '../../physics/core/fieldRegions'
+import { sampleClosedBezierPath } from '../../scene/model/bezierPath'
+import { resolveGroundEndpoint, resolveGroundJoint } from '../../scene/model/groundEndpoints'
+import { buildGroundPathNetwork, type GroundPathNetwork } from '../../scene/model/groundPath'
 import {
   add,
   distance,
@@ -51,8 +62,67 @@ function hitBody(entity: BodyEntity, point: Vec2): boolean {
       Math.abs(local.x) <= entity.shape.width / 2 && Math.abs(local.y) <= entity.shape.height / 2
     )
   }
-  const radius = entity.shape.type === 'circle' ? entity.shape.radius : entity.shape.collisionRadius
-  return Math.hypot(local.x, local.y) <= radius
+  return Math.hypot(local.x, local.y) <= entity.shape.radius
+}
+
+export interface GroundEndpointHit {
+  ground: GroundEntity
+  reference: GroundEndpointRef
+  position: Vec2
+}
+
+export function findNearestGroundEndpoint(
+  entities: readonly SceneEntity[],
+  point: Vec2,
+  tolerance: number,
+  excludedGroundIds: ReadonlySet<EntityId> = new Set(),
+  endpointIsEligible: (reference: GroundEndpointRef) => boolean = () => true,
+): GroundEndpointHit | null {
+  let nearest: GroundEndpointHit | null = null
+  let nearestDistance = tolerance + Number.EPSILON
+
+  for (let index = entities.length - 1; index >= 0; index -= 1) {
+    const ground = entities[index]
+    if (
+      !ground ||
+      ground.kind !== 'ground' ||
+      ground.locked ||
+      !ground.visible ||
+      excludedGroundIds.has(ground.id)
+    ) {
+      continue
+    }
+    for (const endpoint of ['start', 'end'] as const) {
+      const reference = { groundId: ground.id, endpoint }
+      if (!endpointIsEligible(reference)) continue
+      const resolved = resolveGroundEndpoint(entities, reference)
+      if (!resolved) continue
+      const candidateDistance = distance(point, resolved.position)
+      if (candidateDistance < nearestDistance) {
+        nearestDistance = candidateDistance
+        nearest = { ground, reference, position: resolved.position }
+      }
+    }
+  }
+
+  return nearest
+}
+
+export function findNearestUnoccupiedGroundEndpoint(
+  entities: readonly SceneEntity[],
+  point: Vec2,
+  tolerance: number,
+): GroundEndpointHit | null {
+  return findNearestGroundEndpoint(entities, point, tolerance, new Set(), (reference) =>
+    entities.every(
+      (entity) =>
+        entity.kind !== 'groundJoint' ||
+        !(
+          (entity.a.groundId === reference.groundId && entity.a.endpoint === reference.endpoint) ||
+          (entity.b.groundId === reference.groundId && entity.b.endpoint === reference.endpoint)
+        ),
+    ),
+  )
 }
 
 export function hitTestEntity(
@@ -60,6 +130,7 @@ export function hitTestEntity(
   allEntities: SceneEntity[],
   point: Vec2,
   tolerance: number,
+  groundPathNetwork?: GroundPathNetwork,
 ): boolean {
   if (!entity.visible || entity.locked) return false
   if (entity.kind === 'body') return hitBody(entity, point)
@@ -88,10 +159,37 @@ export function hitTestEntity(
   if (entity.kind === 'field') {
     const region = entity.region
     if (region.type === 'infinite') return false
-    if (region.type === 'circle') return distance(point, region.center) <= region.radius
+    if (region.type === 'circle') {
+      const offset = subtract(point, region.center)
+      return (
+        distance(point, region.center) <= region.radius &&
+        angleWithinSweep(Math.atan2(offset.y, offset.x), region.startRad, region.sweepRad)
+      )
+    }
     if (region.type === 'polygon') return pointInPolygon(point, region.points)
+    if (region.type === 'bezierPath') {
+      return pointInPolygon(point, sampleClosedBezierPath(region.nodes))
+    }
     const local = rotateVector(subtract(point, region.center), -region.angleRad)
     return Math.abs(local.x) <= region.width / 2 && Math.abs(local.y) <= region.height / 2
+  }
+
+  if (entity.kind === 'groundJoint') {
+    const transitionPath = (
+      groundPathNetwork ?? buildGroundPathNetwork(allEntities)
+    ).jointPaths.get(entity.id)?.path
+    if ((transitionPath?.closestPoint(point).distance ?? Infinity) <= tolerance) return true
+    const resolved = resolveGroundJoint(allEntities, entity)
+    const positions = [resolved.a?.position, resolved.b?.position].filter(
+      (position): position is Vec2 => Boolean(position),
+    )
+    if (positions.some((position) => distance(point, position) <= tolerance)) return true
+    return Boolean(
+      resolved.a &&
+      resolved.b &&
+      resolved.issue &&
+      distanceToSegment(point, resolved.a.position, resolved.b.position) <= tolerance,
+    )
   }
 
   const start = resolveConnectorEndpoint(allEntities, entity.a)
@@ -104,11 +202,17 @@ export function findTopEntity(
   point: Vec2,
   tolerance: number,
 ): SceneEntity | null {
-  const visualOrder: SceneEntity['kind'][] = ['body', 'connector', 'ground', 'field']
+  const visualOrder: SceneEntity['kind'][] = ['body', 'groundJoint', 'connector', 'ground', 'field']
+  const groundPathNetwork = entities.some((entity) => entity.kind === 'groundJoint')
+    ? buildGroundPathNetwork(entities)
+    : undefined
   for (const kind of visualOrder) {
     for (let index = entities.length - 1; index >= 0; index -= 1) {
       const entity = entities[index]
-      if (entity?.kind === kind && hitTestEntity(entity, entities, point, tolerance)) {
+      if (
+        entity?.kind === kind &&
+        hitTestEntity(entity, entities, point, tolerance, groundPathNetwork)
+      ) {
         return entity
       }
     }

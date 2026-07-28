@@ -84,7 +84,10 @@ function MenuAction({ children, icon, shortcut, disabled, onClick }: MenuActionP
 
 function Menu({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <details className={styles.menu}>
+    <details
+      className={styles.menu}
+      onMouseLeave={(event) => event.currentTarget.removeAttribute('open')}
+    >
       <summary>{label}</summary>
       <div className={styles.menuPopover} role="menu">
         {children}

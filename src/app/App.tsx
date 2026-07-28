@@ -9,6 +9,7 @@ import { CanvasWorkspace } from '../features/canvas/CanvasWorkspace'
 import { downloadChartCsv } from '../features/charts/chartCsv'
 import { ChartPanel } from '../features/charts/ChartPanel'
 import { InspectorPanel } from '../features/inspector/InspectorPanel'
+import { commitPendingInspectorEdit } from '../features/inspector/pendingInspectorEdit'
 import { LayersPanel } from '../features/layers/LayersPanel'
 import { MenuBar } from '../features/menu/MenuBar'
 import { PlaybackBar } from '../features/playback/PlaybackBar'
@@ -322,6 +323,8 @@ export function App() {
     editor.setDraftEntity(null)
     editor.setMarquee(null)
     editor.setConnectorStartBodyId(null)
+    editor.setGroundJointStart(null)
+    editor.setGroundJointMessage(null)
   }
 
   const handleUndo = () => {
@@ -346,6 +349,8 @@ export function App() {
     documentState.executeCommand(command)
     editor.clearSelection()
     editor.setConnectorStartBodyId(null)
+    editor.setGroundJointStart(null)
+    editor.setGroundJointMessage(null)
   }
 
   useEffect(() => {
@@ -409,7 +414,10 @@ export function App() {
         return
       }
       if (event.key === 'Escape') {
-        useEditorStore.getState().clearSelection()
+        const editor = useEditorStore.getState()
+        editor.clearSelection()
+        editor.setGroundJointStart(null)
+        editor.setGroundJointMessage(null)
         return
       }
       if (event.shiftKey && key === 'r') {
@@ -435,6 +443,7 @@ export function App() {
         h: 'hand',
         z: 'zoom',
         g: 'ground',
+        j: 'groundJoint',
         o: 'body',
         f: 'field',
         l: 'connector',
@@ -451,6 +460,7 @@ export function App() {
     <div
       className={styles.appShell}
       data-chart-collapsed={chartCollapsed}
+      onPointerDownCapture={(event) => commitPendingInspectorEdit(event.target)}
       style={
         {
           '--right-dock-width': `${panelSizes.right}px`,
@@ -598,13 +608,13 @@ export function App() {
                 <li>V / R：选择移动 / 旋转；G / O / F / L：地面、物体、场、连接。</li>
                 <li>P：播放或暂停；句点：单步；Shift+R：重置。</li>
                 <li>Ctrl+S / O / Z / Y / C / V：保存、打开、撤销、重做、复制、粘贴。</li>
-                <li>空格临时抓手；Alt 临时关闭吸附；Delete 删除选择。</li>
+                <li>J 地面连接点；空格临时抓手；Alt 临时关闭吸附；Delete 删除选择。</li>
               </ul>
             ) : (
               <ul>
                 <li>模拟使用固定时间步长，结果存在可测量的离散误差。</li>
                 <li>圆弧与贝塞尔地面通常以误差受控的折线参与碰撞。</li>
-                <li>场边界按物体中心判断；质点碰撞使用有限半径近似。</li>
+                <li>场边界按物体中心判断；小球关闭碰撞时不会创建碰撞体。</li>
                 <li>浮点数会产生极小误差。本工具适合教学和常规模拟，不替代科研验证。</li>
               </ul>
             )}

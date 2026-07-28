@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 
 import {
   panCamera,
+  getVisibleSnapStep,
   screenToWorld,
   snapAngle,
   snapPoint,
@@ -14,13 +15,24 @@ import {
   createReplaceEntitiesCommand,
 } from '../../editor/commands/entityCommands'
 import {
+  createGroundWithAutoJoint,
+  resolveGroundCreationStart,
+} from '../../editor/ground/autoGroundJoint'
+import {
   distance,
   getEntityById,
   getEntityTransform,
+  resolveConnectorEndpoint,
+  snapBodyToGround,
   subtract,
+  worldToLocalAnchor,
   withEntityTransform,
 } from '../../editor/geometry/entityGeometry'
-import { entitiesInsideBounds, findTopEntity } from '../../editor/geometry/hitTest'
+import {
+  entitiesInsideBounds,
+  findNearestGroundEndpoint,
+  findTopEntity,
+} from '../../editor/geometry/hitTest'
 import { PixiSceneRenderer } from '../../renderer/pixi/PixiSceneRenderer'
 import { resolveRenderedEntity } from '../../renderer/pixi/renderEntityState'
 import {
@@ -30,15 +42,31 @@ import {
   createBlock,
   createElectricField,
   createGravityField,
+  createGroundJoint,
   createLineGround,
   createMagneticField,
-  createParticle,
-  createPointCharge,
   createRod,
   createRope,
   createSpring,
 } from '../../scene/model/entityFactories'
-import type { EntityId, LayerId, SceneEntity, Vec2 } from '../../scene/model/types'
+import { createSmoothBezierPathNodes, moveBezierPathPoint } from '../../scene/model/bezierPath'
+import { sameGroundEndpoint } from '../../scene/model/groundEndpoints'
+import {
+  buildGroundPathNetwork,
+  type GroundJointPathIssue,
+  type ResolvedGroundJointPath,
+} from '../../scene/model/groundPath'
+import type {
+  BezierPathNode,
+  ConnectorEntity,
+  EntityId,
+  FieldEntity,
+  GroundEndpointRef,
+  GroundEntity,
+  LayerId,
+  SceneEntity,
+  Vec2,
+} from '../../scene/model/types'
 import { useDocumentStore } from '../../stores/documentStore'
 import {
   useEditorStore,
@@ -72,6 +100,44 @@ type Interaction =
       bodyPreset: BodyToolPreset
       fieldPreset: FieldToolPreset
       fieldRegionShape: FieldRegionToolShape
+      pendingGroundEndpoint: GroundEndpointRef | null
+    }
+  | {
+      type: 'groundPen'
+      startWorld: Vec2
+      draftId: EntityId
+      layerId: LayerId
+      index: number
+      pendingGroundEndpoint: GroundEndpointRef | null
+    }
+  | {
+      type: 'fieldPen'
+      points: Vec2[]
+      draftId: EntityId
+      layerId: LayerId
+      index: number
+      fieldPreset: FieldToolPreset
+    }
+  | {
+      type: 'editBezierPoint'
+      original: GroundEntity
+      pointKey: 'p0' | 'p1' | 'p2' | 'p3'
+    }
+  | {
+      type: 'editFieldPoint'
+      original: FieldEntity
+      pointIndex: number
+    }
+  | {
+      type: 'editFieldPathPoint'
+      original: FieldEntity
+      nodeIndex: number
+      pointKey: keyof BezierPathNode
+    }
+  | {
+      type: 'editConnectorAnchor'
+      original: ConnectorEntity
+      endpointKey: 'a' | 'b'
     }
 
 function localPoint(event: PointerEvent | WheelEvent, canvas: HTMLCanvasElement): Vec2 {
@@ -82,8 +148,45 @@ function localPoint(event: PointerEvent | WheelEvent, canvas: HTMLCanvasElement)
 function toolCursor(tool: EditorTool): string {
   if (tool === 'hand') return 'grab'
   if (tool === 'zoom') return 'zoom-in'
-  if (['rotate', 'ground', 'body', 'field', 'connector'].includes(tool)) return 'crosshair'
+  if (['rotate', 'ground', 'groundJoint', 'body', 'field', 'connector'].includes(tool))
+    return 'crosshair'
   return 'default'
+}
+
+function endpointIsOccupied(
+  entities: readonly SceneEntity[],
+  endpoint: GroundEndpointRef,
+): boolean {
+  return entities.some(
+    (entity) =>
+      entity.kind === 'groundJoint' &&
+      (sameGroundEndpoint(entity.a, endpoint) || sameGroundEndpoint(entity.b, endpoint)),
+  )
+}
+
+function groundJointIssueMessage(issue: GroundJointPathIssue): string {
+  if (issue === 'same-ground') return '地面连接点必须连接两块不同的地面。'
+  if (issue === 'endpoint-conflict') return '至少一个端点已被其他地面连接点占用。'
+  if (issue === 'angle-too-small') return '两块地面的方向几乎重合，无需创建连接线。'
+  if (issue === 'linear-zero-length') return '反向地面的两个端点重合，无法生成直线连接。'
+  if (issue === 'transition-invalid') return '无法生成有限、无自交的安全过渡，请重新选择端点。'
+  if (issue === 'degenerate-tangent') return '端点切线无法确定，请检查零长度地面或控制点。'
+  if (issue === 'missing-ground') return '找不到端点对应的地面，请重新选择。'
+  return ''
+}
+
+function sameEndpointOrNull(
+  first: GroundEndpointRef | null,
+  second: GroundEndpointRef | null,
+): boolean {
+  return first === second || (!!first && !!second && sameGroundEndpoint(first, second))
+}
+
+function resolveGroundJointPath(
+  entities: readonly SceneEntity[],
+  joint: ReturnType<typeof createGroundJoint>,
+): ResolvedGroundJointPath | null {
+  return buildGroundPathNetwork([...entities, joint]).jointPaths.get(joint.id) ?? null
 }
 
 function activeLayerId(): LayerId | null {
@@ -156,9 +259,6 @@ function getDraft(
   }
 
   if (tool === 'body') {
-    if (interaction.bodyPreset === 'particle') {
-      return { ...createParticle(layerId, start, 0.12, index), id: draftId }
-    }
     if (interaction.bodyPreset === 'block') {
       const defaultEnd = { x: start.x + 0.5, y: start.y + 0.5 }
       const resolvedEnd = useDefaultSize && distance(start, end) < 0.05 ? defaultEnd : end
@@ -172,9 +272,6 @@ function getDraft(
         ),
         id: draftId,
       }
-    }
-    if (interaction.bodyPreset === 'pointCharge') {
-      return { ...createPointCharge(layerId, start, 0.15, index), id: draftId }
     }
     const radius =
       useDefaultSize && distance(start, end) < 0.05 ? 0.5 : Math.max(0.15, distance(start, end))
@@ -201,19 +298,119 @@ function getDraft(
   if (interaction.fieldRegionShape === 'circle') {
     const radius =
       useDefaultSize && distance(start, end) < 0.05 ? 2 : Math.max(0.1, distance(start, end))
-    return { ...field, id: draftId, region: { type: 'circle', center: start, radius } }
-  }
-  if (interaction.fieldRegionShape === 'polygon') {
-    const radius =
-      useDefaultSize && distance(start, end) < 0.05 ? 2 : Math.max(0.1, distance(start, end))
-    const startAngle = Math.atan2(end.y - start.y, end.x - start.x)
-    const points = Array.from({ length: 6 }, (_, pointIndex) => {
-      const angle = startAngle + (pointIndex * Math.PI) / 3
-      return { x: start.x + radius * Math.cos(angle), y: start.y + radius * Math.sin(angle) }
-    })
-    return { ...field, id: draftId, region: { type: 'polygon', points } }
+    return {
+      ...field,
+      id: draftId,
+      region: { type: 'circle', center: start, radius, startRad: 0, sweepRad: Math.PI * 2 },
+    }
   }
   return { ...field, id: draftId }
+}
+
+function createGroundPenDraft(
+  interaction: Extract<Interaction, { type: 'groundPen' }>,
+  end: Vec2,
+  useDefaultSize = false,
+): GroundEntity {
+  return getDraft(
+    {
+      type: 'create',
+      tool: 'ground',
+      startWorld: interaction.startWorld,
+      draftId: interaction.draftId,
+      layerId: interaction.layerId,
+      index: interaction.index,
+      groundShape: 'cubicBezier',
+      bodyPreset: 'ball',
+      fieldPreset: 'uniformGravity',
+      fieldRegionShape: 'rectangle',
+      pendingGroundEndpoint: interaction.pendingGroundEndpoint,
+    },
+    end,
+    useDefaultSize,
+  ) as GroundEntity
+}
+
+function createFieldPenDraft(
+  interaction: Extract<Interaction, { type: 'fieldPen' }>,
+  points: Vec2[],
+): FieldEntity {
+  const safePoints = points.length >= 3 ? points : [...points, ...points.slice(-1)]
+  const xValues = safePoints.map((point) => point.x)
+  const yValues = safePoints.map((point) => point.y)
+  const center = {
+    x: (Math.min(...xValues) + Math.max(...xValues)) / 2,
+    y: (Math.min(...yValues) + Math.max(...yValues)) / 2,
+  }
+  const width = Math.max(0.2, Math.max(...xValues) - Math.min(...xValues))
+  const height = Math.max(0.2, Math.max(...yValues) - Math.min(...yValues))
+  const field =
+    interaction.fieldPreset === 'uniformElectric'
+      ? createElectricField(interaction.layerId, center, width, height, interaction.index)
+      : interaction.fieldPreset === 'uniformMagnetic'
+        ? createMagneticField(interaction.layerId, center, width, height, interaction.index)
+        : createGravityField(interaction.layerId, center, width, height, interaction.index)
+  return {
+    ...field,
+    id: interaction.draftId,
+    region: { type: 'bezierPath', nodes: createSmoothBezierPathNodes(safePoints) },
+  }
+}
+
+type EditableHandle =
+  | { type: 'bezier'; entity: GroundEntity; pointKey: 'p0' | 'p1' | 'p2' | 'p3' }
+  | { type: 'fieldPoint'; entity: FieldEntity; pointIndex: number }
+  | {
+      type: 'fieldPathPoint'
+      entity: FieldEntity
+      nodeIndex: number
+      pointKey: keyof BezierPathNode
+    }
+  | { type: 'connectorAnchor'; entity: ConnectorEntity; endpointKey: 'a' | 'b' }
+
+function findEditableHandle(
+  entities: SceneEntity[],
+  selectedIds: EntityId[],
+  point: Vec2,
+  tolerance: number,
+): EditableHandle | null {
+  for (let index = entities.length - 1; index >= 0; index -= 1) {
+    const entity = entities[index]
+    if (!entity || !selectedIds.includes(entity.id)) continue
+    if (entity.kind === 'ground' && entity.geometry.type === 'cubicBezier') {
+      for (const pointKey of ['p0', 'p1', 'p2', 'p3'] as const) {
+        if (distance(entity.geometry[pointKey], point) <= tolerance) {
+          return { type: 'bezier', entity, pointKey }
+        }
+      }
+    }
+    if (entity.kind === 'field' && entity.region.type === 'polygon') {
+      const pointIndex = entity.region.points.findIndex(
+        (candidate) => distance(candidate, point) <= tolerance,
+      )
+      if (pointIndex >= 0) return { type: 'fieldPoint', entity, pointIndex }
+    }
+    if (entity.kind === 'field' && entity.region.type === 'bezierPath') {
+      for (let nodeIndex = 0; nodeIndex < entity.region.nodes.length; nodeIndex += 1) {
+        const node = entity.region.nodes[nodeIndex]
+        if (!node) continue
+        for (const pointKey of ['inHandle', 'outHandle', 'anchor'] as const) {
+          if (distance(node[pointKey], point) <= tolerance) {
+            return { type: 'fieldPathPoint', entity, nodeIndex, pointKey }
+          }
+        }
+      }
+    }
+    if (entity.kind === 'connector') {
+      for (const endpointKey of ['a', 'b'] as const) {
+        const endpoint = resolveConnectorEndpoint(entities, entity[endpointKey])
+        if (endpoint && distance(endpoint, point) <= tolerance) {
+          return { type: 'connectorAnchor', entity, endpointKey }
+        }
+      }
+    }
+  }
+  return null
 }
 
 function editableEntities(entities: SceneEntity[]): SceneEntity[] {
@@ -253,8 +450,38 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
   const draftEntity = useEditorStore((state) => state.draftEntity)
   const marquee = useEditorStore((state) => state.marquee)
   const connectorStartBodyId = useEditorStore((state) => state.connectorStartBodyId)
+  const groundJointStart = useEditorStore((state) => state.groundJointStart)
+  const groundJointHover = useEditorStore((state) => state.groundJointHover)
+  const pendingGroundEndpoint = useEditorStore((state) => state.pendingGroundEndpoint)
   const runtimeBodies = useSimulationStore((state) => state.runtimeBodies)
   const runtimeTrajectories = useSimulationStore((state) => state.runtimeTrajectories)
+
+  useEffect(() => {
+    const interaction = interactionRef.current
+    const penStillActive =
+      (interaction.type === 'groundPen' && activeTool === 'ground') ||
+      (interaction.type === 'fieldPen' && activeTool === 'field')
+    if (interaction.type !== 'idle' && !penStillActive) {
+      interactionRef.current = { type: 'idle' }
+      useEditorStore.getState().clearPreview()
+      useEditorStore.getState().setDraftEntity(null)
+      useEditorStore.getState().setMarquee(null)
+    }
+  }, [activeTool])
+
+  useEffect(() => {
+    if (
+      groundJointStart &&
+      !scene.entities.some(
+        (entity) => entity.kind === 'ground' && entity.id === groundJointStart.groundId,
+      )
+    ) {
+      const editor = useEditorStore.getState()
+      editor.setGroundJointStart(null)
+      editor.setGroundJointHover(null)
+      editor.setGroundJointMessage('第一个端点已不存在，请重新选择。')
+    }
+  }, [groundJointStart, scene.entities])
 
   useEffect(() => {
     sizeRef.current = size
@@ -305,6 +532,10 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
       draftEntity,
       marquee,
       connectorStartBodyId,
+      activeTool,
+      groundJointStart,
+      groundJointHover,
+      pendingGroundEndpoint,
       runtimeBodies,
       runtimeTrajectories,
     })
@@ -317,6 +548,9 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
     connectorStartBodyId,
     draftEntity,
     gridVisible,
+    groundJointHover,
+    groundJointStart,
+    pendingGroundEndpoint,
     marquee,
     previewEntities,
     ready,
@@ -340,7 +574,7 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
         canvas.style.cursor = 'zoom-in'
       } else if (tool === 'rotate') {
         canvas.style.cursor = 'crosshair'
-      } else if (['ground', 'body', 'field', 'connector'].includes(tool)) {
+      } else if (['ground', 'groundJoint', 'body', 'field', 'connector'].includes(tool)) {
         canvas.style.cursor = 'crosshair'
       } else {
         canvas.style.cursor = toolCursor(tool)
@@ -355,16 +589,60 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
     const resolvedWorldPoint = (event: PointerEvent): Vec2 => {
       const editor = useEditorStore.getState()
       const world = rawWorldPoint(event)
+      const scene = useDocumentStore.getState().scene
       return editor.snapEnabled && !event.altKey
-        ? snapPoint(world, useDocumentStore.getState().scene.settings.snapStep)
+        ? snapPoint(
+            world,
+            getVisibleSnapStep(scene.settings.gridStep, editor.camera.pixelsPerMeter),
+          )
         : world
     }
 
-    const startCreation = (tool: 'ground' | 'body' | 'field', world: Vec2) => {
+    const applyWallSnap = (entity: SceneEntity): SceneEntity => {
+      const editor = useEditorStore.getState()
+      if (!editor.wallSnapEnabled || entity.kind !== 'body') return entity
+      const grounds = editableEntities(renderEntities()).filter(
+        (candidate): candidate is GroundEntity => candidate.kind === 'ground',
+      )
+      return snapBodyToGround(entity, grounds, 12 / editor.camera.pixelsPerMeter)
+    }
+
+    const startCreation = (
+      tool: 'ground' | 'body' | 'field',
+      world: Vec2,
+      pendingGroundEndpoint: GroundEndpointRef | null = null,
+    ) => {
       const layerId = activeLayerId()
       if (!layerId) return
       const editor = useEditorStore.getState()
+      editor.setPendingGroundEndpoint(tool === 'ground' ? pendingGroundEndpoint : null)
       const kind = tool === 'ground' ? 'ground' : tool === 'body' ? 'body' : 'field'
+      if (tool === 'ground' && editor.groundToolShape === 'cubicBezier') {
+        const interaction: Extract<Interaction, { type: 'groundPen' }> = {
+          type: 'groundPen',
+          startWorld: world,
+          draftId: crypto.randomUUID(),
+          layerId,
+          index: nextEntityIndex('ground'),
+          pendingGroundEndpoint,
+        }
+        interactionRef.current = interaction
+        editor.setDraftEntity(createGroundPenDraft(interaction, world))
+        return
+      }
+      if (tool === 'field' && editor.fieldRegionToolShape === 'freeform') {
+        const interaction: Extract<Interaction, { type: 'fieldPen' }> = {
+          type: 'fieldPen',
+          points: [world],
+          draftId: crypto.randomUUID(),
+          layerId,
+          index: nextEntityIndex('field'),
+          fieldPreset: editor.fieldToolPreset,
+        }
+        interactionRef.current = interaction
+        editor.setDraftEntity(createFieldPenDraft(interaction, [world, world]))
+        return
+      }
       const interaction: Extract<Interaction, { type: 'create' }> = {
         type: 'create',
         tool,
@@ -376,9 +654,10 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
         bodyPreset: editor.bodyToolPreset,
         fieldPreset: editor.fieldToolPreset,
         fieldRegionShape: editor.fieldRegionToolShape,
+        pendingGroundEndpoint,
       }
       interactionRef.current = interaction
-      useEditorStore.getState().setDraftEntity(getDraft(interaction, world))
+      useEditorStore.getState().setDraftEntity(applyWallSnap(getDraft(interaction, world)))
     }
 
     const handlePointerDown = (event: PointerEvent) => {
@@ -419,6 +698,145 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
         return
       }
 
+      const pending = interactionRef.current
+      if (pending.type === 'groundPen' && tool === 'ground') {
+        const entity = createGroundPenDraft(pending, world, true)
+        const document = useDocumentStore.getState()
+        document.executeCommand(
+          createAddEntityCommand(
+            document.scene,
+            createGroundWithAutoJoint(document.scene, entity, pending.pendingGroundEndpoint),
+          ),
+        )
+        editor.setDraftEntity(null)
+        editor.setPendingGroundEndpoint(null)
+        editor.setSelectedIds([entity.id])
+        interactionRef.current = { type: 'idle' }
+        return
+      }
+      if (pending.type === 'fieldPen' && tool === 'field') {
+        const closeToStart =
+          distance(world, pending.points[0] ?? world) <= 10 / editor.camera.pixelsPerMeter
+        if (pending.points.length >= 3 && (closeToStart || event.detail >= 2)) {
+          const entity = createFieldPenDraft(pending, pending.points)
+          const document = useDocumentStore.getState()
+          document.executeCommand(createAddEntityCommand(document.scene, entity))
+          editor.setDraftEntity(null)
+          editor.setSelectedIds([entity.id])
+          interactionRef.current = { type: 'idle' }
+        } else {
+          const points = [...pending.points, world]
+          interactionRef.current = { ...pending, points }
+          editor.setDraftEntity(createFieldPenDraft(pending, [...points, world]))
+        }
+        return
+      }
+
+      if (tool === 'select') {
+        const handle = findEditableHandle(
+          entities,
+          editor.selectedIds,
+          rawWorld,
+          9 / editor.camera.pixelsPerMeter,
+        )
+        if (handle?.type === 'bezier') {
+          interactionRef.current = {
+            type: 'editBezierPoint',
+            original: handle.entity,
+            pointKey: handle.pointKey,
+          }
+          return
+        }
+        if (handle?.type === 'fieldPoint') {
+          interactionRef.current = {
+            type: 'editFieldPoint',
+            original: handle.entity,
+            pointIndex: handle.pointIndex,
+          }
+          return
+        }
+        if (handle?.type === 'fieldPathPoint') {
+          interactionRef.current = {
+            type: 'editFieldPathPoint',
+            original: handle.entity,
+            nodeIndex: handle.nodeIndex,
+            pointKey: handle.pointKey,
+          }
+          return
+        }
+        if (handle?.type === 'connectorAnchor') {
+          interactionRef.current = {
+            type: 'editConnectorAnchor',
+            original: handle.entity,
+            endpointKey: handle.endpointKey,
+          }
+          return
+        }
+      }
+
+      if (tool === 'groundJoint') {
+        const first = editor.groundJointStart
+        const sceneEntities = useDocumentStore.getState().scene.entities
+        const excludedGroundIds = first ? new Set([first.groundId]) : new Set<EntityId>()
+        const endpointHit = findNearestGroundEndpoint(
+          entities,
+          rawWorld,
+          9 / editor.camera.pixelsPerMeter,
+          excludedGroundIds,
+        )
+
+        if (!endpointHit) {
+          const sameGroundHit = first
+            ? findNearestGroundEndpoint(entities, rawWorld, 9 / editor.camera.pixelsPerMeter)
+            : null
+          editor.setGroundJointMessage(
+            sameGroundHit?.ground.id === first?.groundId
+              ? '请选择另一块地面的端点，不能连接同一块地面。'
+              : '请在地面端点 9 像素范围内点击。',
+          )
+          return
+        }
+
+        if (endpointIsOccupied(sceneEntities, endpointHit.reference)) {
+          editor.setGroundJointMessage('这个端点已经有地面连接点，请选择其他端点。')
+          return
+        }
+
+        if (!first) {
+          editor.setGroundJointStart(endpointHit.reference)
+          editor.setGroundJointHover(null)
+          editor.setGroundJointMessage('已选择第一个端点，请选择另一块地面的端点。')
+          editor.setSelectedIds([endpointHit.ground.id])
+          return
+        }
+
+        const layerId = activeLayerId()
+        if (!layerId) return
+        const joint = createGroundJoint(
+          layerId,
+          first,
+          endpointHit.reference,
+          nextEntityIndex('groundJoint'),
+        )
+        const resolvedPath = resolveGroundJointPath(sceneEntities, joint)
+        if (!resolvedPath || resolvedPath.issue) {
+          editor.setGroundJointMessage(
+            resolvedPath?.issue
+              ? groundJointIssueMessage(resolvedPath.issue)
+              : '无法解析地面连接，请重新选择端点。',
+          )
+          return
+        }
+
+        const document = useDocumentStore.getState()
+        document.executeCommand(createAddEntityCommand(document.scene, joint))
+        editor.setSelectedIds([joint.id])
+        editor.setGroundJointStart(null)
+        editor.setGroundJointHover(null)
+        editor.setGroundJointMessage('地面连接点已创建。')
+        return
+      }
+
       if (tool === 'connector') {
         if (!hit || hit.kind !== 'body') return
         if (!editor.connectorStartBodyId) {
@@ -451,7 +869,19 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
       }
 
       if (tool === 'ground' || tool === 'body' || tool === 'field') {
-        startCreation(tool, world)
+        if (tool === 'ground') {
+          const start = resolveGroundCreationStart({
+            entities,
+            rawWorld,
+            fallbackWorld: world,
+            pixelsPerMeter: editor.camera.pixelsPerMeter,
+            enabled: editor.autoGroundJointEnabled,
+            bypassSnap: event.altKey,
+          })
+          startCreation(tool, start.startWorld, start.pendingEndpoint)
+        } else {
+          startCreation(tool, world)
+        }
         return
       }
 
@@ -514,6 +944,53 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
       const world = resolvedWorldPoint(event)
       const interaction = interactionRef.current
 
+      if (editor.activeTool === 'groundJoint' && interaction.type === 'idle') {
+        const entities = editableEntities(renderEntities())
+        const sceneEntities = useDocumentStore.getState().scene.entities
+        const hover =
+          findNearestGroundEndpoint(entities, unsnappedWorld, 9 / editor.camera.pixelsPerMeter)
+            ?.reference ?? null
+        const hoverChanged = !sameEndpointOrNull(editor.groundJointHover, hover)
+        if (hoverChanged) {
+          editor.setGroundJointHover(hover)
+
+          let message: string | null = null
+          if (editor.groundJointStart) {
+            if (!hover) {
+              message = '已选择第一个端点，请选择另一块地面的端点。'
+            } else {
+              const firstGround = entities.find(
+                (entity): entity is GroundEntity =>
+                  entity.kind === 'ground' && entity.id === editor.groundJointStart?.groundId,
+              )
+              if (!firstGround) {
+                editor.setGroundJointStart(null)
+                editor.setGroundJointHover(null)
+                message = '第一个端点已不存在，请重新选择。'
+              } else {
+                const preview = createGroundJoint(
+                  firstGround.layerId,
+                  editor.groundJointStart,
+                  hover,
+                  0,
+                )
+                const resolvedPath = resolveGroundJointPath(sceneEntities, preview)
+                message = resolvedPath?.issue
+                  ? groundJointIssueMessage(resolvedPath.issue)
+                  : resolvedPath?.kind === 'linear'
+                    ? '预览：将生成端点间直线连接。'
+                    : '预览：将生成平滑连接线。'
+              }
+            }
+          } else if (hover) {
+            message = endpointIsOccupied(sceneEntities, hover)
+              ? '这个端点已经被地面连接点占用。'
+              : '点击高亮端点作为第一个端点。'
+          }
+          if (editor.groundJointMessage !== message) editor.setGroundJointMessage(message)
+        }
+      }
+
       if (interaction.type === 'pan') {
         editor.setCamera(
           panCamera(interaction.startCamera, subtract(screen, interaction.startScreen)),
@@ -521,7 +998,11 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
       } else if (interaction.type === 'marquee') {
         editor.setMarquee({ start: interaction.startWorld, end: unsnappedWorld })
       } else if (interaction.type === 'create') {
-        editor.setDraftEntity(getDraft(interaction, world))
+        editor.setDraftEntity(applyWallSnap(getDraft(interaction, world)))
+      } else if (interaction.type === 'groundPen') {
+        editor.setDraftEntity(createGroundPenDraft(interaction, world))
+      } else if (interaction.type === 'fieldPen') {
+        editor.setDraftEntity(createFieldPenDraft(interaction, [...interaction.points, world]))
       } else if (interaction.type === 'move') {
         const anchor = interaction.originals.find((entity) => entity.id === interaction.anchorId)
         const anchorTransform = anchor ? getEntityTransform(anchor) : null
@@ -533,24 +1014,53 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
               x: anchorTransform.position.x + delta.x,
               y: anchorTransform.position.y + delta.y,
             },
-            useDocumentStore.getState().scene.settings.snapStep,
+            getVisibleSnapStep(
+              useDocumentStore.getState().scene.settings.gridStep,
+              editor.camera.pixelsPerMeter,
+            ),
           )
           delta = subtract(snappedAnchor, anchorTransform.position)
         }
-        editor.setPreviewEntities(
-          interaction.originals.map((entity) => {
-            const transform = getEntityTransform(entity)
-            return transform
-              ? withEntityTransform(entity, {
-                  ...transform,
-                  position: {
-                    x: transform.position.x + delta.x,
-                    y: transform.position.y + delta.y,
-                  },
-                })
-              : entity
-          }),
-        )
+        let moved = interaction.originals.map((entity) => {
+          const transform = getEntityTransform(entity)
+          return transform
+            ? withEntityTransform(entity, {
+                ...transform,
+                position: {
+                  x: transform.position.x + delta.x,
+                  y: transform.position.y + delta.y,
+                },
+              })
+            : entity
+        })
+        if (editor.wallSnapEnabled) {
+          const movedAnchor = moved.find(
+            (entity): entity is Extract<SceneEntity, { kind: 'body' }> =>
+              entity.id === interaction.anchorId && entity.kind === 'body',
+          )
+          if (movedAnchor) {
+            const snappedAnchor = applyWallSnap(movedAnchor)
+            if (snappedAnchor.kind === 'body') {
+              const correction = subtract(
+                snappedAnchor.transform.position,
+                movedAnchor.transform.position,
+              )
+              moved = moved.map((entity) => {
+                const transform = getEntityTransform(entity)
+                return transform
+                  ? withEntityTransform(entity, {
+                      ...transform,
+                      position: {
+                        x: transform.position.x + correction.x,
+                        y: transform.position.y + correction.y,
+                      },
+                    })
+                  : entity
+              })
+            }
+          }
+        }
+        editor.setPreviewEntities(moved)
       } else if (interaction.type === 'rotate') {
         const pointerAngle = Math.atan2(
           unsnappedWorld.y - interaction.pivot.y,
@@ -568,6 +1078,52 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
             return withEntityTransform(entity, { ...transform, angleRad })
           }),
         )
+      } else if (interaction.type === 'editBezierPoint') {
+        const geometry = interaction.original.geometry
+        if (geometry.type !== 'cubicBezier') return
+        editor.setPreviewEntities([
+          {
+            ...interaction.original,
+            geometry: { ...geometry, [interaction.pointKey]: world },
+          },
+        ])
+      } else if (interaction.type === 'editFieldPoint') {
+        const region = interaction.original.region
+        if (region.type !== 'polygon') return
+        editor.setPreviewEntities([
+          {
+            ...interaction.original,
+            region: {
+              ...region,
+              points: region.points.map((point, index) =>
+                index === interaction.pointIndex ? world : point,
+              ),
+            },
+          },
+        ])
+      } else if (interaction.type === 'editFieldPathPoint') {
+        const region = interaction.original.region
+        if (region.type !== 'bezierPath') return
+        const nodes = moveBezierPathPoint(
+          region.nodes,
+          interaction.nodeIndex,
+          interaction.pointKey,
+          world,
+        )
+        editor.setPreviewEntities([{ ...interaction.original, region: { ...region, nodes } }])
+      } else if (interaction.type === 'editConnectorAnchor') {
+        const endpoint = interaction.original[interaction.endpointKey]
+        const body = getEntityById(editableEntities(renderEntities()), endpoint.bodyId)
+        if (body?.kind !== 'body') return
+        editor.setPreviewEntities([
+          {
+            ...interaction.original,
+            [interaction.endpointKey]: {
+              ...endpoint,
+              localAnchor: worldToLocalAnchor(body, world),
+            },
+          },
+        ])
       }
     }
 
@@ -578,16 +1134,29 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
       const rawWorld = rawWorldPoint(event)
       const world = resolvedWorldPoint(event)
 
-      if (interaction.type === 'move' || interaction.type === 'rotate') {
+      if (
+        interaction.type === 'move' ||
+        interaction.type === 'rotate' ||
+        interaction.type === 'editBezierPoint' ||
+        interaction.type === 'editFieldPoint' ||
+        interaction.type === 'editFieldPathPoint' ||
+        interaction.type === 'editConnectorAnchor'
+      ) {
         const replacements = Object.values(editor.previewEntities)
         if (replacements.length > 0) {
-          document.executeCommand(
-            createReplaceEntitiesCommand(
-              document.scene,
-              replacements,
-              interaction.type === 'move' ? '移动实体' : '旋转实体',
-            ),
-          )
+          const label =
+            interaction.type === 'move'
+              ? '移动实体'
+              : interaction.type === 'rotate'
+                ? '旋转实体'
+                : interaction.type === 'editBezierPoint'
+                  ? '拖动贝塞尔控制点'
+                  : interaction.type === 'editFieldPoint'
+                    ? '拖动场范围节点'
+                    : interaction.type === 'editFieldPathPoint'
+                      ? '拖动场范围贝塞尔控制点'
+                      : '拖动连接锚点'
+          document.executeCommand(createReplaceEntitiesCommand(document.scene, replacements, label))
         }
         editor.clearPreview()
       } else if (interaction.type === 'marquee') {
@@ -603,10 +1172,18 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
         )
         editor.setMarquee(null)
       } else if (interaction.type === 'create') {
-        const entity = getDraft(interaction, world, true)
-        document.executeCommand(createAddEntityCommand(document.scene, entity))
+        const entity = applyWallSnap(getDraft(interaction, world, true))
+        const additions =
+          entity.kind === 'ground'
+            ? createGroundWithAutoJoint(document.scene, entity, interaction.pendingGroundEndpoint)
+            : [entity]
+        document.executeCommand(createAddEntityCommand(document.scene, additions))
         editor.setDraftEntity(null)
+        editor.setPendingGroundEndpoint(null)
         editor.setSelectedIds([entity.id])
+      } else if (interaction.type === 'groundPen' || interaction.type === 'fieldPen') {
+        if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId)
+        return
       }
 
       interactionRef.current = { type: 'idle' }
@@ -618,7 +1195,13 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
       const editor = useEditorStore.getState()
       editor.clearPreview()
       editor.setDraftEntity(null)
+      editor.setPendingGroundEndpoint(null)
       editor.setMarquee(null)
+      if (editor.activeTool === 'groundJoint') {
+        editor.setGroundJointStart(null)
+        editor.setGroundJointHover(null)
+        editor.setGroundJointMessage(null)
+      }
       interactionRef.current = { type: 'idle' }
       updateCursor(editor.activeTool)
     }
@@ -638,6 +1221,19 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
         updateCursor(useEditorStore.getState().activeTool)
         event.preventDefault()
       }
+      if (event.key === 'Enter') {
+        const interaction = interactionRef.current
+        if (interaction.type === 'fieldPen' && interaction.points.length >= 3) {
+          const editor = useEditorStore.getState()
+          const document = useDocumentStore.getState()
+          const entity = createFieldPenDraft(interaction, interaction.points)
+          document.executeCommand(createAddEntityCommand(document.scene, entity))
+          editor.setDraftEntity(null)
+          editor.setSelectedIds([entity.id])
+          interactionRef.current = { type: 'idle' }
+          event.preventDefault()
+        }
+      }
       if (event.key === 'Escape') cancelInteraction()
     }
 
@@ -648,7 +1244,14 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
       }
     }
 
-    const handleContextMenu = (event: MouseEvent) => event.preventDefault()
+    const handleContextMenu = (event: MouseEvent) => {
+      event.preventDefault()
+      const editor = useEditorStore.getState()
+      if (editor.activeTool !== 'groundJoint') return
+      editor.setGroundJointStart(null)
+      editor.setGroundJointHover(null)
+      editor.setGroundJointMessage(null)
+    }
 
     updateCursor(useEditorStore.getState().activeTool)
     canvas.addEventListener('pointerdown', handlePointerDown)

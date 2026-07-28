@@ -139,19 +139,31 @@
   width: 100%;
   height: 28px;
   align-items: center;
-  gap: 7px;
-  padding: 0 7px;
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--color-text-muted);
-  cursor: pointer;
   font-size: 10px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.entitySelect {
+  display: grid;
+  min-width: 0;
+  height: 100%;
+  align-items: center;
+  gap: 7px;
+  padding: 0 4px 0 7px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
   grid-template-columns: 15px minmax(0, 1fr) 12px;
   text-align: left;
 }
 
-.entityRow span {
+.entitySelect span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -166,6 +178,43 @@
   border-color: rgb(88 166 255 / 22%);
   background: rgb(88 166 255 / 12%);
   color: #b9dcff;
+}
+
+.entityRow[data-visible='false'] .entitySelect {
+  color: var(--color-text-dim);
+  opacity: 0.65;
+}
+
+.entityActions {
+  display: flex;
+  align-items: center;
+  padding-right: 2px;
+}
+
+.entityAction {
+  display: grid;
+  width: 23px;
+  height: 23px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  place-items: center;
+  background: transparent;
+  color: var(--color-text-dim);
+}
+
+.entityAction:not(:disabled):hover {
+  background: var(--color-bg-active);
+  color: var(--color-text);
+}
+
+.entityDelete:not(:disabled):hover {
+  background: rgb(255 107 122 / 14%);
+  color: var(--color-danger);
+}
+
+.entityAction:disabled {
+  opacity: 0.35;
 }
 
 .emptyLayer {
@@ -218,6 +267,50 @@
   font-size: 10px;
 }
 
+.inspectorTabs {
+  position: sticky;
+  z-index: 1;
+  top: 0;
+  display: flex;
+  overflow-x: auto;
+  padding: 5px 6px;
+  border-bottom: 1px solid var(--color-border);
+  background: #1b1e23;
+  gap: 3px;
+  scrollbar-width: none;
+}
+
+.inspectorTabs::-webkit-scrollbar {
+  display: none;
+}
+
+.inspectorTabs button {
+  height: 26px;
+  flex: 0 0 auto;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-dim);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.inspectorTabs button:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text);
+}
+
+.inspectorTabs button[aria-selected='true'] {
+  border-color: rgb(88 166 255 / 24%);
+  background: var(--color-accent-soft);
+  color: #b9dcff;
+}
+
+.inspectorTabPanel {
+  min-height: 0;
+}
+
 .propertyGroup {
   padding: 12px;
   border-bottom: 1px solid var(--color-border);
@@ -230,6 +323,21 @@
   font-weight: 700;
   letter-spacing: 0.1em;
   text-transform: uppercase;
+}
+
+.propertySubheading {
+  margin: 12px 0 4px;
+  padding: 5px 7px;
+  border-left: 2px solid var(--color-accent);
+  border-radius: 2px;
+  background: rgb(88 166 255 / 7%);
+  color: #a9c7e5;
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.propertyGroup h3 + .propertySubheading {
+  margin-top: 0;
 }
 
 .propertyRow {

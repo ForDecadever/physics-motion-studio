@@ -1,4 +1,4 @@
-import { SimulationWorld } from '../core/SimulationWorld'
+import type { SimulationWorld } from '../core/SimulationWorld'
 import type {
   MainToPhysicsMessage,
   PhysicsToMainMessage,
@@ -14,6 +14,9 @@ const ALLOWED_RATES = new Set([0.25, 0.5, 1, 2, 4])
 
 let sceneSnapshot: SceneDocument | null = null
 let simulation: SimulationWorld | null = null
+let SimulationWorldConstructor:
+  (typeof import('../core/SimulationWorld'))['SimulationWorld'] | null = null
+let pendingMessages: MainToPhysicsMessage[] = []
 let status: Exclude<SimulationStatus, 'initializing' | 'error'> = 'ready'
 let playbackRate = 1
 let accumulatorSeconds = 0
@@ -60,8 +63,11 @@ function recordCurrentState(force = false): void {
 }
 
 function buildSimulation(scene: SceneDocument): void {
+  if (!SimulationWorldConstructor) {
+    throw new Error('物理引擎尚未完成初始化。')
+  }
   simulation?.dispose()
-  simulation = new SimulationWorld(scene)
+  simulation = new SimulationWorldConstructor(scene)
   recordIntervalSeconds = 1 / scene.settings.recordingSampleRate
   accumulatorSeconds = 0
   pendingSamples = []
@@ -143,13 +149,36 @@ function tick(nowMs: number): void {
   setTimeout(() => tick(performance.now()), LOOP_INTERVAL_MS)
 }
 
-self.onmessage = (event: MessageEvent<MainToPhysicsMessage>) => {
+function dispatchMessage(message: MainToPhysicsMessage): void {
+  if (!SimulationWorldConstructor) {
+    if (message.type === 'initialize') pendingMessages = [message]
+    else pendingMessages.push(message)
+    return
+  }
+
   try {
-    handleMessage(event.data)
+    handleMessage(message)
   } catch (error) {
     const message = error instanceof Error ? error.message : '物理线程发生未知错误。'
     post({ type: 'fatalError', message })
   }
 }
+
+self.onmessage = (event: MessageEvent<MainToPhysicsMessage>) => {
+  dispatchMessage(event.data)
+}
+
+void import('../core/SimulationWorld')
+  .then((module) => {
+    SimulationWorldConstructor = module.SimulationWorld
+    const messages = pendingMessages
+    pendingMessages = []
+    for (const message of messages) dispatchMessage(message)
+  })
+  .catch((error: unknown) => {
+    pendingMessages = []
+    const message = error instanceof Error ? error.message : '物理引擎无法完成初始化。'
+    post({ type: 'fatalError', message })
+  })
 
 tick(performance.now())

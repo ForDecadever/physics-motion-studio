@@ -99,8 +99,6 @@ export function getChartMetric(metricId: ChartMetricId): ChartMetricDefinition {
 }
 
 export function chartColorForBody(body: BodyEntity): string {
-  if (body.preset !== 'pointCharge') return '#4e9eeb'
-  if (body.chargeC > 0) return '#f06b78'
-  if (body.chargeC < 0) return '#6ea8ff'
-  return '#a9b1bc'
+  if (body.shape.type === 'circle' && body.shape.collisionEnabled) return '#f06b78'
+  return '#4e9eeb'
 }

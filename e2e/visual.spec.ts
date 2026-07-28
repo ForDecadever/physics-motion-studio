@@ -21,6 +21,7 @@ test('选中物体视觉基线', async ({ page }) => {
   const box = await canvasBox(page)
   await page.getByRole('button', { name: '物体工具（O）' }).click()
   await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2)
+  await page.getByRole('tab', { name: '物理', exact: true }).click()
   await expect(page.getByLabel('质量')).toBeVisible()
   await expect(page).toHaveScreenshot('selected-body.png', { animations: 'disabled' })
 })
@@ -39,7 +40,8 @@ test('曲线地面、场、连接器和播放图表视觉基线', async ({ page 
 
   await page.getByRole('button', { name: '地面工具（G）' }).click()
   await page.getByLabel('形状').selectOption('cubicBezier')
-  await drag(center.x - 260, center.y + 120, center.x + 260, center.y + 120)
+  await page.mouse.click(center.x - 260, center.y + 120)
+  await page.mouse.click(center.x + 260, center.y + 120)
   await page.getByRole('button', { name: '物体工具（O）' }).click()
   await page.mouse.click(center.x - 90, center.y - 30)
   await page.mouse.click(center.x + 90, center.y - 30)

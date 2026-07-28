@@ -1,10 +1,16 @@
 import { describe, expect, it } from 'vitest'
 
-import { createBall, createRope } from '../../scene/model/entityFactories'
+import {
+  createBall,
+  createGroundJoint,
+  createLineGround,
+  createRope,
+} from '../../scene/model/entityFactories'
 import { createEmptyScene } from '../../scene/model/createEmptyScene'
 import {
   createAddEntityCommand,
   createDeleteEntitiesCommand,
+  createReplaceEntitiesCommand,
   createReplaceSceneSettingsCommand,
 } from './entityCommands'
 
@@ -37,16 +43,53 @@ describe('实体命令', () => {
     expect(command?.undo(populated).entities).toEqual([first, second, rope])
   })
 
-  it('场景级点电荷开关可以撤销', () => {
+  it('删除地面时一起删除依赖的地面连接点，并可撤销恢复', () => {
+    const scene = createEmptyScene()
+    const layerId = scene.layers[0]?.id
+    if (!layerId) return
+    const first = createLineGround(layerId, { x: -1, y: 0 }, { x: 0, y: 0 }, 1)
+    const second = createLineGround(layerId, { x: 0, y: 0 }, { x: 1, y: 0 }, 2)
+    const joint = createGroundJoint(
+      layerId,
+      { groundId: first.id, endpoint: 'end' },
+      { groundId: second.id, endpoint: 'start' },
+      1,
+    )
+    const populated = { ...scene, entities: [first, second, joint] }
+    const command = createDeleteEntitiesCommand(populated, [first.id])
+
+    expect(command?.execute(populated).entities).toEqual([second])
+    expect(command?.undo(populated).entities).toEqual([first, second, joint])
+  })
+
+  it('隐藏对象只改变显示状态，不会关闭物理参与', () => {
+    const scene = createEmptyScene()
+    const layerId = scene.layers[0]?.id
+    if (!layerId) return
+    const ball = createBall(layerId, { x: 0, y: 0 }, 0.5, 1)
+    const populated = { ...scene, entities: [ball] }
+    const command = createReplaceEntitiesCommand(
+      populated,
+      [{ ...ball, visible: false }],
+      '隐藏对象',
+    )
+
+    const [hidden] = command.execute(populated).entities
+    expect(hidden?.visible).toBe(false)
+    expect(hidden?.simulationEnabled).toBe(true)
+    expect(command.undo(populated).entities).toEqual([ball])
+  })
+
+  it('场景级物体静电作用开关可以撤销', () => {
     const scene = createEmptyScene()
     const command = createReplaceSceneSettingsCommand(
       scene,
-      { ...scene.settings, pairwiseElectrostatics: false },
-      '关闭点电荷间作用',
+      { ...scene.settings, pairwiseElectrostatics: true },
+      '开启物体间静电作用',
     )
 
     const after = command.execute(scene)
-    expect(after.settings.pairwiseElectrostatics).toBe(false)
-    expect(command.undo(after).settings.pairwiseElectrostatics).toBe(true)
+    expect(after.settings.pairwiseElectrostatics).toBe(true)
+    expect(command.undo(after).settings.pairwiseElectrostatics).toBe(false)
   })
 })

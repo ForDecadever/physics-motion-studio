@@ -1,4 +1,5 @@
 .appShell {
+  isolation: isolate;
   display: grid;
   width: 100%;
   height: 100dvh;
@@ -21,7 +22,7 @@
 .rightResizer,
 .chartResizer {
   position: relative;
-  z-index: 12;
+  z-index: var(--z-resizer);
   background: #181b20;
 }
 
@@ -56,7 +57,7 @@
 
 .notice {
   position: fixed;
-  z-index: 100;
+  z-index: var(--z-notice);
   right: 18px;
   bottom: 18px;
   max-width: 420px;
@@ -79,7 +80,7 @@
 
 .modalBackdrop {
   position: fixed;
-  z-index: 90;
+  z-index: var(--z-modal);
   inset: 0;
   display: grid;
   padding: 24px;

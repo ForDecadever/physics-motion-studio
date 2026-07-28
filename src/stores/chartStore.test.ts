@@ -13,13 +13,14 @@ const body: BodyEntity = {
   simulationEnabled: true,
   kind: 'body',
   preset: 'ball',
-  shape: { type: 'circle', radius: 0.5 },
+  shape: { type: 'circle', radius: 0.5, collisionEnabled: true },
   transform: { position: { x: 0, y: 2 }, angleRad: 0 },
   massKg: 2,
   chargeC: 0,
   material: { friction: 0, restitution: 0 },
   initialVelocity: { x: 0, y: 0 },
   initialAngularVelocityRad: 0,
+  rotationEnabled: true,
   continuousCollisionDetection: false,
 }
 

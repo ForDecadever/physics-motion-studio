@@ -7,6 +7,7 @@ import type {
   SceneEntity,
   Vec2,
 } from '../../scene/model/types'
+import { sampleClosedBezierPath } from '../../scene/model/bezierPath'
 
 export interface EditableTransform {
   position: Vec2
@@ -30,6 +31,10 @@ export function subtract(a: Vec2, b: Vec2): Vec2 {
 
 export function distance(a: Vec2, b: Vec2): number {
   return Math.hypot(a.x - b.x, a.y - b.y)
+}
+
+export function dot(a: Vec2, b: Vec2): number {
+  return a.x * b.x + a.y * b.y
 }
 
 export function rotateVector(vector: Vec2, angleRad: number): Vec2 {
@@ -73,12 +78,19 @@ export function getEntityTransform(entity: SceneEntity): EditableTransform | nul
   if (entity.kind === 'field') {
     const region = entity.region
     if (region.type === 'infinite') return null
-    if (region.type === 'polygon') {
-      return { position: average(region.points), angleRad: 0 }
+    if (region.type === 'polygon' || region.type === 'bezierPath') {
+      const points =
+        region.type === 'polygon' ? region.points : region.nodes.map((node) => node.anchor)
+      return { position: average(points), angleRad: 0 }
     }
     return {
       position: region.center,
-      angleRad: region.type === 'rectangle' ? region.angleRad : 0,
+      angleRad:
+        region.type === 'rectangle'
+          ? region.angleRad
+          : region.type === 'circle'
+            ? region.startRad
+            : 0,
     }
   }
 
@@ -155,12 +167,30 @@ function transformField(
     }
   }
 
+  if (region.type === 'bezierPath') {
+    return {
+      ...entity,
+      region: {
+        ...region,
+        nodes: region.nodes.map((node) => ({
+          anchor: moveAndRotatePoint(node.anchor, before, after),
+          inHandle: moveAndRotatePoint(node.inHandle, before, after),
+          outHandle: moveAndRotatePoint(node.outHandle, before, after),
+        })),
+      },
+    }
+  }
+
   return {
     ...entity,
     region: {
       ...region,
       center: after.position,
-      ...(region.type === 'rectangle' ? { angleRad: after.angleRad } : {}),
+      ...(region.type === 'rectangle'
+        ? { angleRad: after.angleRad }
+        : region.type === 'circle'
+          ? { startRad: after.angleRad }
+          : {}),
     },
   }
 }
@@ -197,7 +227,7 @@ function bodyCorners(entity: BodyEntity): Vec2[] {
     ].map((corner) => add(position, rotateVector(corner, angleRad)))
   }
 
-  const radius = entity.shape.type === 'circle' ? entity.shape.radius : entity.shape.collisionRadius
+  const radius = entity.shape.radius
   return [
     { x: position.x - radius, y: position.y - radius },
     { x: position.x + radius, y: position.y + radius },
@@ -244,6 +274,7 @@ function pointsForBounds(entity: SceneEntity): Vec2[] {
     const region = entity.region
     if (region.type === 'infinite') return []
     if (region.type === 'polygon') return region.points
+    if (region.type === 'bezierPath') return sampleClosedBezierPath(region.nodes)
     if (region.type === 'circle') {
       return [
         { x: region.center.x - region.radius, y: region.center.y - region.radius },
@@ -284,6 +315,79 @@ export function resolveConnectorEndpoint(
   )
   if (!body) return null
   return add(body.transform.position, rotateVector(endpoint.localAnchor, body.transform.angleRad))
+}
+
+export function worldToLocalAnchor(body: BodyEntity, worldPoint: Vec2): Vec2 {
+  return rotateVector(subtract(worldPoint, body.transform.position), -body.transform.angleRad)
+}
+
+export function closestPointOnSegment(point: Vec2, start: Vec2, end: Vec2): Vec2 {
+  const segment = subtract(end, start)
+  const lengthSquared = dot(segment, segment)
+  if (lengthSquared <= Number.EPSILON) return start
+  const ratio = Math.max(0, Math.min(1, dot(subtract(point, start), segment) / lengthSquared))
+  return { x: start.x + segment.x * ratio, y: start.y + segment.y * ratio }
+}
+
+export function sampleGroundPoints(ground: GroundEntity, segments = 48): Vec2[] {
+  const geometry = ground.geometry
+  if (geometry.type === 'line') return [geometry.start, geometry.end]
+  if (geometry.type === 'cubicBezier') return sampleBezier(ground, segments)
+  return Array.from({ length: segments + 1 }, (_, index) => {
+    const angle = geometry.startRad + ((geometry.endRad - geometry.startRad) * index) / segments
+    return {
+      x: geometry.center.x + Math.cos(angle) * geometry.radius,
+      y: geometry.center.y + Math.sin(angle) * geometry.radius,
+    }
+  })
+}
+
+export function bodySupportRadius(body: BodyEntity, normal: Vec2): number {
+  if (body.shape.type === 'circle') return body.shape.radius
+  const localNormal = rotateVector(normal, -body.transform.angleRad)
+  return (
+    Math.abs(localNormal.x) * (body.shape.width / 2) +
+    Math.abs(localNormal.y) * (body.shape.height / 2)
+  )
+}
+
+export function snapBodyToGround(
+  body: BodyEntity,
+  grounds: GroundEntity[],
+  threshold: number,
+): BodyEntity {
+  let bestPosition: Vec2 | null = null
+  let bestGap = Infinity
+
+  for (const ground of grounds) {
+    const points = sampleGroundPoints(ground)
+    for (let index = 1; index < points.length; index += 1) {
+      const start = points[index - 1]
+      const end = points[index]
+      if (!start || !end) continue
+      const tangent = subtract(end, start)
+      const tangentLength = Math.hypot(tangent.x, tangent.y)
+      if (tangentLength <= Number.EPSILON) continue
+      const closest = closestPointOnSegment(body.transform.position, start, end)
+      const separation = subtract(body.transform.position, closest)
+      const centerDistance = Math.hypot(separation.x, separation.y)
+      const direction =
+        centerDistance > Number.EPSILON
+          ? { x: separation.x / centerDistance, y: separation.y / centerDistance }
+          : { x: -tangent.y / tangentLength, y: tangent.x / tangentLength }
+      const support = bodySupportRadius(body, direction)
+      const gap = Math.abs(centerDistance - support)
+      if (gap <= threshold && gap < bestGap) {
+        bestGap = gap
+        bestPosition = {
+          x: closest.x + direction.x * support,
+          y: closest.y + direction.y * support,
+        }
+      }
+    }
+  }
+
+  return bestPosition ? { ...body, transform: { ...body.transform, position: bestPosition } } : body
 }
 
 export function getEntityById(
