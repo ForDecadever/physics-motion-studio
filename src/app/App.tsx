@@ -1,20 +1,17 @@
-import { useEffect, useRef, useState, type ChangeEvent, type CSSProperties } from 'react'
+import { useEffect, useRef, useState, type ChangeEvent } from 'react'
 
-import { duplicateEntities } from '../editor/clipboard/entityClipboard'
+import { collectClipboardEntities, duplicateEntities } from '../editor/clipboard/entityClipboard'
+import { commitPendingEditorEdit } from '../editor/editing/pendingEditorEdit'
 import {
   createAddEntityCommand,
   createDeleteEntitiesCommand,
 } from '../editor/commands/entityCommands'
-import { CanvasWorkspace } from '../features/canvas/CanvasWorkspace'
-import { downloadChartCsv } from '../features/charts/chartCsv'
-import { ChartPanel } from '../features/charts/ChartPanel'
-import { InspectorPanel } from '../features/inspector/InspectorPanel'
-import { commitPendingInspectorEdit } from '../features/inspector/pendingInspectorEdit'
-import { LayersPanel } from '../features/layers/LayersPanel'
+import { downloadAllChartsCsv } from '../features/charts/chartCsv'
+import { evaluateChart, type EvaluatedChart } from '../features/charts/chartSeries'
 import { MenuBar } from '../features/menu/MenuBar'
 import { PlaybackBar } from '../features/playback/PlaybackBar'
 import { ToolOptionsBar } from '../features/toolbar/ToolOptionsBar'
-import { Toolbar } from '../features/toolbar/Toolbar'
+import { DockableWorkspace } from '../features/workspace/DockableWorkspace'
 import {
   clearSceneDraft,
   loadSceneDraft,
@@ -29,35 +26,17 @@ import {
 } from '../persistence/fileSystemAccess'
 import { readSceneFile } from '../persistence/sceneFile'
 import { physicsClient } from '../physics/client/physicsClient'
-import type { SceneEntity } from '../scene/model/types'
-import { useChartStore } from '../stores/chartStore'
+import type { BodyEntity, SceneEntity } from '../scene/model/types'
+import { getChartTelemetryBuffer, useChartStore } from '../stores/chartStore'
 import { useDocumentStore } from '../stores/documentStore'
 import { useEditorStore } from '../stores/editorStore'
 import { isSimulationRuntimeLocked, useSimulationStore } from '../stores/simulationStore'
+import { useWorkspaceLayoutStore } from '../stores/workspaceLayoutStore'
 import styles from './App.module.css'
 
 interface Notice {
   tone: 'success' | 'error'
   message: string
-}
-
-interface PanelSizes {
-  right: number
-  chart: number
-}
-
-function initialPanelSizes(): PanelSizes {
-  try {
-    const stored = JSON.parse(
-      localStorage.getItem('motion-studio:panel-sizes') ?? '',
-    ) as Partial<PanelSizes>
-    return {
-      right: Math.min(480, Math.max(240, Number(stored.right) || 296)),
-      chart: Math.min(400, Math.max(100, Number(stored.chart) || 184)),
-    }
-  } catch {
-    return { right: 296, chart: 184 }
-  }
 }
 
 export function App() {
@@ -68,7 +47,6 @@ export function App() {
   const [draftPrompt, setDraftPrompt] = useState<SceneDraft | null>(null)
   const [helpTopic, setHelpTopic] = useState<'shortcuts' | 'physics' | null>(null)
   const [clipboardCount, setClipboardCount] = useState(0)
-  const [panelSizes, setPanelSizes] = useState(initialPanelSizes)
   const scene = useDocumentStore((state) => state.scene)
   const fileName = useDocumentStore((state) => state.fileName)
   const isDirty = useDocumentStore((state) => state.isDirty)
@@ -80,26 +58,25 @@ export function App() {
   const redoStackLength = useDocumentStore((state) => state.redoStack.length)
   const undo = useDocumentStore((state) => state.undo)
   const redo = useDocumentStore((state) => state.redo)
-  const chartCollapsed = useChartStore((state) => state.collapsed)
-  const hasChartData = useChartStore((state) =>
-    state.curves.some((curve) => (state.series[curve.id]?.length ?? 0) > 0),
-  )
+  const chartRevision = useChartStore((state) => state.revision)
+  const hasChartData = chartRevision >= 0 && getChartTelemetryBuffer().length > 0
   const selectedIds = useEditorStore((state) => state.selectedIds)
   const gridVisible = useEditorStore((state) => state.gridVisible)
   const snapEnabled = useEditorStore((state) => state.snapEnabled)
+  const workspacePanels = useWorkspaceLayoutStore((state) => state.layout.panels)
 
   useEffect(() => {
     physicsClient.start()
     return () => physicsClient.stop()
   }, [])
 
-  useEffect(() => {
-    localStorage.setItem('motion-studio:panel-sizes', JSON.stringify(panelSizes))
-  }, [panelSizes])
+  const physicsEntities = scene.entities
+  const physicsLayers = scene.layers
+  const physicsSettings = scene.settings
 
   useEffect(() => {
-    physicsClient.initialize(scene)
-  }, [scene])
+    physicsClient.initialize(useDocumentStore.getState().scene)
+  }, [physicsEntities, physicsLayers, physicsSettings])
 
   useEffect(() => {
     void loadSceneDraft()
@@ -139,7 +116,7 @@ export function App() {
 
   const resetEditorForDocument = () => {
     useEditorStore.getState().resetForDocument()
-    useChartStore.getState().clearCurves()
+    useChartStore.getState().clearHistory()
   }
 
   const handleNew = () => {
@@ -219,8 +196,9 @@ export function App() {
 
   const handleCopy = () => {
     const document = useDocumentStore.getState().scene
-    const ids = new Set(useEditorStore.getState().selectedIds)
-    clipboardRef.current = structuredClone(document.entities.filter((entity) => ids.has(entity.id)))
+    clipboardRef.current = structuredClone(
+      collectClipboardEntities(document.entities, useEditorStore.getState().selectedIds),
+    )
     setClipboardCount(clipboardRef.current.length)
     if (clipboardRef.current.length > 0) {
       showNotice({ tone: 'success', message: `已复制 ${clipboardRef.current.length} 个实体` })
@@ -266,53 +244,21 @@ export function App() {
   }
 
   const handleExportCsv = () => {
-    const chart = useChartStore.getState()
-    if (!chart.curves.some((curve) => (chart.series[curve.id]?.length ?? 0) > 0)) return
-    const exportedName = downloadChartCsv(scene.metadata.name, chart.curves, chart.series)
+    if (getChartTelemetryBuffer().length === 0) return
+    const bodies = scene.entities.filter((entity): entity is BodyEntity => entity.kind === 'body')
+    const evaluated = new Map<string, EvaluatedChart>()
+    for (const chart of scene.charts) {
+      try {
+        evaluated.set(
+          chart.id,
+          evaluateChart(chart, getChartTelemetryBuffer(), Number.POSITIVE_INFINITY),
+        )
+      } catch {
+        // Invalid chart extensions are skipped; validated in-app charts always compile.
+      }
+    }
+    const exportedName = downloadAllChartsCsv(scene.metadata.name, scene.charts, evaluated, bodies)
     showNotice({ tone: 'success', message: `已下载 ${exportedName}` })
-  }
-
-  const beginResize = (kind: keyof PanelSizes, event: React.PointerEvent) => {
-    event.preventDefault()
-    const handleMove = (moveEvent: PointerEvent) => {
-      setPanelSizes((current) => ({
-        ...current,
-        [kind]:
-          kind === 'right'
-            ? Math.min(480, Math.max(240, window.innerWidth - moveEvent.clientX))
-            : Math.min(400, Math.max(100, window.innerHeight - moveEvent.clientY)),
-      }))
-    }
-    const handleUp = () => {
-      window.removeEventListener('pointermove', handleMove)
-      window.removeEventListener('pointerup', handleUp)
-    }
-    window.addEventListener('pointermove', handleMove)
-    window.addEventListener('pointerup', handleUp)
-  }
-
-  const resizeWithKeyboard = (kind: keyof PanelSizes, event: React.KeyboardEvent) => {
-    const delta =
-      kind === 'right'
-        ? event.key === 'ArrowLeft'
-          ? 16
-          : event.key === 'ArrowRight'
-            ? -16
-            : 0
-        : event.key === 'ArrowUp'
-          ? 16
-          : event.key === 'ArrowDown'
-            ? -16
-            : 0
-    if (delta === 0) return
-    event.preventDefault()
-    setPanelSizes((current) => ({
-      ...current,
-      [kind]: Math.min(
-        kind === 'right' ? 480 : 400,
-        Math.max(kind === 'right' ? 240 : 100, current[kind] + delta),
-      ),
-    }))
   }
 
   const pruneSelection = () => {
@@ -440,6 +386,7 @@ export function App() {
       const shortcuts = {
         v: 'select',
         r: 'rotate',
+        s: 'scale',
         h: 'hand',
         z: 'zoom',
         g: 'ground',
@@ -449,6 +396,7 @@ export function App() {
         l: 'connector',
       } as const
       const tool = shortcuts[key as keyof typeof shortcuts]
+      if (tool === 'scale' && isSimulationRuntimeLocked(useSimulationStore.getState())) return
       if (tool) useEditorStore.getState().setActiveTool(tool)
     }
 
@@ -459,14 +407,7 @@ export function App() {
   return (
     <div
       className={styles.appShell}
-      data-chart-collapsed={chartCollapsed}
-      onPointerDownCapture={(event) => commitPendingInspectorEdit(event.target)}
-      style={
-        {
-          '--right-dock-width': `${panelSizes.right}px`,
-          '--chart-height': `${panelSizes.chart}px`,
-        } as CSSProperties
-      }
+      onPointerDownCapture={(event) => commitPendingEditorEdit(event.target)}
     >
       <MenuBar
         sceneName={scene.metadata.name}
@@ -498,45 +439,19 @@ export function App() {
         hasChartData={hasChartData}
         gridVisible={gridVisible}
         snapEnabled={snapEnabled}
+        panelVisibility={{
+          tools: workspacePanels.tools.visible,
+          layers: workspacePanels.layers.visible,
+          inspector: workspacePanels.inspector.visible,
+          charts: workspacePanels.charts.visible,
+        }}
+        onTogglePanel={(panelId) => useWorkspaceLayoutStore.getState().togglePanelVisible(panelId)}
+        onResetWorkspaceLayout={() => useWorkspaceLayoutStore.getState().resetLayout()}
       />
       <ToolOptionsBar />
 
-      <div className={styles.workspace}>
-        <Toolbar />
-        <CanvasWorkspace />
-        <div
-          className={styles.rightResizer}
-          role="separator"
-          tabIndex={0}
-          aria-label="调整右侧面板宽度"
-          aria-orientation="vertical"
-          aria-valuemin={240}
-          aria-valuemax={480}
-          aria-valuenow={panelSizes.right}
-          onPointerDown={(event) => beginResize('right', event)}
-          onKeyDown={(event) => resizeWithKeyboard('right', event)}
-        />
-        <aside className={styles.rightDock} aria-label="图层和属性">
-          <LayersPanel />
-          <InspectorPanel />
-        </aside>
-      </div>
-
+      <DockableWorkspace />
       <PlaybackBar />
-      <div
-        className={styles.chartResizer}
-        role="separator"
-        tabIndex={chartCollapsed ? -1 : 0}
-        aria-hidden={chartCollapsed}
-        aria-label="调整图表区高度"
-        aria-orientation="horizontal"
-        aria-valuemin={100}
-        aria-valuemax={400}
-        aria-valuenow={panelSizes.chart}
-        onPointerDown={(event) => beginResize('chart', event)}
-        onKeyDown={(event) => resizeWithKeyboard('chart', event)}
-      />
-      <ChartPanel />
 
       <input
         ref={inputRef}
@@ -605,7 +520,8 @@ export function App() {
             <h2 id="help-title">{helpTopic === 'shortcuts' ? '快捷键与入门' : '物理模型与近似'}</h2>
             {helpTopic === 'shortcuts' ? (
               <ul>
-                <li>V / R：选择移动 / 旋转；G / O / F / L：地面、物体、场、连接。</li>
+                <li>V / R / S：选择移动 / 旋转 / 对象缩放；Z：画布缩放。</li>
+                <li>G / O / F / L：地面、物体、场、连接。</li>
                 <li>P：播放或暂停；句点：单步；Shift+R：重置。</li>
                 <li>Ctrl+S / O / Z / Y / C / V：保存、打开、撤销、重做、复制、粘贴。</li>
                 <li>J 地面连接点；空格临时抓手；Alt 临时关闭吸附；Delete 删除选择。</li>

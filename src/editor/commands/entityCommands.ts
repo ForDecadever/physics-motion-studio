@@ -1,4 +1,5 @@
 import type {
+  ChartDefinition,
   EntityId,
   Layer,
   SceneDocument,
@@ -12,14 +13,40 @@ export class EntityListCommand implements DocumentCommand {
     readonly label: string,
     private readonly before: SceneEntity[],
     private readonly after: SceneEntity[],
+    private readonly beforeCharts?: ChartDefinition[],
+    private readonly afterCharts?: ChartDefinition[],
   ) {}
 
   execute(document: SceneDocument): SceneDocument {
-    return { ...document, entities: this.after }
+    return {
+      ...document,
+      entities: this.after,
+      charts: this.afterCharts ?? document.charts,
+    }
   }
 
   undo(document: SceneDocument): SceneDocument {
-    return { ...document, entities: this.before }
+    return {
+      ...document,
+      entities: this.before,
+      charts: this.beforeCharts ?? document.charts,
+    }
+  }
+}
+
+export class SceneChartsCommand implements DocumentCommand {
+  constructor(
+    readonly label: string,
+    private readonly before: ChartDefinition[],
+    private readonly after: ChartDefinition[],
+  ) {}
+
+  execute(document: SceneDocument): SceneDocument {
+    return { ...document, charts: this.after }
+  }
+
+  undo(document: SceneDocument): SceneDocument {
+    return { ...document, charts: this.before }
   }
 }
 
@@ -71,6 +98,14 @@ export function createReplaceLayersCommand(
   return new SceneLayersCommand(label, document.layers, layers)
 }
 
+export function createReplaceChartsCommand(
+  document: SceneDocument,
+  charts: ChartDefinition[],
+  label: string,
+): SceneChartsCommand {
+  return new SceneChartsCommand(label, document.charts, charts)
+}
+
 export function createAddEntityCommand(
   document: SceneDocument,
   entities: SceneEntity | SceneEntity[],
@@ -110,5 +145,10 @@ export function createDeleteEntitiesCommand(
   const after = document.entities.filter((entity) => !ids.has(entity.id))
   if (after.length === document.entities.length) return null
 
-  return new EntityListCommand('删除实体', document.entities, after)
+  const afterCharts = document.charts.map((chart) => ({
+    ...chart,
+    series: chart.series.filter((series) => !ids.has(series.entityId)),
+  }))
+
+  return new EntityListCommand('删除实体', document.entities, after, document.charts, afterCharts)
 }

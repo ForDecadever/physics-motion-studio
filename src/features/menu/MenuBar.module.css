@@ -127,6 +127,29 @@
   background: var(--color-border);
 }
 
+.submenu {
+  position: relative;
+}
+
+.submenuPopover {
+  position: absolute;
+  z-index: 2;
+  top: -6px;
+  left: calc(100% - 2px);
+  display: none;
+  width: 196px;
+  padding: 6px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: #20242a;
+  box-shadow: var(--shadow-menu);
+}
+
+.submenu:hover > .submenuPopover,
+.submenu:focus-within > .submenuPopover {
+  display: block;
+}
+
 .sceneStatus {
   display: flex;
   min-width: 0;

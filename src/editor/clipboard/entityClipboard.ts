@@ -4,6 +4,22 @@ function offsetPoint(point: Vec2, offset: Vec2): Vec2 {
   return { x: point.x + offset.x, y: point.y + offset.y }
 }
 
+export function collectClipboardEntities(
+  entities: readonly SceneEntity[],
+  selectedIds: readonly EntityId[],
+): SceneEntity[] {
+  const selected = new Set(selectedIds)
+  return entities.filter((entity) => {
+    if (entity.kind === 'connector') {
+      return selected.has(entity.a.bodyId) && selected.has(entity.b.bodyId)
+    }
+    if (entity.kind === 'groundJoint') {
+      return selected.has(entity.a.groundId) && selected.has(entity.b.groundId)
+    }
+    return selected.has(entity.id)
+  })
+}
+
 function offsetEntity(entity: SceneEntity, offset: Vec2): SceneEntity {
   if (entity.kind === 'body') {
     return {

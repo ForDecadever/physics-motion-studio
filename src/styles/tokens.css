@@ -31,10 +31,13 @@
   --focus-ring: 0 0 0 2px rgb(88 166 255 / 40%);
 
   --z-resizer: 10;
-  --z-options: 20;
-  --z-playback: 30;
-  --z-tool-flyout-host: 100;
-  --z-menu-host: 110;
+  --z-options: 100;
+  --z-playback: 110;
+  --z-tool-flyout-host: 190;
+  --z-floating-panel: 200;
+  --z-dock-preview: 250;
+  --z-tool-flyout: 300;
+  --z-menu-host: 400;
   --z-modal: 1000;
   --z-notice: 1100;
 }

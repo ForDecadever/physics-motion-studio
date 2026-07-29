@@ -1,8 +1,10 @@
-export const CURRENT_SCHEMA_VERSION = 6 as const
-export const CURRENT_APP_VERSION = '0.8.0'
+export const CURRENT_SCHEMA_VERSION = 7 as const
+export const CURRENT_APP_VERSION = '1.2.0'
 
 export type EntityId = string
 export type LayerId = string
+export type ChartId = string
+export type ChartSeriesId = string
 
 export interface Vec2 {
   x: number
@@ -172,6 +174,50 @@ export interface SceneSettings {
   recordingDurationSeconds: number
 }
 
+export type ChartMetricId =
+  | 'positionX'
+  | 'positionY'
+  | 'velocityX'
+  | 'velocityY'
+  | 'speed'
+  | 'acceleration'
+  | 'angle'
+  | 'angularVelocity'
+  | 'netForce'
+  | 'kineticEnergy'
+  | 'translationalKineticEnergy'
+  | 'rotationalKineticEnergy'
+
+export type ChartAxisMetricId = 'time' | ChartMetricId
+
+export type ChartAxisDefinition =
+  { type: 'metric'; metricId: ChartAxisMetricId } | { type: 'expression'; expression: string }
+
+export interface ChartObjectBinding {
+  alias: string
+  entityId: EntityId
+}
+
+export type ChartLineStyle = 'solid' | 'dashed' | 'dotted'
+
+export interface ChartSeriesDefinition {
+  id: ChartSeriesId
+  entityId: EntityId
+  visible: boolean
+  color: string
+  lineStyle: ChartLineStyle
+  lineWidth: number
+}
+
+export interface ChartDefinition {
+  id: ChartId
+  name: string
+  xAxis: ChartAxisDefinition
+  yAxis: ChartAxisDefinition
+  bindings: ChartObjectBinding[]
+  series: ChartSeriesDefinition[]
+}
+
 export interface SceneDocument {
   schemaVersion: typeof CURRENT_SCHEMA_VERSION
   appVersion: string
@@ -179,4 +225,5 @@ export interface SceneDocument {
   settings: SceneSettings
   layers: Layer[]
   entities: SceneEntity[]
+  charts: ChartDefinition[]
 }

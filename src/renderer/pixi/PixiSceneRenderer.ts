@@ -3,7 +3,10 @@ import { Application, Container, Graphics } from 'pixi.js'
 import { getVisibleGridSteps, type Camera2D, type ViewportSize } from '../../editor/camera/viewport'
 import {
   add,
+  createScaleHandleGeometry,
   getEntityBounds,
+  getScalableSelectionBounds,
+  isScalableEntity,
   resolveConnectorEndpoint,
   rotateVector,
 } from '../../editor/geometry/entityGeometry'
@@ -41,6 +44,7 @@ export interface PixiRenderState {
   pendingGroundEndpoint: GroundEndpointRef | null
   runtimeBodies: Record<EntityId, RuntimeBodyState>
   runtimeTrajectories: Record<EntityId, Vec2[]>
+  runtimeLocked: boolean
 }
 
 const colors = {
@@ -748,9 +752,27 @@ export class PixiSceneRenderer {
     const lineWidth = 1.5 / state.camera.pixelsPerMeter
     const handleRadius = 5 / state.camera.pixelsPerMeter
     const selected = new Set(state.selectedIds)
+    const lockedLayerIds = new Set(
+      state.scene.layers.filter((layer) => layer.locked).map((layer) => layer.id),
+    )
+    const overlayEntities = entities.map((entity) =>
+      lockedLayerIds.has(entity.layerId) ? { ...entity, locked: true } : entity,
+    )
+    const scaleBounds =
+      state.activeTool === 'scale' && !state.runtimeLocked
+        ? getScalableSelectionBounds(overlayEntities, state.selectedIds)
+        : null
 
     for (const entity of entities) {
       if (!selected.has(entity.id)) continue
+      if (
+        scaleBounds &&
+        isScalableEntity(entity) &&
+        !entity.locked &&
+        !lockedLayerIds.has(entity.layerId)
+      ) {
+        continue
+      }
       if (entity.kind === 'groundJoint') {
         const resolved = resolveGroundJoint(entities, entity)
         const positions = resolved.position
@@ -838,6 +860,33 @@ export class PixiSceneRenderer {
               .fill({ color: colors.connector, alpha: 1 })
           }
         }
+      }
+    }
+
+    if (scaleBounds) {
+      const geometry = createScaleHandleGeometry(scaleBounds, 5 / state.camera.pixelsPerMeter)
+      const { minX, minY, maxX, maxY } = geometry.bounds
+      const handleSize = 9 / state.camera.pixelsPerMeter
+      const halfHandle = handleSize / 2
+      const centerMark = 4 / state.camera.pixelsPerMeter
+      this.overlays
+        .rect(minX, minY, maxX - minX, maxY - minY)
+        .stroke({ color: colors.selection, alpha: 1, width: lineWidth })
+        .moveTo(geometry.center.x - centerMark, geometry.center.y)
+        .lineTo(geometry.center.x + centerMark, geometry.center.y)
+        .moveTo(geometry.center.x, geometry.center.y - centerMark)
+        .lineTo(geometry.center.x, geometry.center.y + centerMark)
+        .stroke({ color: colors.selection, alpha: 0.8, width: lineWidth })
+      for (const handle of geometry.handles) {
+        this.overlays
+          .rect(
+            handle.position.x - halfHandle,
+            handle.position.y - halfHandle,
+            handleSize,
+            handleSize,
+          )
+          .fill({ color: 0xffffff, alpha: 1 })
+          .stroke({ color: colors.selection, alpha: 1, width: lineWidth })
       }
     }
 

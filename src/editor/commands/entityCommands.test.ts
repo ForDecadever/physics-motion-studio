@@ -43,6 +43,34 @@ describe('实体命令', () => {
     expect(command?.undo(populated).entities).toEqual([first, second, rope])
   })
 
+  it('删除物体时移除直接曲线，并在撤销时完整恢复', () => {
+    const scene = createEmptyScene()
+    const layerId = scene.layers[0]?.id
+    if (!layerId) return
+    const ball = createBall(layerId, { x: 0, y: 0 }, 0.5, 1)
+    scene.entities = [ball]
+    scene.charts[0] = {
+      ...scene.charts[0]!,
+      bindings: [{ alias: 'A', entityId: ball.id }],
+      series: [
+        {
+          id: 'series',
+          entityId: ball.id,
+          visible: true,
+          color: '#58a6ff',
+          lineStyle: 'solid',
+          lineWidth: 2,
+        },
+      ],
+    }
+    const command = createDeleteEntitiesCommand(scene, [ball.id])
+    const deleted = command?.execute(scene)
+
+    expect(deleted?.charts[0]?.series).toEqual([])
+    expect(deleted?.charts[0]?.bindings).toEqual([{ alias: 'A', entityId: ball.id }])
+    expect(command?.undo(deleted!).charts[0]).toEqual(scene.charts[0])
+  })
+
   it('删除地面时一起删除依赖的地面连接点，并可撤销恢复', () => {
     const scene = createEmptyScene()
     const layerId = scene.layers[0]?.id

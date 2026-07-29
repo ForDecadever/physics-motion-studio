@@ -1,6 +1,16 @@
-import { BoxSelect, Check, Focus, GitMerge, Grid2X2, Magnet, MousePointer2 } from 'lucide-react'
+import {
+  Boxes,
+  BoxSelect,
+  Check,
+  Focus,
+  GitMerge,
+  Grid2X2,
+  Magnet,
+  MousePointer2,
+} from 'lucide-react'
 
 import { defaultCamera, getVisibleSnapStep } from '../../editor/camera/viewport'
+import { getScalableSelectionBounds } from '../../editor/geometry/entityGeometry'
 import { useDocumentStore } from '../../stores/documentStore'
 import {
   useEditorStore,
@@ -15,8 +25,9 @@ import styles from './Toolbar.module.css'
 const toolNames: Record<EditorTool, string> = {
   select: '选择与移动',
   rotate: '旋转',
+  scale: '对象缩放',
   hand: '抓手',
-  zoom: '缩放',
+  zoom: '画布缩放',
   ground: '地面工具',
   groundJoint: '地面连接点工具',
   body: '物体工具',
@@ -29,13 +40,17 @@ export function ToolOptionsBar() {
   const gridVisible = useEditorStore((state) => state.gridVisible)
   const snapEnabled = useEditorStore((state) => state.snapEnabled)
   const wallSnapEnabled = useEditorStore((state) => state.wallSnapEnabled)
+  const blockSnapEnabled = useEditorStore((state) => state.blockSnapEnabled)
   const autoGroundJointEnabled = useEditorStore((state) => state.autoGroundJointEnabled)
   const toggleGrid = useEditorStore((state) => state.toggleGrid)
   const toggleSnap = useEditorStore((state) => state.toggleSnap)
   const toggleWallSnap = useEditorStore((state) => state.toggleWallSnap)
+  const toggleBlockSnap = useEditorStore((state) => state.toggleBlockSnap)
   const toggleAutoGroundJoint = useEditorStore((state) => state.toggleAutoGroundJoint)
   const camera = useEditorStore((state) => state.camera)
-  const gridStep = useDocumentStore((state) => state.scene.settings.gridStep)
+  const scene = useDocumentStore((state) => state.scene)
+  const gridStep = scene.settings.gridStep
+  const selectedIds = useEditorStore((state) => state.selectedIds)
   const connectorStartBodyId = useEditorStore((state) => state.connectorStartBodyId)
   const groundJointStart = useEditorStore((state) => state.groundJointStart)
   const groundJointMessage = useEditorStore((state) => state.groundJointMessage)
@@ -50,10 +65,23 @@ export function ToolOptionsBar() {
   const setFieldToolPreset = useEditorStore((state) => state.setFieldToolPreset)
   const setFieldRegionToolShape = useEditorStore((state) => state.setFieldRegionToolShape)
   const setConnectorToolPreset = useEditorStore((state) => state.setConnectorToolPreset)
+  const visibleLayerIds = new Set(
+    scene.layers.filter((layer) => layer.visible).map((layer) => layer.id),
+  )
+  const lockedLayerIds = new Set(
+    scene.layers.filter((layer) => layer.locked).map((layer) => layer.id),
+  )
+  const scalableSelectionBounds = getScalableSelectionBounds(
+    scene.entities
+      .filter((entity) => visibleLayerIds.has(entity.layerId))
+      .map((entity) => (lockedLayerIds.has(entity.layerId) ? { ...entity, locked: true } : entity)),
+    selectedIds,
+  )
 
   const toolDetail: Record<EditorTool, string> = {
     select: '拖动移动 · Shift 多选',
     rotate: '拖动旋转 · 15° 吸附',
+    scale: scalableSelectionBounds ? '拖动四角手柄等比缩放 · Alt 临时关闭吸附' : '当前选择不可缩放',
     hand: '拖动画布 · 空格临时启用',
     zoom: '点击放大 · Alt 点击缩小',
     ground:
@@ -179,6 +207,16 @@ export function ToolOptionsBar() {
       >
         <BoxSelect size={15} />
         墙面吸附{wallSnapEnabled ? <Check size={13} /> : null}
+      </button>
+      <button
+        type="button"
+        className={styles.optionToggle}
+        aria-pressed={blockSnapEnabled}
+        onClick={toggleBlockSnap}
+        title="让小球或物块的外轮廓自动贴合现有物块的真实碰撞边缘"
+      >
+        <Boxes size={15} />
+        物块吸附{blockSnapEnabled ? <Check size={13} /> : null}
       </button>
       {activeTool === 'ground' ? (
         <button

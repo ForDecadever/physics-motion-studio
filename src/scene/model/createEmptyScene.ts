@@ -1,4 +1,5 @@
 import { CURRENT_APP_VERSION, CURRENT_SCHEMA_VERSION, type SceneDocument } from './types'
+import { createDefaultChart } from './chartDefaults'
 
 export function createEmptyScene(name = '未命名场景', now = new Date()): SceneDocument {
   const timestamp = now.toISOString()
@@ -28,5 +29,6 @@ export function createEmptyScene(name = '未命名场景', now = new Date()): Sc
       },
     ],
     entities: [],
+    charts: [createDefaultChart()],
   }
 }

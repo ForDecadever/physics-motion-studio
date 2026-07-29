@@ -1,4 +1,6 @@
 import {
+  Check,
+  ChevronRight,
   CircleHelp,
   Clipboard,
   Copy,
@@ -19,6 +21,7 @@ import {
 } from 'lucide-react'
 import type { MouseEvent, ReactNode } from 'react'
 
+import type { WorkspacePanelId } from '../workspace/workspaceLayout'
 import styles from './MenuBar.module.css'
 
 interface MenuBarProps {
@@ -51,6 +54,50 @@ interface MenuBarProps {
   hasChartData: boolean
   gridVisible: boolean
   snapEnabled: boolean
+  panelVisibility: Record<WorkspacePanelId, boolean>
+  onTogglePanel: (panelId: WorkspacePanelId) => void
+  onResetWorkspaceLayout: () => void
+}
+
+function MenuCheckboxAction({
+  checked,
+  children,
+  onClick,
+}: {
+  checked: boolean
+  children: ReactNode
+  onClick: () => void
+}) {
+  return (
+    <button
+      className={styles.menuAction}
+      type="button"
+      role="menuitemcheckbox"
+      aria-checked={checked}
+      onClick={(event) => {
+        event.currentTarget.closest('details')?.removeAttribute('open')
+        onClick()
+      }}
+    >
+      <span className={styles.menuActionIcon}>{checked ? <Check size={14} /> : null}</span>
+      <span>{children}</span>
+    </button>
+  )
+}
+
+function MenuSubmenu({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className={styles.submenu}>
+      <button className={styles.menuAction} type="button" role="menuitem" aria-haspopup="menu">
+        <span className={styles.menuActionIcon} />
+        <span>{label}</span>
+        <ChevronRight size={13} />
+      </button>
+      <div className={styles.submenuPopover} role="menu" aria-label={label}>
+        {children}
+      </div>
+    </div>
+  )
 }
 
 interface MenuActionProps {
@@ -130,6 +177,9 @@ export function MenuBar({
   hasChartData,
   gridVisible,
   snapEnabled,
+  panelVisibility,
+  onTogglePanel,
+  onResetWorkspaceLayout,
 }: MenuBarProps) {
   return (
     <header className={styles.header} role="banner">
@@ -217,6 +267,35 @@ export function MenuBar({
           <MenuAction onClick={onToggleSnap}>
             {snapEnabled ? '关闭网格吸附' : '开启网格吸附'}
           </MenuAction>
+          <MenuDivider />
+          <MenuSubmenu label="窗口">
+            <MenuCheckboxAction
+              checked={panelVisibility.tools}
+              onClick={() => onTogglePanel('tools')}
+            >
+              工具
+            </MenuCheckboxAction>
+            <MenuCheckboxAction
+              checked={panelVisibility.layers}
+              onClick={() => onTogglePanel('layers')}
+            >
+              图层
+            </MenuCheckboxAction>
+            <MenuCheckboxAction
+              checked={panelVisibility.inspector}
+              onClick={() => onTogglePanel('inspector')}
+            >
+              属性
+            </MenuCheckboxAction>
+            <MenuCheckboxAction
+              checked={panelVisibility.charts}
+              onClick={() => onTogglePanel('charts')}
+            >
+              图像
+            </MenuCheckboxAction>
+            <MenuDivider />
+            <MenuAction onClick={onResetWorkspaceLayout}>恢复默认布局</MenuAction>
+          </MenuSubmenu>
         </Menu>
 
         <Menu label="模拟">

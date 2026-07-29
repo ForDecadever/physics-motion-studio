@@ -12,6 +12,7 @@
 
 .chartHeader {
   display: flex;
+  min-width: 0;
   align-items: center;
   justify-content: space-between;
   padding: 0 9px 0 12px;
@@ -20,10 +21,17 @@
 }
 
 .chartTitle,
-.chartActions {
+.chartActions,
+.cardActions,
+.configSectionTitle,
+.pickerActions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
+}
+
+.chartTitle {
+  min-width: max-content;
 }
 
 .chartTitle > svg {
@@ -46,26 +54,48 @@
   text-align: center;
 }
 
+.chartActions {
+  min-width: 0;
+  overflow-x: auto;
+}
+
 .chartActions button,
-.legend button,
-.addForm button {
+.cardActions button,
+.configSectionTitle button,
+.bindingRow button,
+.seriesRow button,
+.variablePalette button,
+.pickerActions button,
+.panelEmpty button {
   display: inline-flex;
   height: 27px;
   align-items: center;
   justify-content: center;
-  gap: 6px;
+  gap: 5px;
   padding: 0 8px;
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--color-text-muted);
+  white-space: nowrap;
 }
 
 .chartActions button:not(:disabled):hover,
-.legend button:not(:disabled):hover,
-.addForm button:not(:disabled):hover {
+.cardActions button:not(:disabled):hover,
+.configSectionTitle button:not(:disabled):hover,
+.bindingRow button:not(:disabled):hover,
+.seriesRow button:not(:disabled):hover,
+.variablePalette button:not(:disabled):hover,
+.pickerActions button:not(:disabled):hover,
+.panelEmpty button:not(:disabled):hover {
   background: var(--color-bg-hover);
   color: var(--color-text);
+}
+
+.cardActions button[data-active='true'] {
+  border-color: rgb(88 166 255 / 32%);
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
 }
 
 .collapseIcon {
@@ -77,135 +107,362 @@
 }
 
 .chartBody {
-  display: grid;
+  position: relative;
   min-height: 0;
-  grid-template-columns: 220px minmax(0, 1fr);
-}
-
-.legend {
-  min-height: 0;
-  padding: 7px;
+  padding: 10px;
   overflow: auto;
-  border-right: 1px solid var(--color-border);
-  background: #191c20;
 }
 
-.legendItem {
+.chartGrid {
   display: grid;
-  min-height: 26px;
-  align-items: center;
-  border-radius: var(--radius-sm);
-  grid-template-columns: 9px minmax(0, 1fr) 25px 25px;
+  align-items: start;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(min(440px, 100%), 1fr));
 }
 
-.legendItem:hover {
-  background: rgb(255 255 255 / 3%);
-}
-
-.legendItem[data-hidden='true'] {
-  opacity: 0.5;
-}
-
-.swatch {
-  width: 7px;
-  height: 7px;
-  border: 1px solid rgb(255 255 255 / 35%);
-  border-radius: 50%;
-}
-
-.legendName {
+.chartCard {
+  display: grid;
+  min-width: 0;
+  min-height: 278px;
   overflow: hidden;
-  color: var(--color-text-muted);
-  font-size: 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: #191c20;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 12%);
+}
+
+.cardHeader {
+  display: flex;
+  min-width: 0;
+  min-height: 38px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 5px 4px 9px;
+  border-bottom: 1px solid var(--color-border);
+  background: #20242a;
+}
+
+.cardIdentity {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.cardIdentity input {
+  width: min(210px, 100%);
+  height: 21px;
+  padding: 0 4px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.cardIdentity input:hover,
+.cardIdentity input:focus {
+  border-color: var(--color-border-strong);
+  background: #171a1e;
+  outline: none;
+}
+
+.cardIdentity small {
+  overflow: hidden;
+  color: var(--color-text-dim);
+  font-family: 'Cascadia Mono', Consolas, monospace;
+  font-size: 8px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.legendName small {
-  margin-left: 5px;
+.cardActions {
+  flex: 0 0 auto;
+}
+
+.cardActions button {
+  width: 27px;
+  padding: 0;
+}
+
+.cardActions button:last-child:not(:disabled):hover,
+.seriesRow button:last-child:not(:disabled):hover {
+  background: rgb(248 81 73 / 14%);
+  color: var(--color-danger);
+}
+
+.cardConfig {
+  display: grid;
+  gap: 8px;
+  max-height: 340px;
+  padding: 8px;
+  overflow: auto;
+  border-bottom: 1px solid var(--color-border);
+  background: #171a1e;
+}
+
+.axisGrid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.axisEditor {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+  padding: 7px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+
+.axisEditor legend {
+  padding: 0 4px;
+  color: var(--color-text-muted);
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.axisEditor label {
+  display: grid;
+  align-items: center;
+  gap: 5px;
+  grid-template-columns: 38px minmax(0, 1fr);
   color: var(--color-text-dim);
   font-size: 9px;
 }
 
-.legendItem button {
+.axisEditor select,
+.axisEditor input,
+.bindingRow select,
+.seriesRow select,
+.seriesRow input[type='number'] {
+  width: 100%;
+  min-width: 0;
+  height: 25px;
+  padding: 0 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: #111419;
+  color: var(--color-text);
+  font-size: 9px;
+}
+
+.axisEditor input {
+  font-family: 'Cascadia Mono', Consolas, monospace;
+}
+
+.variablePalette {
+  display: flex;
+  gap: 3px;
+  padding-top: 2px;
+  overflow-x: auto;
+}
+
+.variablePalette button {
+  height: 20px;
+  padding: 0 5px;
+  border-color: var(--color-border);
+  font-family: 'Cascadia Mono', Consolas, monospace;
+  font-size: 8px;
+}
+
+.formulaError,
+.formulaUnit,
+.bindingEditor > small,
+.limitMessage {
+  margin: 0;
+  font-size: 8px;
+  line-height: 1.45;
+}
+
+.formulaError {
+  color: var(--color-danger);
+}
+
+.formulaUnit,
+.bindingEditor > small {
+  color: var(--color-text-dim);
+}
+
+.bindingEditor,
+.seriesEditor {
+  display: grid;
+  gap: 4px;
+}
+
+.configSectionTitle {
+  justify-content: space-between;
+  color: var(--color-text-muted);
+  font-size: 9px;
+  font-weight: 650;
+}
+
+.configSectionTitle button {
+  height: 23px;
+  padding: 0 6px;
+  font-size: 8px;
+}
+
+.bindingRow {
+  display: grid;
+  align-items: center;
+  gap: 5px;
+  grid-template-columns: 30px minmax(0, 1fr) 25px;
+}
+
+.bindingRow code {
+  color: var(--color-accent);
+  font-size: 9px;
+}
+
+.bindingRow button,
+.seriesRow button {
   width: 23px;
   height: 23px;
   padding: 0;
 }
 
-.addForm {
+.bodyPicker {
   display: grid;
-  gap: 6px;
-  padding: 7px;
-  margin-bottom: 7px;
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-md);
-  background: #22262c;
+  max-height: 160px;
+  gap: 3px;
+  padding: 6px;
+  overflow: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: #20242a;
 }
 
-.addForm label {
-  display: grid;
-  gap: 3px;
-  grid-template-columns: 44px minmax(0, 1fr);
+.bodyPicker label {
+  display: flex;
+  min-height: 22px;
   align-items: center;
-  color: var(--color-text-dim);
+  gap: 6px;
+  color: var(--color-text-muted);
   font-size: 9px;
 }
 
-.addForm select {
-  width: 100%;
-  height: 24px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: #15171b;
-  color: var(--color-text);
-  font-size: 10px;
+.bodyPicker label[data-disabled='true'] {
+  opacity: 0.5;
 }
 
-.addForm button {
-  border-color: rgb(88 166 255 / 35%);
+.pickerActions {
+  justify-content: flex-end;
+}
+
+.pickerActions button:first-child,
+.panelEmpty button {
+  border-color: rgb(88 166 255 / 30%);
   background: var(--color-accent-soft);
   color: var(--color-accent);
+}
+
+.seriesRow {
+  display: grid;
+  min-width: 0;
+  min-height: 28px;
+  align-items: center;
+  gap: 5px;
+  grid-template-columns: 24px minmax(72px, 1fr) 64px 46px 25px 25px;
+}
+
+.seriesRow[data-hidden='true'] {
+  opacity: 0.52;
+}
+
+.seriesRow > span {
+  overflow: hidden;
+  color: var(--color-text-muted);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.seriesRow input[type='color'] {
+  width: 22px;
+  height: 20px;
+  padding: 1px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: #111419;
 }
 
 .plotArea {
   position: relative;
   min-width: 0;
-  min-height: 0;
+  min-height: 230px;
 }
 
 .chartCanvas {
   width: 100%;
-  height: 100%;
+  height: 230px;
 }
 
-.chartEmpty {
-  position: absolute;
-  inset: 10px 14px 18px 34px;
+.chartEmpty,
+.chartError,
+.panelEmpty {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 7px;
+  color: var(--color-text-dim);
+  font-size: 10px;
+}
+
+.chartEmpty,
+.chartError {
+  position: absolute;
+  inset: 12px 15px 20px 36px;
   border-left: 1px solid #4b535f;
   border-bottom: 1px solid #4b535f;
   background-image:
     linear-gradient(rgb(255 255 255 / 4%) 1px, transparent 1px),
     linear-gradient(90deg, rgb(255 255 255 / 4%) 1px, transparent 1px);
   background-size: 56px 28px;
-  color: var(--color-text-dim);
-  font-size: 10px;
 }
 
-.message,
-.limitMessage {
-  margin: 6px 4px 0;
-  color: var(--color-text-muted);
-  font-size: 9px;
-  line-height: 1.45;
+.chartError {
+  padding: 20px;
+  color: var(--color-danger);
+  text-align: center;
+}
+
+.panelEmpty {
+  min-height: 150px;
+  flex-direction: column;
 }
 
 .limitMessage {
+  position: sticky;
+  bottom: 0;
+  width: fit-content;
+  padding: 4px 7px;
+  margin: 8px 0 0;
+  border-radius: var(--radius-sm);
+  background: #2b2519;
   color: var(--color-warning);
+}
+
+@media (max-width: 760px) {
+  .chartBadge {
+    display: none;
+  }
+
+  .chartActions button {
+    width: 27px;
+    padding: 0;
+    font-size: 0;
+  }
+
+  .axisGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .seriesRow {
+    grid-template-columns: 24px minmax(70px, 1fr) 58px 42px 25px 25px;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

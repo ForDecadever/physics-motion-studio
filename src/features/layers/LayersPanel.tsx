@@ -9,11 +9,19 @@ import {
   Lock,
   LockOpen,
   Magnet,
+  Pencil,
   Plus,
   Spline,
   Trash2,
 } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
 
+import {
+  cancelPendingEditorEdit,
+  commitPendingEditorEdit,
+  commitPendingEditorEditFromBlur,
+  registerPendingEditorEdit,
+} from '../../editor/editing/pendingEditorEdit'
 import { useDocumentStore } from '../../stores/documentStore'
 import { useEditorStore } from '../../stores/editorStore'
 import {
@@ -33,7 +41,49 @@ const entityIcons = {
   connector: Link2,
 }
 
-export function LayersPanel() {
+interface InlineRenameProps {
+  value: string
+  ariaLabel: string
+  onCommit: (name: string) => void
+  onDone: () => void
+}
+
+function InlineRename({ value, ariaLabel, onCommit, onDone }: InlineRenameProps) {
+  const [draft, setDraft] = useState(value)
+  const latest = useRef({ draft, value, onCommit, onDone })
+  useEffect(() => {
+    latest.current = { draft, value, onCommit, onDone }
+  }, [draft, onCommit, onDone, value])
+
+  const cancel = () => latest.current.onDone()
+  const commit = () => {
+    const current = latest.current
+    const name = current.draft.trim()
+    if (name && name !== current.value) current.onCommit(name)
+    current.onDone()
+  }
+
+  return (
+    <input
+      className={styles.inlineNameInput}
+      type="text"
+      aria-label={ariaLabel}
+      value={draft}
+      maxLength={80}
+      autoFocus
+      onChange={(event) => setDraft(event.target.value)}
+      onFocus={(event) => registerPendingEditorEdit({ input: event.currentTarget, commit, cancel })}
+      onBlur={(event) => commitPendingEditorEditFromBlur(event.currentTarget)}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter') commitPendingEditorEdit()
+        if (event.key === 'Escape') cancelPendingEditorEdit(event.currentTarget)
+      }}
+      onPointerDown={(event) => event.stopPropagation()}
+    />
+  )
+}
+
+export function LayersPanel({ embedded = false }: { embedded?: boolean }) {
   const layers = useDocumentStore((state) => state.scene.layers)
   const entities = useDocumentStore((state) => state.scene.entities)
   const selectedIds = useEditorStore((state) => state.selectedIds)
@@ -43,6 +93,7 @@ export function LayersPanel() {
   const runtimeLocked = useSimulationStore((state) =>
     isSimulationRuntimeLocked({ status: state.status, simulationTime: state.simulationTime }),
   )
+  const [renaming, setRenaming] = useState<{ type: 'layer' | 'entity'; id: string } | null>(null)
 
   const replaceLayers = (nextLayers: typeof layers, label: string) => {
     if (runtimeLocked) return
@@ -112,14 +163,21 @@ export function LayersPanel() {
     Boolean(lastLayer && !entities.some((entity) => entity.layerId === lastLayer.id))
 
   return (
-    <section className={styles.panel} aria-labelledby="layers-heading">
-      <header className={styles.panelHeader}>
-        <div>
-          <span className={styles.eyebrow}>SCENE</span>
-          <h2 id="layers-heading">图层</h2>
-        </div>
-        <span className={styles.countBadge}>{entities.length}</span>
-      </header>
+    <section
+      className={styles.panel}
+      data-embedded={embedded}
+      aria-label={embedded ? '图层内容' : undefined}
+      aria-labelledby={embedded ? undefined : 'layers-heading'}
+    >
+      {embedded ? null : (
+        <header className={styles.panelHeader}>
+          <div>
+            <span className={styles.eyebrow}>SCENE</span>
+            <h2 id="layers-heading">图层</h2>
+          </div>
+          <span className={styles.countBadge}>{entities.length}</span>
+        </header>
+      )}
 
       <div className={styles.layerList}>
         {layers.map((layer) => {
@@ -131,14 +189,42 @@ export function LayersPanel() {
                 <span className={styles.layerIcon}>
                   <Layers3 size={15} />
                 </span>
+                {renaming?.type === 'layer' && renaming.id === layer.id ? (
+                  <InlineRename
+                    value={layer.name}
+                    ariaLabel={`重命名图层 ${layer.name}`}
+                    onDone={() => setRenaming(null)}
+                    onCommit={(name) =>
+                      replaceLayers(
+                        layers.map((candidate) =>
+                          candidate.id === layer.id ? { ...candidate, name } : candidate,
+                        ),
+                        '重命名图层',
+                      )
+                    }
+                  />
+                ) : (
+                  <button
+                    type="button"
+                    className={styles.layerNameButton}
+                    onClick={() => setActiveLayerId(layer.id)}
+                    onDoubleClick={() => {
+                      if (!runtimeLocked) setRenaming({ type: 'layer', id: layer.id })
+                    }}
+                  >
+                    <span className={styles.layerName}>{layer.name}</span>
+                  </button>
+                )}
+                <span className={styles.layerCount}>{layerEntities.length}</span>
                 <button
                   type="button"
-                  className={styles.layerNameButton}
-                  onClick={() => setActiveLayerId(layer.id)}
+                  className={styles.layerToggle}
+                  disabled={runtimeLocked}
+                  aria-label={`重命名图层 ${layer.name}`}
+                  onClick={() => setRenaming({ type: 'layer', id: layer.id })}
                 >
-                  <span className={styles.layerName}>{layer.name}</span>
+                  <Pencil size={12} />
                 </button>
-                <span className={styles.layerCount}>{layerEntities.length}</span>
                 <button
                   type="button"
                   className={styles.layerToggle}
@@ -188,20 +274,45 @@ export function LayersPanel() {
                       data-visible={entity.visible}
                       key={entity.id}
                     >
-                      <button
-                        className={styles.entitySelect}
-                        type="button"
-                        onClick={(event) =>
-                          event.shiftKey
-                            ? useEditorStore.getState().toggleSelectedId(entity.id)
-                            : setSelectedIds([entity.id])
-                        }
-                      >
-                        <EntityIcon size={13} />
-                        <span>{entity.name}</span>
-                        {entity.locked ? <Lock size={11} /> : null}
-                      </button>
+                      {renaming?.type === 'entity' && renaming.id === entity.id ? (
+                        <div className={styles.entitySelect} data-editing="true">
+                          <EntityIcon size={13} />
+                          <InlineRename
+                            value={entity.name}
+                            ariaLabel={`重命名 ${entity.name}`}
+                            onDone={() => setRenaming(null)}
+                            onCommit={(name) => replaceEntity({ ...entity, name }, '重命名对象')}
+                          />
+                          {entity.locked ? <Lock size={11} /> : null}
+                        </div>
+                      ) : (
+                        <button
+                          className={styles.entitySelect}
+                          type="button"
+                          onClick={(event) =>
+                            event.shiftKey
+                              ? useEditorStore.getState().toggleSelectedId(entity.id)
+                              : setSelectedIds([entity.id])
+                          }
+                          onDoubleClick={() => {
+                            if (!runtimeLocked) setRenaming({ type: 'entity', id: entity.id })
+                          }}
+                        >
+                          <EntityIcon size={13} />
+                          <span>{entity.name}</span>
+                          {entity.locked ? <Lock size={11} /> : null}
+                        </button>
+                      )}
                       <div className={styles.entityActions}>
+                        <button
+                          type="button"
+                          className={styles.entityAction}
+                          disabled={runtimeLocked}
+                          aria-label={`重命名对象 ${entity.name}`}
+                          onClick={() => setRenaming({ type: 'entity', id: entity.id })}
+                        >
+                          <Pencil size={12} />
+                        </button>
                         <button
                           type="button"
                           className={styles.entityAction}

@@ -4,7 +4,16 @@ import { defaultCamera, type Camera2D } from '../editor/camera/viewport'
 import type { EntityId, GroundEndpointRef, LayerId, SceneEntity, Vec2 } from '../scene/model/types'
 
 export type EditorTool =
-  'select' | 'rotate' | 'hand' | 'zoom' | 'ground' | 'groundJoint' | 'body' | 'field' | 'connector'
+  | 'select'
+  | 'rotate'
+  | 'scale'
+  | 'hand'
+  | 'zoom'
+  | 'ground'
+  | 'groundJoint'
+  | 'body'
+  | 'field'
+  | 'connector'
 export type BodyToolPreset = 'ball' | 'block'
 export type FieldToolPreset = 'uniformGravity' | 'uniformElectric' | 'uniformMagnetic'
 export type FieldRegionToolShape = 'rectangle' | 'circle' | 'freeform' | 'infinite'
@@ -20,6 +29,7 @@ interface EditorState {
   gridVisible: boolean
   snapEnabled: boolean
   wallSnapEnabled: boolean
+  blockSnapEnabled: boolean
   autoGroundJointEnabled: boolean
   camera: Camera2D
   cursorWorld: Vec2
@@ -42,6 +52,7 @@ interface EditorState {
   toggleGrid: () => void
   toggleSnap: () => void
   toggleWallSnap: () => void
+  toggleBlockSnap: () => void
   toggleAutoGroundJoint: () => void
   setCamera: (camera: Camera2D) => void
   setCursorWorld: (cursorWorld: Vec2) => void
@@ -71,6 +82,7 @@ export const useEditorStore = create<EditorState>((set) => ({
   gridVisible: true,
   snapEnabled: true,
   wallSnapEnabled: false,
+  blockSnapEnabled: true,
   autoGroundJointEnabled: true,
   camera: defaultCamera,
   cursorWorld: { x: 0, y: 0 },
@@ -104,6 +116,7 @@ export const useEditorStore = create<EditorState>((set) => ({
   toggleGrid: () => set((state) => ({ gridVisible: !state.gridVisible })),
   toggleSnap: () => set((state) => ({ snapEnabled: !state.snapEnabled })),
   toggleWallSnap: () => set((state) => ({ wallSnapEnabled: !state.wallSnapEnabled })),
+  toggleBlockSnap: () => set((state) => ({ blockSnapEnabled: !state.blockSnapEnabled })),
   toggleAutoGroundJoint: () =>
     set((state) => ({ autoGroundJointEnabled: !state.autoGroundJointEnabled })),
   setCamera: (camera) => set({ camera }),

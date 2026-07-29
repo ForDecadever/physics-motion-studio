@@ -35,7 +35,7 @@ export function CanvasWorkspace() {
   }, [])
 
   return (
-    <main className={styles.canvasWorkspace} aria-label="物理场景画布">
+    <section className={styles.canvasWorkspace} aria-label="物理场景画布">
       <div className={styles.canvasTopline}>
         <span>二维场景</span>
         <span className={styles.toplineSeparator} />
@@ -74,6 +74,6 @@ export function CanvasWorkspace() {
           <span>Y {cursorWorld.y.toFixed(2)} m</span>
         </div>
       </div>
-    </main>
+    </section>
   )
 }

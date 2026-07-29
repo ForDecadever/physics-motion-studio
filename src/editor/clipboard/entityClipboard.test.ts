@@ -5,9 +5,11 @@ import {
   createBall,
   createGroundJoint,
   createLineGround,
+  createRod,
   createRope,
+  createSpring,
 } from '../../scene/model/entityFactories'
-import { duplicateEntities } from './entityClipboard'
+import { collectClipboardEntities, duplicateEntities } from './entityClipboard'
 
 describe('实体复制与粘贴', () => {
   it('生成新 ID、偏移物体，并把连接器重定向到副本', () => {
@@ -64,5 +66,55 @@ describe('实体复制与粘贴', () => {
     expect(jointCopy.a.groundId).toBe('copy-1')
     expect(jointCopy.b.groundId).toBe('copy-2')
     expect(duplicateEntities([first, joint], () => crypto.randomUUID())).toHaveLength(1)
+  })
+
+  it('选择两个物体时自动收集它们之间的绳、杆和弹簧', () => {
+    const scene = createEmptyScene()
+    const layerId = scene.layers[0]?.id
+    if (!layerId) throw new Error('测试场景缺少图层')
+    const first = createBall(layerId, { x: 0, y: 0 }, 0.5, 1)
+    const second = createBall(layerId, { x: 2, y: 0 }, 0.5, 2)
+    const rope = createRope(layerId, first.id, second.id, 2, 1)
+    const rod = createRod(layerId, first.id, second.id, 2, 1)
+    const spring = createSpring(layerId, first.id, second.id, 2, 1)
+    const all = [first, second, rope, rod, spring]
+
+    expect(collectClipboardEntities(all, [first.id, second.id]).map((entity) => entity.id)).toEqual(
+      [first.id, second.id, rope.id, rod.id, spring.id],
+    )
+  })
+
+  it('关系缺少任一端点时不收集，单独选择关系也不会拉入端点', () => {
+    const scene = createEmptyScene()
+    const layerId = scene.layers[0]?.id
+    if (!layerId) throw new Error('测试场景缺少图层')
+    const first = createBall(layerId, { x: 0, y: 0 }, 0.5, 1)
+    const second = createBall(layerId, { x: 2, y: 0 }, 0.5, 2)
+    const spring = createSpring(layerId, first.id, second.id, 2, 1)
+    const all = [first, second, spring]
+
+    expect(collectClipboardEntities(all, [first.id])).toEqual([first])
+    expect(collectClipboardEntities(all, [spring.id])).toEqual([])
+  })
+
+  it('选择两块地面时自动收集地面连接点', () => {
+    const scene = createEmptyScene()
+    const layerId = scene.layers[0]?.id
+    if (!layerId) throw new Error('测试场景缺少图层')
+    const first = createLineGround(layerId, { x: -1, y: 0 }, { x: 0, y: 0 }, 1)
+    const second = createLineGround(layerId, { x: 0, y: 0 }, { x: 1, y: 0 }, 2)
+    const joint = createGroundJoint(
+      layerId,
+      { groundId: first.id, endpoint: 'end' },
+      { groundId: second.id, endpoint: 'start' },
+      1,
+    )
+
+    expect(
+      collectClipboardEntities([first, second, joint], [first.id, second.id]).map(
+        (entity) => entity.id,
+      ),
+    ).toEqual([first.id, second.id, joint.id])
+    expect(collectClipboardEntities([first, second, joint], [first.id])).toEqual([first])
   })
 })

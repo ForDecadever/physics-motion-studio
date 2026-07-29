@@ -1,7 +1,7 @@
 {
   "name": "motion-studio",
   "private": true,
-  "version": "0.8.0",
+  "version": "1.2.0",
   "type": "module",
   "packageManager": "pnpm@11.9.0",
   "engines": {
@@ -16,7 +16,7 @@
     "format:check": "prettier --check \"src/**/*.{ts,tsx,css}\" \"e2e/**/*.ts\" \"scripts/**/*.mjs\" \"*.{js,json,ts}\"",
     "test": "vitest run",
     "test:watch": "vitest",
-    "benchmark": "vitest bench --run",
+    "benchmark": "vitest bench --run --no-file-parallelism",
     "e2e:install": "playwright install chromium",
     "e2e": "node scripts/run-e2e.mjs",
     "e2e:update": "node scripts/run-e2e.mjs --update-snapshots",

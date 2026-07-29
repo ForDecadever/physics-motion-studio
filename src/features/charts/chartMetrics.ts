@@ -1,19 +1,7 @@
-import type { BodyEntity } from '../../scene/model/types'
+import type { BodyEntity, ChartMetricId } from '../../scene/model/types'
 import type { RuntimeBodyState } from '../../physics/worker/messages'
 
-export type ChartMetricId =
-  | 'positionX'
-  | 'positionY'
-  | 'velocityX'
-  | 'velocityY'
-  | 'speed'
-  | 'acceleration'
-  | 'angle'
-  | 'angularVelocity'
-  | 'netForce'
-  | 'kineticEnergy'
-  | 'translationalKineticEnergy'
-  | 'rotationalKineticEnergy'
+export type { ChartMetricId } from '../../scene/model/types'
 
 export interface ChartMetricDefinition {
   id: ChartMetricId

@@ -1,16 +1,16 @@
-interface PendingInspectorEdit {
+export interface PendingEditorEdit {
   input: HTMLInputElement
   commit: () => void
   cancel: () => void
 }
 
-let pendingEdit: PendingInspectorEdit | null = null
+let pendingEdit: PendingEditorEdit | null = null
 
-export function registerPendingInspectorEdit(edit: PendingInspectorEdit): void {
+export function registerPendingEditorEdit(edit: PendingEditorEdit): void {
   pendingEdit = edit
 }
 
-export function commitPendingInspectorEdit(nextTarget?: EventTarget | null): void {
+export function commitPendingEditorEdit(nextTarget?: EventTarget | null): void {
   const pending = pendingEdit
   if (!pending || pending.input === nextTarget) return
   pendingEdit = null
@@ -18,14 +18,14 @@ export function commitPendingInspectorEdit(nextTarget?: EventTarget | null): voi
   pending.input.blur()
 }
 
-export function commitPendingInspectorEditFromBlur(input: HTMLInputElement): void {
+export function commitPendingEditorEditFromBlur(input: HTMLInputElement): void {
   if (pendingEdit?.input !== input) return
   const pending = pendingEdit
   pendingEdit = null
   pending.commit()
 }
 
-export function cancelPendingInspectorEdit(input: HTMLInputElement): void {
+export function cancelPendingEditorEdit(input: HTMLInputElement): void {
   if (pendingEdit?.input !== input) return
   const pending = pendingEdit
   pendingEdit = null

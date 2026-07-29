@@ -1,4 +1,5 @@
 import { CURRENT_APP_VERSION, CURRENT_SCHEMA_VERSION } from '../model/types'
+import { createDefaultChart } from '../model/chartDefaults'
 
 export class SceneVersionError extends Error {
   constructor(message: string) {
@@ -135,12 +136,22 @@ export function migrateSceneV5ToV6(input: Record<string, unknown>): Record<strin
   }
 }
 
+export function migrateSceneV6ToV7(input: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...input,
+    schemaVersion: 7,
+    appVersion: CURRENT_APP_VERSION,
+    charts: [createDefaultChart('chart-1')],
+  }
+}
+
 const migrations: Record<number, (scene: Record<string, unknown>) => Record<string, unknown>> = {
   1: migrateSceneV1ToV2,
   2: migrateSceneV2ToV3,
   3: migrateSceneV3ToV4,
   4: migrateSceneV4ToV5,
   5: migrateSceneV5ToV6,
+  6: migrateSceneV6ToV7,
 }
 
 export function migrateScene(input: unknown): unknown {

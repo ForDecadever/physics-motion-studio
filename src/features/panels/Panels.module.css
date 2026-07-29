@@ -8,6 +8,12 @@
   background: var(--color-bg-panel);
 }
 
+.panel[data-embedded='true'] {
+  height: 100%;
+  grid-template-rows: minmax(0, 1fr) auto;
+  border-bottom: 0;
+}
+
 .panelHeader {
   display: flex;
   align-items: center;
@@ -67,7 +73,7 @@
   color: var(--color-text-muted);
   cursor: pointer;
   gap: 6px;
-  grid-template-columns: 14px 24px minmax(0, 1fr) auto 24px 24px;
+  grid-template-columns: 14px 24px minmax(0, 1fr) auto 24px 24px 24px;
   text-align: left;
 }
 
@@ -123,6 +129,19 @@
   background: transparent;
   color: inherit;
   text-align: left;
+}
+
+.inlineNameInput {
+  width: 100%;
+  min-width: 0;
+  height: 23px;
+  padding: 0 5px;
+  border: 1px solid var(--color-accent-strong);
+  border-radius: 3px;
+  outline: none;
+  background: #111419;
+  color: var(--color-text);
+  font: inherit;
 }
 
 .layerCount {
@@ -189,6 +208,10 @@
   display: flex;
   align-items: center;
   padding-right: 2px;
+}
+
+.entitySelect[data-editing='true'] {
+  cursor: text;
 }
 
 .entityAction {

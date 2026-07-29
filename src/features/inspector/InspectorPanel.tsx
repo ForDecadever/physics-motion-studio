@@ -15,11 +15,11 @@ import { isSimulationRuntimeLocked, useSimulationStore } from '../../stores/simu
 import { useEditorStore } from '../../stores/editorStore'
 import styles from '../panels/Panels.module.css'
 import {
-  cancelPendingInspectorEdit,
-  commitPendingInspectorEdit,
-  commitPendingInspectorEditFromBlur,
-  registerPendingInspectorEdit,
-} from './pendingInspectorEdit'
+  cancelPendingEditorEdit,
+  commitPendingEditorEdit,
+  commitPendingEditorEditFromBlur,
+  registerPendingEditorEdit,
+} from '../../editor/editing/pendingEditorEdit'
 
 function PropertyRow({ icon, label, value }: { icon: ReactNode; label: string; value: string }) {
   return (
@@ -90,17 +90,17 @@ function NumberProperty({
           disabled={disabled}
           onChange={(event) => setEdit({ sourceValue: value, text: event.target.value })}
           onFocus={(event) =>
-            registerPendingInspectorEdit({
+            registerPendingEditorEdit({
               input: event.currentTarget,
               commit,
               cancel: reset,
             })
           }
-          onBlur={(event) => commitPendingInspectorEditFromBlur(event.currentTarget)}
+          onBlur={(event) => commitPendingEditorEditFromBlur(event.currentTarget)}
           onKeyDown={(event) => {
-            if (event.key === 'Enter') commitPendingInspectorEdit()
+            if (event.key === 'Enter') commitPendingEditorEdit()
             if (event.key === 'Escape') {
-              cancelPendingInspectorEdit(event.currentTarget)
+              cancelPendingEditorEdit(event.currentTarget)
             }
           }}
         />
@@ -1105,7 +1105,7 @@ function EntityProperties({
   )
 }
 
-export function InspectorPanel() {
+export function InspectorPanel({ embedded = false }: { embedded?: boolean }) {
   const scene = useDocumentStore((state) => state.scene)
   const selectedIds = useEditorStore((state) => state.selectedIds)
   const selectionKey = selectedIds.join('\u0000')
@@ -1128,18 +1128,25 @@ export function InspectorPanel() {
   useEffect(() => {
     if (previousSelectionKey.current === selectionKey) return
     previousSelectionKey.current = selectionKey
-    commitPendingInspectorEdit()
+    commitPendingEditorEdit()
   }, [selectionKey])
 
   return (
-    <section className={styles.panel} aria-labelledby="inspector-heading">
-      <header className={styles.panelHeader}>
-        <div>
-          <span className={styles.eyebrow}>INSPECTOR</span>
-          <h2 id="inspector-heading">属性</h2>
-        </div>
-        <BoxSelect size={17} />
-      </header>
+    <section
+      className={styles.panel}
+      data-embedded={embedded}
+      aria-label={embedded ? '属性内容' : undefined}
+      aria-labelledby={embedded ? undefined : 'inspector-heading'}
+    >
+      {embedded ? null : (
+        <header className={styles.panelHeader}>
+          <div>
+            <span className={styles.eyebrow}>INSPECTOR</span>
+            <h2 id="inspector-heading">属性</h2>
+          </div>
+          <BoxSelect size={17} />
+        </header>
+      )}
 
       <div className={styles.inspectorBody}>
         <div className={styles.selectionEmpty}>

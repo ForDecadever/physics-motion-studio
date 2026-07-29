@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 
+import { scaleEntitiesAroundPivot } from '../../editor/geometry/entityGeometry'
 import { createEmptyScene } from '../../scene/model/createEmptyScene'
 import { buildGroundPathNetwork } from '../../scene/model/groundPath'
 import type {
@@ -194,6 +195,59 @@ function springSystemEnergy(
 }
 
 describe('SimulationWorld 物理规律验证', () => {
+  it('缩放后的几何会重建碰撞体和转动惯量，但质量保持不变', () => {
+    const smallScene = baseScene()
+    const smallBody = makeBody(
+      smallScene,
+      'small',
+      { x: 0, y: 0 },
+      { x: 0, y: 0 },
+      {
+        initialAngularVelocityRad: 2,
+        massKg: 2,
+      },
+    )
+    smallScene.entities = [smallBody]
+
+    const largeScene = baseScene()
+    const scaledBody = scaleEntitiesAroundPivot([smallBody], [smallBody.id], { x: 0, y: 0 }, 2)
+      .replacements[0]
+    if (scaledBody?.kind !== 'body') throw new Error('测试缩放未返回物体')
+    largeScene.entities = [{ ...scaledBody, layerId: largeScene.layers[0]!.id, id: 'large' }]
+
+    const smallWorld = createWorld(smallScene)
+    const largeWorld = createWorld(largeScene)
+    smallWorld.step()
+    largeWorld.step()
+    const smallState = stateOf(smallWorld, 'small')
+    const largeState = stateOf(largeWorld, 'large')
+
+    expect(scaledBody.massKg).toBe(2)
+    expect(largeState.position).toEqual(smallState.position)
+    expect(largeState.rotationalKineticEnergyJ).toBeCloseTo(
+      smallState.rotationalKineticEnergyJ * 4,
+      5,
+    )
+
+    const groundScene = baseScene()
+    const ground = makeGround(groundScene, {
+      type: 'line',
+      start: { x: -1, y: 0 },
+      end: { x: 1, y: 0 },
+    })
+    const scaledGround = scaleEntitiesAroundPivot([ground], [ground.id], { x: 0, y: 0 }, 2)
+      .replacements[0]
+    if (scaledGround?.kind !== 'ground') throw new Error('测试缩放未返回地面')
+    groundScene.entities = [
+      scaledGround,
+      makeBody(groundScene, 'edge-ball', { x: 1.4, y: 1.5 }),
+      makeGravity(groundScene, { x: 0, y: -9.80665 }),
+    ]
+    const groundWorld = createWorld(groundScene)
+    groundWorld.step(120)
+    expect(stateOf(groundWorld, 'edge-ball').position.y).toBeGreaterThan(0.48)
+  })
+
   it('运行快照直接给出实际加速度、合外力和动能', () => {
     const scene = baseScene()
     scene.entities = [

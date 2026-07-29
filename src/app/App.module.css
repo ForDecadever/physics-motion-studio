@@ -3,52 +3,9 @@
   display: grid;
   width: 100%;
   height: 100dvh;
-  grid-template-rows: 34px 42px minmax(260px, 1fr) 43px 5px var(--chart-height, 184px);
+  grid-template-rows: 34px 42px minmax(0, 1fr) 43px;
   overflow: hidden;
   background: var(--color-bg-app);
-}
-
-.appShell[data-chart-collapsed='true'] {
-  grid-template-rows: 34px 42px minmax(260px, 1fr) 43px 0 35px;
-}
-
-.workspace {
-  display: grid;
-  min-width: 0;
-  min-height: 0;
-  grid-template-columns: 52px minmax(420px, 1fr) 5px var(--right-dock-width, 296px);
-}
-
-.rightResizer,
-.chartResizer {
-  position: relative;
-  z-index: var(--z-resizer);
-  background: #181b20;
-}
-
-.rightResizer {
-  cursor: col-resize;
-}
-
-.chartResizer {
-  cursor: row-resize;
-  border-top: 1px solid #0f1114;
-}
-
-.rightResizer:hover,
-.chartResizer:hover,
-.rightResizer:focus-visible,
-.chartResizer:focus-visible {
-  background: var(--color-accent-strong);
-}
-
-.rightDock {
-  display: grid;
-  min-width: 0;
-  min-height: 0;
-  grid-template-rows: minmax(150px, 0.42fr) minmax(220px, 0.58fr);
-  border-left: 1px solid var(--color-border);
-  background: var(--color-bg-panel);
 }
 
 .hiddenInput {
@@ -138,15 +95,5 @@
   from {
     opacity: 0;
     transform: translateY(8px);
-  }
-}
-
-@media (max-height: 720px) {
-  .appShell {
-    grid-template-rows: 34px 42px minmax(240px, 1fr) 43px 5px min(var(--chart-height, 140px), 140px);
-  }
-
-  .appShell[data-chart-collapsed='true'] {
-    grid-template-rows: 34px 42px minmax(240px, 1fr) 43px 0 35px;
   }
 }

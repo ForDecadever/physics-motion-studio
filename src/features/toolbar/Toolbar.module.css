@@ -4,12 +4,24 @@
   display: flex;
   min-width: 0;
   align-items: center;
+  overflow-x: auto;
+  overflow-y: hidden;
   gap: 8px;
   padding: 0 12px;
   border-bottom: 1px solid var(--color-border);
   background: #202328;
   box-shadow: 0 2px 7px rgb(0 0 0 / 16%);
   user-select: none;
+  scrollbar-width: thin;
+}
+
+.activeToolLabel,
+.optionsDivider,
+.toolDetail,
+.toolSelect,
+.optionToggle,
+.optionsHint {
+  flex: 0 0 auto;
 }
 
 .activeToolLabel {
@@ -106,9 +118,41 @@
   flex: 1;
   flex-direction: column;
   align-items: center;
-  overflow: visible;
+  overflow: auto;
   padding: 6px 0;
   scrollbar-width: none;
+}
+
+.toolbar[data-orientation='horizontal'] {
+  flex-direction: row;
+  border-top: 0;
+  border-right: 0;
+}
+
+.toolbar[data-orientation='horizontal'] .toolbarTop {
+  width: auto;
+  flex-direction: row;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0 6px;
+}
+
+.toolbar[data-orientation='horizontal'] .toolItem {
+  width: 42px;
+  flex: 0 0 auto;
+}
+
+.toolbar[data-orientation='horizontal'] .toolGroup {
+  padding-top: 0;
+  padding-left: 7px;
+  border-top: 0;
+  border-left: 1px solid var(--color-border);
+  margin-top: 0;
+  margin-left: 7px;
+}
+
+.toolbar[data-orientation='horizontal'] .axisBadge {
+  margin: 0 10px 0 4px;
 }
 
 .toolItem {
@@ -124,10 +168,8 @@
 }
 
 .toolFlyout {
-  position: absolute;
-  z-index: 1;
-  top: -5px;
-  left: 47px;
+  position: fixed;
+  z-index: var(--z-tool-flyout);
   width: 172px;
   padding: 6px;
   border: 1px solid var(--color-border-strong);
@@ -244,4 +286,32 @@
   right: -1px;
   bottom: 3px;
   color: #70ca89;
+}
+
+@media (max-height: 760px) {
+  .toolbarTop {
+    padding: 3px 0;
+  }
+
+  .toolGroup {
+    padding-top: 3px;
+    margin-top: 3px;
+  }
+
+  .toolButton {
+    width: 36px;
+    height: 30px;
+    margin-bottom: 1px;
+  }
+
+  .toolButton > svg {
+    width: 18px;
+    height: 18px;
+  }
+
+  .axisBadge {
+    width: 26px;
+    height: 26px;
+    margin: 4px 0 5px;
+  }
 }

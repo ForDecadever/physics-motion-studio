@@ -9,6 +9,7 @@ import {
   createLineGround,
   createSpring,
 } from './entityFactories'
+import { CURRENT_APP_VERSION } from './types'
 
 describe('场景文档', () => {
   it('创建符合规范的空场景', () => {
@@ -21,6 +22,13 @@ describe('场景文档', () => {
     expect(parsed.settings.fixedTimeStep).toBeCloseTo(1 / 120)
     expect(parsed.settings.gridStep).toBe(5)
     expect(parsed.settings.pairwiseElectrostatics).toBe(false)
+    expect(parsed.charts).toHaveLength(1)
+    expect(parsed.charts[0]).toMatchObject({
+      name: '坐标系 1',
+      xAxis: { type: 'metric', metricId: 'time' },
+      yAxis: { type: 'metric', metricId: 'positionY' },
+      series: [],
+    })
   })
 
   it('拒绝来自未来版本的场景', () => {
@@ -44,7 +52,7 @@ describe('场景文档', () => {
 
     const migrated = parseSceneText(JSON.stringify(oldScene))
 
-    expect(migrated.schemaVersion).toBe(6)
+    expect(migrated.schemaVersion).toBe(7)
     expect(migrated.settings.recordingSampleRate).toBe(60)
     expect(migrated.settings.recordingDurationSeconds).toBe(300)
     expect(migrated).toMatchObject({ futureTopLevel: { enabled: true } })
@@ -85,7 +93,7 @@ describe('场景文档', () => {
       JSON.stringify({ ...scene, schemaVersion: 3, appVersion: '0.5.0', entities: [ground] }),
     )
 
-    expect(migrated.schemaVersion).toBe(6)
+    expect(migrated.schemaVersion).toBe(7)
     expect(migrated.entities[0]).toMatchObject({
       kind: 'ground',
       collisionSide: 'both',
@@ -120,7 +128,7 @@ describe('场景文档', () => {
 
     const parsed = parseSceneText(serializeScene(scene))
 
-    expect(parsed.schemaVersion).toBe(6)
+    expect(parsed.schemaVersion).toBe(7)
     expect(parsed.entities[2]).toEqual(joint)
   })
 
@@ -147,8 +155,8 @@ describe('场景文档', () => {
       }),
     )
 
-    expect(parsed.schemaVersion).toBe(6)
-    expect(parsed.appVersion).toBe('0.8.0')
+    expect(parsed.schemaVersion).toBe(7)
+    expect(parsed.appVersion).toBe(CURRENT_APP_VERSION)
     expect(parsed.entities[2]).toMatchObject({
       kind: 'groundJoint',
       transition: { mode: 'auto', directionFlipped: false },
@@ -240,8 +248,8 @@ describe('场景文档', () => {
     )
     const body = parsed.entities[0]
 
-    expect(parsed.schemaVersion).toBe(6)
-    expect(parsed.appVersion).toBe('0.8.0')
+    expect(parsed.schemaVersion).toBe(7)
+    expect(parsed.appVersion).toBe(CURRENT_APP_VERSION)
     expect(body?.kind).toBe('body')
     if (body?.kind !== 'body') return
     expect(body.rotationEnabled).toBe(true)
@@ -264,6 +272,61 @@ describe('场景文档', () => {
     if (body?.kind !== 'body') return
     expect(body.rotationEnabled).toBe(false)
     expect(body.initialAngularVelocityRad).toBe(3)
+  })
+
+  it('把格式 6 迁移为带默认坐标系的格式 7', () => {
+    const scene = createEmptyScene()
+    const legacy: Record<string, unknown> = {
+      ...scene,
+      schemaVersion: 6,
+      appVersion: '0.9.0',
+    }
+    delete legacy.charts
+
+    const parsed = parseSceneText(JSON.stringify(legacy))
+    expect(parsed.schemaVersion).toBe(7)
+    expect(parsed.appVersion).toBe(CURRENT_APP_VERSION)
+    expect(parsed.charts).toEqual([
+      expect.objectContaining({
+        id: 'chart-1',
+        name: '坐标系 1',
+        xAxis: { type: 'metric', metricId: 'time' },
+        yAxis: { type: 'metric', metricId: 'positionY' },
+      }),
+    ])
+  })
+
+  it('保存图表配置但不包含任何运行采样，并拒绝量纲错误公式', () => {
+    const scene = createEmptyScene()
+    scene.charts[0] = {
+      ...scene.charts[0]!,
+      name: '自定义图',
+      yAxis: { type: 'expression', expression: 'x+y' },
+      series: [
+        {
+          id: 'series-1',
+          entityId: '00000000-0000-4000-8000-000000000001',
+          visible: true,
+          color: '#58a6ff',
+          lineStyle: 'dashed',
+          lineWidth: 3,
+        },
+      ],
+    }
+
+    const text = serializeScene(scene)
+    expect(text).not.toContain('simulationTime')
+    expect(parseSceneText(text).charts[0]).toMatchObject({
+      name: '自定义图',
+      yAxis: { type: 'expression', expression: 'x+y' },
+      series: [expect.objectContaining({ lineStyle: 'dashed', lineWidth: 3 })],
+    })
+
+    scene.charts[0] = {
+      ...scene.charts[0]!,
+      yAxis: { type: 'expression', expression: 'x/3+y*x' },
+    }
+    expect(() => serializeScene(scene)).toThrow(/单位不同/)
   })
 
   it('当前格式拒绝缺少旋转开关的物体', () => {
