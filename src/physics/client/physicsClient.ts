@@ -1,7 +1,11 @@
 import type { SceneDocument } from '../../scene/model/types'
 import { useChartStore } from '../../stores/chartStore'
 import { useSimulationStore } from '../../stores/simulationStore'
-import type { MainToPhysicsMessage, PhysicsToMainMessage } from '../worker/messages'
+import type {
+  GifHistorySnapshot,
+  MainToPhysicsMessage,
+  PhysicsToMainMessage,
+} from '../worker/messages'
 
 const INITIALIZATION_TIMEOUT_MS = 5_000
 const MAX_INITIALIZATION_RETRIES = 2
@@ -11,6 +15,15 @@ class PhysicsClient {
   private pendingScene: SceneDocument | null = null
   private initializationRetries = 0
   private initializationTimer: ReturnType<typeof setTimeout> | null = null
+  private nextGifHistoryRequestId = 1
+  private readonly pendingGifHistoryRequests = new Map<
+    number,
+    {
+      resolve: (snapshot: GifHistorySnapshot) => void
+      reject: (error: Error) => void
+      timer: ReturnType<typeof setTimeout>
+    }
+  >()
 
   start(): void {
     if (this.worker) return
@@ -37,6 +50,15 @@ class PhysicsClient {
       } else if (message.type === 'frame') {
         store.setFrame(message.simulationTime, message.bodies)
         useChartStore.getState().appendSamples(message.samples)
+      } else if (message.type === 'gifHistoryStatus') {
+        store.setGifHistoryStatus(message.status)
+      } else if (message.type === 'gifHistorySnapshot') {
+        const pending = this.pendingGifHistoryRequests.get(message.snapshot.requestId)
+        if (pending) {
+          clearTimeout(pending.timer)
+          this.pendingGifHistoryRequests.delete(message.snapshot.requestId)
+          pending.resolve(message.snapshot)
+        }
       } else if (message.type === 'warning') {
         store.addWarning(message.message)
       } else {
@@ -55,6 +77,7 @@ class PhysicsClient {
     this.clearInitializationTimer()
     this.worker?.terminate()
     this.worker = null
+    this.rejectGifHistoryRequests('物理线程已停止，无法读取 GIF 历史记录。')
     this.pendingScene = null
     this.initializationRetries = 0
   }
@@ -99,6 +122,25 @@ class PhysicsClient {
     this.send({ type: 'setRecordedBodyIds', entityIds })
   }
 
+  clearGifHistory(): void {
+    this.send({ type: 'clearGifHistory' })
+  }
+
+  requestGifHistory(): Promise<GifHistorySnapshot> {
+    if (!this.worker) return Promise.reject(new Error('物理线程尚未启动。'))
+    const requestId = this.nextGifHistoryRequestId
+    this.nextGifHistoryRequestId += 1
+
+    return new Promise<GifHistorySnapshot>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingGifHistoryRequests.delete(requestId)
+        reject(new Error('读取 GIF 历史记录超时，请稍后重试。'))
+      }, 10_000)
+      this.pendingGifHistoryRequests.set(requestId, { resolve, reject, timer })
+      this.send({ type: 'requestGifHistory', requestId })
+    })
+  }
+
   private send(message: MainToPhysicsMessage): void {
     this.worker?.postMessage(message)
   }
@@ -121,6 +163,7 @@ class PhysicsClient {
     this.clearInitializationTimer()
     this.worker?.terminate()
     this.worker = null
+    this.rejectGifHistoryRequests('物理线程正在重新初始化，请稍后重试。')
     if (!scene || this.initializationRetries >= MAX_INITIALIZATION_RETRIES) {
       this.pendingScene = null
       useSimulationStore.getState().setError(reason)
@@ -131,6 +174,14 @@ class PhysicsClient {
     this.createWorker()
     this.send({ type: 'initialize', scene })
     this.armInitializationTimeout()
+  }
+
+  private rejectGifHistoryRequests(message: string): void {
+    for (const pending of this.pendingGifHistoryRequests.values()) {
+      clearTimeout(pending.timer)
+      pending.reject(new Error(message))
+    }
+    this.pendingGifHistoryRequests.clear()
   }
 }
 

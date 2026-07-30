@@ -75,4 +75,37 @@ describe('PhysicsClient Worker 初始化恢复', () => {
       errorMessage: '物理线程初始化超时。',
     })
   })
+
+  it('通过请求编号接收可转移的 GIF 历史快照', async () => {
+    physicsClient.start()
+    const worker = FakeWorker.instances[0]!
+    const pending = physicsClient.requestGifHistory()
+    const request = worker.messages.at(-1)
+    expect(request).toMatchObject({ type: 'requestGifHistory' })
+    if (request?.type !== 'requestGifHistory') return
+
+    const snapshot = {
+      requestId: request.requestId,
+      status: {
+        kind: 'ready' as const,
+        bodyCount: 0,
+        maxBodies: 200,
+        sampleCount: 2,
+        startTime: 0,
+        endTime: 1 / 30,
+      },
+      sampleRate: 30,
+      bodyIds: [],
+      times: new Float32Array([0, 1 / 30]),
+      values: new Float32Array(),
+    }
+    worker.emit({ type: 'gifHistorySnapshot', snapshot })
+    await expect(pending).resolves.toBe(snapshot)
+  })
+
+  it('forwards the GIF history clear request to the physics worker', () => {
+    physicsClient.start()
+    physicsClient.clearGifHistory()
+    expect(FakeWorker.instances[0]?.messages.at(-1)).toEqual({ type: 'clearGifHistory' })
+  })
 })

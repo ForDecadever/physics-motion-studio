@@ -1,7 +1,11 @@
 import { create } from 'zustand'
 
 import type { EntityId, Vec2 } from '../scene/model/types'
-import type { RuntimeBodyState, SimulationStatus } from '../physics/worker/messages'
+import type {
+  GifHistoryStatus,
+  RuntimeBodyState,
+  SimulationStatus,
+} from '../physics/worker/messages'
 
 interface SimulationState {
   status: SimulationStatus
@@ -10,6 +14,7 @@ interface SimulationState {
   playbackRate: number
   runtimeBodies: Record<EntityId, RuntimeBodyState>
   runtimeTrajectories: Record<EntityId, Vec2[]>
+  gifHistoryStatus: GifHistoryStatus
   warnings: string[]
   errorMessage: string | null
   beginInitialization: () => void
@@ -20,6 +25,7 @@ interface SimulationState {
     playbackRate: number,
   ) => void
   setFrame: (simulationTime: number, bodies: RuntimeBodyState[]) => void
+  setGifHistoryStatus: (status: GifHistoryStatus) => void
   addWarning: (message: string) => void
   setError: (message: string) => void
 }
@@ -31,6 +37,14 @@ export const useSimulationStore = create<SimulationState>((set) => ({
   playbackRate: 1,
   runtimeBodies: {},
   runtimeTrajectories: {},
+  gifHistoryStatus: {
+    kind: 'ready',
+    bodyCount: 0,
+    maxBodies: 200,
+    sampleCount: 0,
+    startTime: 0,
+    endTime: 0,
+  },
   warnings: [],
   errorMessage: null,
   beginInitialization: () =>
@@ -39,6 +53,14 @@ export const useSimulationStore = create<SimulationState>((set) => ({
       simulationTime: 0,
       runtimeBodies: {},
       runtimeTrajectories: {},
+      gifHistoryStatus: {
+        kind: 'ready',
+        bodyCount: 0,
+        maxBodies: 200,
+        sampleCount: 0,
+        startTime: 0,
+        endTime: 0,
+      },
       warnings: [],
       errorMessage: null,
     }),
@@ -68,6 +90,7 @@ export const useSimulationStore = create<SimulationState>((set) => ({
         runtimeTrajectories,
       }
     }),
+  setGifHistoryStatus: (gifHistoryStatus) => set({ gifHistoryStatus }),
   addWarning: (message) => set((state) => ({ warnings: [...state.warnings, message].slice(-5) })),
   setError: (errorMessage) => set({ status: 'error', errorMessage }),
 }))

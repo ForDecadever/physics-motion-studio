@@ -1,4 +1,4 @@
-import { Application, Container, Graphics } from 'pixi.js'
+import { Application, Container, Graphics, Rectangle } from 'pixi.js'
 
 import { getVisibleGridSteps, type Camera2D, type ViewportSize } from '../../editor/camera/viewport'
 import {
@@ -45,6 +45,23 @@ export interface PixiRenderState {
   runtimeBodies: Record<EntityId, RuntimeBodyState>
   runtimeTrajectories: Record<EntityId, Vec2[]>
   runtimeLocked: boolean
+  motionGuides?: {
+    trajectoryIds: EntityId[]
+    velocityIds: EntityId[]
+    forceIds: EntityId[]
+    trajectoryColors?: Record<EntityId, string>
+  }
+  showOverlays?: boolean
+  backgroundColor?: string
+  transparentBackground?: boolean
+}
+
+interface PixiMountOptions {
+  width?: number
+  height?: number
+  resolution?: number
+  interactive?: boolean
+  ariaLabel?: string
 }
 
 const colors = {
@@ -117,19 +134,23 @@ export class PixiSceneRenderer {
   private readonly bodies = new Graphics()
   private readonly overlays = new Graphics()
   private readonly groundNetworkCache = new GroundRenderNetworkCache()
+  private captureBackgroundColor = '#000000'
+  private captureTransparent = true
+  private initialized = false
 
-  async mount(host: HTMLElement): Promise<HTMLCanvasElement> {
+  async mount(host: HTMLElement, options: PixiMountOptions = {}): Promise<HTMLCanvasElement> {
     await this.app.init({
-      width: Math.max(1, host.clientWidth),
-      height: Math.max(1, host.clientHeight),
+      width: Math.max(1, options.width ?? host.clientWidth),
+      height: Math.max(1, options.height ?? host.clientHeight),
       antialias: true,
       autoDensity: true,
-      resolution: Math.min(window.devicePixelRatio || 1, 2),
+      resolution: options.resolution ?? Math.min(window.devicePixelRatio || 1, 2),
       backgroundAlpha: 0,
       autoStart: false,
       preference: 'webgl',
       powerPreference: 'high-performance',
     })
+    this.initialized = true
 
     this.world.addChild(
       this.grid,
@@ -145,19 +166,30 @@ export class PixiSceneRenderer {
 
     const canvas = this.app.canvas
     canvas.className = 'pixi-editor-canvas'
-    canvas.tabIndex = 0
-    canvas.setAttribute('role', 'application')
-    canvas.setAttribute('aria-label', '可交互的二维物理画布')
+    if (options.interactive !== false) {
+      canvas.tabIndex = 0
+      canvas.setAttribute('role', 'application')
+    } else {
+      canvas.tabIndex = -1
+      canvas.setAttribute('role', 'img')
+    }
+    canvas.setAttribute('aria-label', options.ariaLabel ?? '可交互的二维物理画布')
     host.appendChild(canvas)
     return canvas
   }
 
   resize(size: ViewportSize): void {
+    if (!this.initialized) throw new Error('画布渲染器尚未初始化，无法调整尺寸。')
     this.app.renderer.resize(Math.max(1, size.width), Math.max(1, size.height))
   }
 
   render(state: PixiRenderState): void {
+    if (!this.initialized) throw new Error('画布渲染器尚未初始化，无法绘制画面。')
     const { camera, size } = state
+    this.captureBackgroundColor = state.backgroundColor ?? '#000000'
+    this.captureTransparent = state.transparentBackground ?? true
+    this.app.renderer.background.color = this.captureBackgroundColor
+    this.app.renderer.background.alpha = this.captureTransparent ? 0 : 1
     this.world.position.set(
       size.width / 2 - camera.center.x * camera.pixelsPerMeter,
       size.height / 2 + camera.center.y * camera.pixelsPerMeter,
@@ -184,7 +216,20 @@ export class PixiSceneRenderer {
   }
 
   destroy(): void {
+    if (!this.initialized) return
+    this.initialized = false
     this.app.destroy({ removeView: true }, { children: true })
+  }
+
+  capturePixels(size: ViewportSize): Uint8ClampedArray {
+    if (!this.initialized) throw new Error('画布渲染器尚未初始化，无法读取像素。')
+    const { pixels } = this.app.renderer.extract.pixels({
+      target: this.app.stage,
+      frame: new Rectangle(0, 0, size.width, size.height),
+      resolution: 1,
+      clearColor: this.captureTransparent ? [0, 0, 0, 0] : this.captureBackgroundColor,
+    })
+    return pixels
   }
 
   private drawGrid(state: PixiRenderState): void {
@@ -624,18 +669,21 @@ export class PixiSceneRenderer {
 
   private drawMotionGuides(state: PixiRenderState): void {
     this.motionGuides.clear()
-    const selected = new Set(state.selectedIds)
+    const trajectoryIds = new Set(state.motionGuides?.trajectoryIds ?? state.selectedIds)
+    const velocityIds = new Set(state.motionGuides?.velocityIds ?? state.selectedIds)
+    const forceIds = new Set(state.motionGuides?.forceIds ?? state.selectedIds)
+    const entityIds = new Set([...trajectoryIds, ...velocityIds, ...forceIds])
     const pixelsPerMeter = state.camera.pixelsPerMeter
 
-    for (const entityId of selected) {
+    for (const entityId of entityIds) {
       const trajectory = state.runtimeTrajectories[entityId]
-      if (trajectory && trajectory.length > 1) {
+      if (trajectoryIds.has(entityId) && trajectory && trajectory.length > 1) {
         const first = trajectory[0]
         if (first) {
           this.motionGuides.moveTo(first.x, first.y)
           for (const point of trajectory.slice(1)) this.motionGuides.lineTo(point.x, point.y)
           this.motionGuides.stroke({
-            color: colors.trajectory,
+            color: state.motionGuides?.trajectoryColors?.[entityId] ?? colors.trajectory,
             alpha: 0.68,
             width: 1.6 / pixelsPerMeter,
           })
@@ -644,22 +692,26 @@ export class PixiSceneRenderer {
 
       const runtime = state.runtimeBodies[entityId]
       if (!runtime) continue
-      this.drawVectorArrow(
-        runtime.position,
-        runtime.linearVelocity,
-        0.28,
-        3,
-        colors.velocity,
-        pixelsPerMeter,
-      )
-      this.drawVectorArrow(
-        runtime.position,
-        runtime.netForce,
-        0.18,
-        3,
-        colors.force,
-        pixelsPerMeter,
-      )
+      if (velocityIds.has(entityId)) {
+        this.drawVectorArrow(
+          runtime.position,
+          runtime.linearVelocity,
+          0.28,
+          3,
+          colors.velocity,
+          pixelsPerMeter,
+        )
+      }
+      if (forceIds.has(entityId)) {
+        this.drawVectorArrow(
+          runtime.position,
+          runtime.netForce,
+          0.18,
+          3,
+          colors.force,
+          pixelsPerMeter,
+        )
+      }
     }
   }
 
@@ -749,6 +801,7 @@ export class PixiSceneRenderer {
 
   private drawOverlays(state: PixiRenderState, entities: SceneEntity[]): void {
     this.overlays.clear()
+    if (state.showOverlays === false) return
     const lineWidth = 1.5 / state.camera.pixelsPerMeter
     const handleRadius = 5 / state.camera.pixelsPerMeter
     const selected = new Set(state.selectedIds)

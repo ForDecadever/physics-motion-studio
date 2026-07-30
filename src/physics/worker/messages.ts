@@ -8,6 +8,8 @@ export type MainToPhysicsMessage =
   | { type: 'reset' }
   | { type: 'setPlaybackRate'; rate: number }
   | { type: 'setRecordedBodyIds'; entityIds: EntityId[] }
+  | { type: 'clearGifHistory' }
+  | { type: 'requestGifHistory'; requestId: number }
 
 export interface RuntimeBodyState {
   entityId: EntityId
@@ -27,6 +29,31 @@ export interface RuntimeSample {
   bodies: RuntimeBodyState[]
 }
 
+export type GifHistoryStatus =
+  | {
+      kind: 'ready'
+      bodyCount: number
+      maxBodies: number
+      sampleCount: number
+      startTime: number
+      endTime: number
+    }
+  | {
+      kind: 'blocked'
+      reason: 'body-limit'
+      bodyCount: number
+      maxBodies: number
+    }
+
+export interface GifHistorySnapshot {
+  requestId: number
+  status: GifHistoryStatus
+  sampleRate: number
+  bodyIds: EntityId[]
+  times: Float32Array
+  values: Float32Array
+}
+
 export type SimulationStatus = 'initializing' | 'ready' | 'playing' | 'paused' | 'error'
 
 export type PhysicsToMainMessage =
@@ -43,5 +70,7 @@ export type PhysicsToMainMessage =
       bodies: RuntimeBodyState[]
       samples: RuntimeSample[]
     }
+  | { type: 'gifHistoryStatus'; status: GifHistoryStatus }
+  | { type: 'gifHistorySnapshot'; snapshot: GifHistorySnapshot }
   | { type: 'warning'; message: string; entityId?: EntityId }
   | { type: 'fatalError'; message: string }

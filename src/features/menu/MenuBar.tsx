@@ -10,12 +10,12 @@ import {
   FlaskConical,
   Grid2X2,
   Info,
-  Pause,
   Play,
   Redo2,
   RotateCcw,
   Save,
   Settings2,
+  SkipForward,
   Trash2,
   Undo2,
 } from 'lucide-react'
@@ -33,6 +33,7 @@ interface MenuBarProps {
   onSave: () => void
   onSaveAs: () => void
   onExportCsv: () => void
+  onExportGif: () => void
   onUndo: () => void
   onRedo: () => void
   onCopy: () => void
@@ -156,6 +157,7 @@ export function MenuBar({
   onSave,
   onSaveAs,
   onExportCsv,
+  onExportGif,
   onUndo,
   onRedo,
   onCopy,
@@ -208,8 +210,8 @@ export function MenuBar({
           <MenuAction icon={<Download size={15} />} disabled={!hasChartData} onClick={onExportCsv}>
             导出记录 CSV
           </MenuAction>
-          <MenuAction icon={<Download size={15} />} disabled>
-            导出画布 PNG
+          <MenuAction icon={<Download size={15} />} onClick={onExportGif}>
+            导出动图 GIF
           </MenuAction>
         </Menu>
 
@@ -302,7 +304,7 @@ export function MenuBar({
           <MenuAction icon={<Play size={15} />} shortcut="P" onClick={onPlayPause}>
             播放 / 暂停
           </MenuAction>
-          <MenuAction icon={<Pause size={15} />} shortcut="." onClick={onStepSimulation}>
+          <MenuAction icon={<SkipForward size={15} />} shortcut="." onClick={onStepSimulation}>
             单步
           </MenuAction>
           <MenuAction icon={<RotateCcw size={15} />} shortcut="Shift+R" onClick={onResetSimulation}>

@@ -9,6 +9,7 @@ import {
 import { downloadAllChartsCsv } from '../features/charts/chartCsv'
 import { evaluateChart, type EvaluatedChart } from '../features/charts/chartSeries'
 import { MenuBar } from '../features/menu/MenuBar'
+import { GifExportDialog, GifExportPreparingDialog } from '../features/gifExport/GifExportDialog'
 import { PlaybackBar } from '../features/playback/PlaybackBar'
 import { ToolOptionsBar } from '../features/toolbar/ToolOptionsBar'
 import { DockableWorkspace } from '../features/workspace/DockableWorkspace'
@@ -26,7 +27,8 @@ import {
 } from '../persistence/fileSystemAccess'
 import { readSceneFile } from '../persistence/sceneFile'
 import { physicsClient } from '../physics/client/physicsClient'
-import type { BodyEntity, SceneEntity } from '../scene/model/types'
+import type { BodyEntity, SceneDocument, SceneEntity } from '../scene/model/types'
+import type { GifHistorySnapshot } from '../physics/worker/messages'
 import { getChartTelemetryBuffer, useChartStore } from '../stores/chartStore'
 import { useDocumentStore } from '../stores/documentStore'
 import { useEditorStore } from '../stores/editorStore'
@@ -39,6 +41,9 @@ interface Notice {
   message: string
 }
 
+type GifExportModalState =
+  { state: 'preparing' } | { state: 'ready'; scene: SceneDocument; snapshot: GifHistorySnapshot }
+
 export function App() {
   const inputRef = useRef<HTMLInputElement>(null)
   const fileHandleRef = useRef<FileSystemFileHandle | null>(null)
@@ -46,6 +51,7 @@ export function App() {
   const [notice, setNotice] = useState<Notice | null>(null)
   const [draftPrompt, setDraftPrompt] = useState<SceneDraft | null>(null)
   const [helpTopic, setHelpTopic] = useState<'shortcuts' | 'physics' | null>(null)
+  const [gifExportModal, setGifExportModal] = useState<GifExportModalState | null>(null)
   const [clipboardCount, setClipboardCount] = useState(0)
   const scene = useDocumentStore((state) => state.scene)
   const fileName = useDocumentStore((state) => state.fileName)
@@ -261,6 +267,24 @@ export function App() {
     showNotice({ tone: 'success', message: `已下载 ${exportedName}` })
   }
 
+  const handleOpenGifExport = async () => {
+    if (gifExportModal) return
+    commitPendingEditorEdit()
+    physicsClient.pause()
+    const frozenScene = structuredClone(useDocumentStore.getState().scene)
+    setGifExportModal({ state: 'preparing' })
+    try {
+      const snapshot = await physicsClient.requestGifHistory()
+      setGifExportModal({ state: 'ready', scene: frozenScene, snapshot })
+    } catch (error) {
+      setGifExportModal(null)
+      showNotice({
+        tone: 'error',
+        message: error instanceof Error ? error.message : '无法读取 GIF 历史记录。',
+      })
+    }
+  }
+
   const pruneSelection = () => {
     const validIds = new Set(useDocumentStore.getState().scene.entities.map((entity) => entity.id))
     const editor = useEditorStore.getState()
@@ -301,6 +325,7 @@ export function App() {
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      if (gifExportModal || draftPrompt || helpTopic) return
       const target = event.target
       if (
         target instanceof HTMLInputElement ||
@@ -418,6 +443,7 @@ export function App() {
         onSave={() => void handleSave()}
         onSaveAs={() => void handleSave(true)}
         onExportCsv={handleExportCsv}
+        onExportGif={() => void handleOpenGifExport()}
         onUndo={handleUndo}
         onRedo={handleRedo}
         onCopy={handleCopy}
@@ -429,7 +455,10 @@ export function App() {
         onPlayPause={handlePlayPause}
         onStepSimulation={handleStep}
         onResetSimulation={handleResetSimulation}
-        onClearRecords={() => useChartStore.getState().clearHistory()}
+        onClearRecords={() => {
+          useChartStore.getState().clearHistory()
+          physicsClient.clearGifHistory()
+        }}
         onShowShortcuts={() => setHelpTopic('shortcuts')}
         onShowPhysics={() => setHelpTopic('physics')}
         canUndo={undoStackLength > 0}
@@ -452,6 +481,24 @@ export function App() {
 
       <DockableWorkspace />
       <PlaybackBar />
+
+      {gifExportModal?.state === 'preparing' ? <GifExportPreparingDialog /> : null}
+      {gifExportModal?.state === 'ready' ? (
+        <GifExportDialog
+          scene={gifExportModal.scene}
+          snapshot={gifExportModal.snapshot}
+          initialGridVisible={gridVisible}
+          onClose={() => setGifExportModal(null)}
+          onExported={(exportedFileName, method) => {
+            setGifExportModal(null)
+            showNotice({
+              tone: 'success',
+              message:
+                method === 'direct' ? `已导出 ${exportedFileName}` : `已下载 ${exportedFileName}`,
+            })
+          }}
+        />
+      ) : null}
 
       <input
         ref={inputRef}

@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { decompressFrames, parseGIF } from 'gifuct-js'
 import { readFile } from 'node:fs/promises'
 
 async function openInspectorTab(
@@ -20,6 +21,196 @@ test('显示编辑器的主要区域', async ({ page }) => {
   await expect(page.getByRole('region', { name: '属性面板' })).toBeVisible()
   await expect(page.getByText('多坐标系图像区', { exact: true })).toBeVisible()
   await expect(page.getByText('阶段 4', { exact: true })).toBeVisible()
+})
+
+test('可以冻结已有记录并导出运动 GIF', async ({ page }) => {
+  test.setTimeout(60_000)
+  const pageErrors: Error[] = []
+  page.on('pageerror', (error) => pageErrors.push(error))
+  await page.setViewportSize({ width: 1166, height: 613 })
+  await page.goto('/')
+  const canvas = page.getByRole('application', { name: '可交互的二维物理画布' })
+  await expect(canvas).toBeVisible()
+  const box = await canvas.boundingBox()
+  expect(box).not.toBeNull()
+  if (!box) return
+
+  const center = { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+  await page.getByRole('button', { name: '物体工具（O）' }).click()
+  await page.mouse.click(center.x, center.y - 60)
+  await page.getByRole('button', { name: '场工具（F）' }).click()
+  await page.mouse.move(center.x - 180, center.y - 160)
+  await page.mouse.down()
+  await page.mouse.move(center.x + 180, center.y + 140, { steps: 6 })
+  await page.mouse.up()
+
+  const playButton = page.getByRole('button', { name: '播放' })
+  await expect(playButton).toBeEnabled({ timeout: 15_000 })
+  await playButton.click()
+  await expect(page.getByText('模拟运行中', { exact: true })).toBeVisible()
+  await page.waitForTimeout(450)
+
+  await page.getByText('文件', { exact: true }).click()
+  await page.getByRole('menuitem', { name: '导出动图 GIF' }).click()
+  const dialog = page.getByRole('dialog', { name: '导出运动 GIF' })
+  await expect(dialog).toBeVisible()
+  await expect(page.getByText('模拟已暂停', { exact: true })).toBeVisible()
+  await page.keyboard.press('p')
+  await expect(page.getByText('模拟已暂停', { exact: true })).toBeVisible()
+  await expect(dialog.getByLabel('GIF 导出开始时间')).toBeVisible()
+  await expect(dialog.getByLabel('GIF 导出结束时间')).toBeVisible()
+  await expect(dialog.getByRole('group', { name: 'GIF 时间轴' })).toBeVisible()
+  const trimStart = dialog.getByLabel('GIF 导出开始时间')
+  const trimEnd = dialog.getByLabel('GIF 导出结束时间')
+  const historyStart = Number(await trimStart.getAttribute('min'))
+  const historyEnd = Number(await trimEnd.getAttribute('max'))
+  const sampleStep = Number(await trimStart.getAttribute('step'))
+  const requestedStart =
+    historyStart + Math.floor(((historyEnd - historyStart) * 0.25) / sampleStep) * sampleStep
+  const trimStartBox = await trimStart.boundingBox()
+  expect(trimStartBox).not.toBeNull()
+  if (trimStartBox) {
+    await page.mouse.move(trimStartBox.x + 7, trimStartBox.y + trimStartBox.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(
+      trimStartBox.x +
+        ((requestedStart - historyStart) / (historyEnd - historyStart)) * trimStartBox.width,
+      trimStartBox.y + trimStartBox.height / 2,
+      { steps: 6 },
+    )
+    await page.mouse.up()
+  }
+  expect(Number(await trimStart.inputValue())).toBeGreaterThan(historyStart)
+  expect(Number(await dialog.getByLabel('GIF 预览时间').inputValue())).toBeGreaterThanOrEqual(
+    Number(await trimStart.inputValue()),
+  )
+  expect(
+    Number(await dialog.getByTestId('gif-timeline-control').getAttribute('data-trim-start')),
+  ).toBeGreaterThan(0)
+  const playhead = dialog.getByLabel('GIF 预览时间')
+  await playhead.focus()
+  await page.keyboard.press('ArrowRight')
+  expect(Number(await playhead.inputValue())).toBeGreaterThan(Number(await trimStart.inputValue()))
+  await page.keyboard.press('Home')
+  expect(Number(await playhead.inputValue())).toBeCloseTo(Number(await trimStart.inputValue()), 3)
+  const selectedTrackBox = await dialog.getByTestId('gif-timeline-selection').boundingBox()
+  const timelineBox = await dialog.getByTestId('gif-timeline-control').boundingBox()
+  expect(selectedTrackBox).not.toBeNull()
+  expect(timelineBox).not.toBeNull()
+  if (selectedTrackBox && timelineBox) expect(selectedTrackBox.x).toBeGreaterThan(timelineBox.x)
+
+  const fpsSelect = dialog.getByLabel('GIF 每秒帧数')
+  await expect(fpsSelect).toBeVisible()
+  await fpsSelect.selectOption('custom')
+  await dialog.getByLabel('自定义 FPS').fill('17')
+  await expect(dialog.getByLabel('自定义 FPS')).toHaveValue('17')
+  await fpsSelect.selectOption('15')
+
+  const resolutionSelect = dialog.getByLabel('常用分辨率')
+  const exportCanvas = dialog.getByRole('img', { name: 'GIF 导出预览' })
+  for (const [value, width, height] of [
+    ['960x540', 960, 540],
+    ['1280x720', 1280, 720],
+    ['1920x1080', 1920, 1080],
+    ['1080x1080', 1080, 1080],
+  ] as const) {
+    await resolutionSelect.selectOption(value)
+    await expect(exportCanvas).toHaveAttribute('width', String(width))
+    await expect(exportCanvas).toHaveAttribute('height', String(height))
+  }
+  await resolutionSelect.selectOption('custom')
+  await dialog.getByLabel('锁定宽高比例').uncheck()
+  await dialog.getByLabel('宽度', { exact: true }).fill('800')
+  await dialog.getByLabel('高度', { exact: true }).fill('450')
+  await expect(exportCanvas).toHaveAttribute('width', '800')
+  await expect(exportCanvas).toHaveAttribute('height', '450')
+  await resolutionSelect.selectOption('640x360')
+
+  const viewportBox = await dialog.getByTestId('gif-preview-viewport').boundingBox()
+  const exportFrameBox = await dialog.getByTestId('gif-export-frame').boundingBox()
+  expect(viewportBox).not.toBeNull()
+  expect(exportFrameBox).not.toBeNull()
+  if (viewportBox && exportFrameBox) {
+    expect(exportFrameBox.x - viewportBox.x).toBeGreaterThanOrEqual(22)
+    expect(exportFrameBox.y - viewportBox.y).toBeGreaterThanOrEqual(22)
+    expect(
+      viewportBox.x + viewportBox.width - exportFrameBox.x - exportFrameBox.width,
+    ).toBeGreaterThanOrEqual(22)
+    expect(
+      viewportBox.y + viewportBox.height - exportFrameBox.y - exportFrameBox.height,
+    ).toBeGreaterThanOrEqual(22)
+  }
+
+  await expect(dialog.getByLabel('小球 1 轨迹')).toBeEnabled()
+  const guideFieldsetBox = await dialog.getByTestId('gif-guide-fieldset').boundingBox()
+  const guideTableBox = await dialog.getByTestId('gif-guide-table').boundingBox()
+  expect(guideFieldsetBox).not.toBeNull()
+  expect(guideTableBox?.height).toBeGreaterThanOrEqual(230)
+  if (guideFieldsetBox && guideTableBox) {
+    expect(guideTableBox.y).toBeGreaterThan(guideFieldsetBox.y)
+    expect(guideTableBox.y + guideTableBox.height).toBeLessThan(
+      guideFieldsetBox.y + guideFieldsetBox.height,
+    )
+  }
+  const guideCheckboxBox = await dialog.getByLabel('小球 1 轨迹').boundingBox()
+  const guideHitAreaBox = await dialog.getByLabel('小球 1 轨迹').locator('xpath=..').boundingBox()
+  expect(guideCheckboxBox?.height).toBeGreaterThanOrEqual(24)
+  expect(guideHitAreaBox?.height).toBeGreaterThanOrEqual(36)
+  await dialog.getByLabel('小球 1 轨迹').check()
+  const colorBox = await dialog.getByLabel('背景颜色').boundingBox()
+  const colorTextBox = await dialog.getByText('背景颜色', { exact: true }).boundingBox()
+  expect(colorBox).not.toBeNull()
+  expect(colorTextBox).not.toBeNull()
+  if (colorBox && colorTextBox) expect(colorBox.x).toBeLessThan(colorTextBox.x)
+
+  await dialog.getByLabel('GIF 成片倍速').selectOption('2')
+  const loadSummary = dialog.getByRole('region', { name: '导出负载' })
+  const sourceDuration = Number.parseFloat(await loadSummary.locator('strong').nth(0).innerText())
+  const outputDuration = Number.parseFloat(await loadSummary.locator('strong').nth(1).innerText())
+  const expectedFrameCount = Number.parseInt(
+    (await loadSummary.locator('strong').nth(2).innerText()).replaceAll(',', ''),
+    10,
+  )
+  expect(Math.abs(outputDuration - sourceDuration / 2)).toBeLessThanOrEqual(0.011)
+  expect(pageErrors).toEqual([])
+  await expect(
+    dialog.getByRole('region', { name: 'GIF 预览和时间范围' }).getByText('640 × 360'),
+  ).toBeVisible()
+
+  const downloadPromise = page.waitForEvent('download', { timeout: 30_000 })
+  await dialog.getByRole('button', { name: '导出 GIF' }).click()
+  await expect(dialog.getByText(/正在准备颜色|正在渲染并编码/)).toBeVisible()
+  const download = await downloadPromise
+  expect(download.suggestedFilename()).toMatch(/^motion-studio-\d{8}-\d{6}\.gif$/)
+  const path = await download.path()
+  expect(path).not.toBeNull()
+  if (path) {
+    const bytes = await readFile(path)
+    expect(bytes.subarray(0, 6).toString('ascii')).toBe('GIF89a')
+    expect(bytes.length).toBeGreaterThan(100)
+    const arrayBuffer = new ArrayBuffer(bytes.byteLength)
+    new Uint8Array(arrayBuffer).set(bytes)
+    const parsed = parseGIF(arrayBuffer)
+    expect(parsed.lsd).toMatchObject({ width: 640, height: 360 })
+    const frames = decompressFrames(parsed, true)
+    expect(frames).toHaveLength(expectedFrameCount)
+    expect(frames.length).toBeGreaterThan(1)
+    const totalDelay = frames.reduce((total, frame) => total + frame.delay, 0)
+    expect(Math.abs(totalDelay - outputDuration * 1000)).toBeLessThanOrEqual(1000 / 15 + 10)
+  }
+  await expect(dialog).toHaveCount(0)
+})
+
+test('没有运动记录时会说明原因并禁用 GIF 导出', async ({ page }) => {
+  await page.goto('/')
+  await page.getByText('文件', { exact: true }).click()
+  await page.getByRole('menuitem', { name: '导出动图 GIF' }).click()
+  const dialog = page.getByRole('dialog', { name: '导出运动 GIF' })
+  await expect(dialog).toBeVisible()
+  await expect(dialog.getByText(/还没有足够的运动记录/)).toBeVisible()
+  await expect(dialog.getByRole('button', { name: '导出 GIF' })).toBeDisabled()
+  await dialog.getByRole('button', { name: '取消', exact: true }).click()
+  await expect(dialog).toHaveCount(0)
 })
 
 test('可以创建、连接并撤销编辑实体', async ({ page }) => {
@@ -812,6 +1003,12 @@ test('菜单会自动收起，工具悬停 0.5 秒显示分类悬浮窗', async 
   await expect(page.getByRole('menuitem', { name: '新建场景' })).toBeVisible()
   await page.mouse.move(600, 300)
   await expect(page.getByRole('menuitem', { name: '新建场景' })).toBeHidden()
+
+  await page.getByText('模拟', { exact: true }).click()
+  await expect(page.getByRole('menuitem', { name: '单步' }).locator('svg')).toHaveClass(
+    /lucide-skip-forward/,
+  )
+  await page.keyboard.press('Escape')
 
   const groundTool = page.getByRole('button', { name: '地面工具（G）' })
   await groundTool.hover()

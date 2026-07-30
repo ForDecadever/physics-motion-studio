@@ -8,6 +8,11 @@ async function canvasBox(page: import('@playwright/test').Page) {
   return box
 }
 
+async function createDeterministicGifHistory(page: import('@playwright/test').Page) {
+  const stepButton = page.getByRole('button', { name: '单步' })
+  for (let step = 0; step < 12; step += 1) await stepButton.click()
+}
+
 test('空白编辑器视觉基线', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto('/')
@@ -25,6 +30,42 @@ test('选中物体视觉基线', async ({ page }) => {
   await page.getByRole('tab', { name: '物理', exact: true }).click()
   await expect(page.getByLabel('质量')).toBeVisible()
   await expect(page).toHaveScreenshot('selected-body.png', { animations: 'disabled' })
+})
+
+test('GIF 导出窗口视觉基线', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/')
+  const box = await canvasBox(page)
+  await page.getByRole('button', { name: '物体工具（O）' }).click()
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2)
+  await createDeterministicGifHistory(page)
+  await page.getByText('文件', { exact: true }).click()
+  await page.getByRole('menuitem', { name: '导出动图 GIF' }).click()
+  const dialog = page.getByRole('dialog', { name: '导出运动 GIF' })
+  await expect(dialog).toBeVisible()
+  await expect(dialog.getByLabel('GIF 导出结束时间')).toBeVisible()
+  await dialog.getByLabel('GIF 导出开始时间').focus()
+  await page.keyboard.press('ArrowRight')
+  await dialog.getByLabel('文件名').fill('motion-studio-preview.gif')
+  await expect(page).toHaveScreenshot('gif-export-dialog.png', { animations: 'disabled' })
+})
+
+test('窄窗口 GIF 导出界面视觉基线', async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 720 })
+  await page.goto('/')
+  const box = await canvasBox(page)
+  await page.getByRole('button', { name: '物体工具（O）' }).click()
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2)
+  await createDeterministicGifHistory(page)
+  await page.getByText('文件', { exact: true }).click()
+  await page.getByRole('menuitem', { name: '导出动图 GIF' }).click()
+  const dialog = page.getByRole('dialog', { name: '导出运动 GIF' })
+  await expect(dialog).toBeVisible()
+  await expect(dialog.getByLabel('GIF 导出结束时间')).toBeVisible()
+  await dialog.getByLabel('文件名').fill('motion-studio-preview.gif')
+  await expect(page).toHaveScreenshot('gif-export-dialog-narrow.png', {
+    animations: 'disabled',
+  })
 })
 
 test('缩放后的地面保持固定显示厚度', async ({ page }) => {
