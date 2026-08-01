@@ -1,0 +1,68 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Motion Studio",
+  "version": "1.0.0",
+  "identifier": "io.github.fordecadever.physics-motion-studio",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://127.0.0.1:4173",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Motion Studio",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1024,
+        "minHeight": 720,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' customprotocol: asset:; connect-src ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self' blob:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "publisher": "ForDecadever",
+    "copyright": "Copyright 2026 ForDecadever and Physics Motion Studio contributors",
+    "licenseFile": "../LICENSE",
+    "resources": ["../LICENSE", "../NOTICE", "../THIRD_PARTY_NOTICES.md"],
+    "category": "Education",
+    "shortDescription": "Two-dimensional physics motion editor and simulator",
+    "longDescription": "Motion Studio is a visual editor for building and simulating two-dimensional mechanics, fields, constraints, charts, and animated GIF exports.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
+    "fileAssociations": [
+      {
+        "ext": ["motionstudio"],
+        "name": "Motion Studio Scene",
+        "description": "Motion Studio 场景文件",
+        "mimeType": "application/vnd.motion-studio.scene+json",
+        "role": "Editor",
+        "rank": "Owner"
+      }
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["SimpChinese", "English"],
+        "displayLanguageSelector": false,
+        "startMenuFolder": "Motion Studio"
+      }
+    }
+  }
+}

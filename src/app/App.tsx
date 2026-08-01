@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ChangeEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type ChangeEvent } from 'react'
 
 import { collectClipboardEntities, duplicateEntities } from '../editor/clipboard/entityClipboard'
 import { commitPendingEditorEdit } from '../editor/editing/pendingEditorEdit'
@@ -9,6 +9,7 @@ import {
 import { downloadAllChartsCsv } from '../features/charts/chartCsv'
 import { evaluateChart, type EvaluatedChart } from '../features/charts/chartSeries'
 import { MenuBar } from '../features/menu/MenuBar'
+import { closeDesktopMenu, installDesktopMenu, type AppCommand } from '../features/menu/desktopMenu'
 import { GifExportDialog, GifExportPreparingDialog } from '../features/gifExport/GifExportDialog'
 import { PlaybackBar } from '../features/playback/PlaybackBar'
 import { ToolOptionsBar } from '../features/toolbar/ToolOptionsBar'
@@ -20,12 +21,14 @@ import {
   type SceneDraft,
 } from '../persistence/draftStorage'
 import {
-  isFilePickerCancellation,
-  openSceneWithPicker,
-  saveScene,
-  supportsDirectFileAccess,
-} from '../persistence/fileSystemAccess'
+  isSceneFileCancellation,
+  sceneFileService,
+  type OpenedScene,
+  type RecentSceneEntry,
+  type SceneFileToken,
+} from '../persistence/sceneFileService'
 import { readSceneFile } from '../persistence/sceneFile'
+import { isDesktopRuntime } from '../platform/runtime'
 import { physicsClient } from '../physics/client/physicsClient'
 import type { BodyEntity, SceneDocument, SceneEntity } from '../scene/model/types'
 import type { GifHistorySnapshot } from '../physics/worker/messages'
@@ -44,15 +47,29 @@ interface Notice {
 type GifExportModalState =
   { state: 'preparing' } | { state: 'ready'; scene: SceneDocument; snapshot: GifHistorySnapshot }
 
+const desktopRuntime = isDesktopRuntime()
+
+function resetEditorForDocument() {
+  useEditorStore.getState().resetForDocument()
+  useChartStore.getState().clearHistory()
+}
+
 export function App() {
   const inputRef = useRef<HTMLInputElement>(null)
-  const fileHandleRef = useRef<FileSystemFileHandle | null>(null)
+  const fileTokenRef = useRef<SceneFileToken | null>(null)
   const clipboardRef = useRef<SceneEntity[]>([])
+  const desktopHandlersRef = useRef<{
+    execute: (command: AppCommand) => void
+    openRecent: (id: string) => void
+    clearRecent: () => void
+  } | null>(null)
   const [notice, setNotice] = useState<Notice | null>(null)
   const [draftPrompt, setDraftPrompt] = useState<SceneDraft | null>(null)
-  const [helpTopic, setHelpTopic] = useState<'shortcuts' | 'physics' | null>(null)
+  const [helpTopic, setHelpTopic] = useState<'shortcuts' | 'physics' | 'about' | null>(null)
   const [gifExportModal, setGifExportModal] = useState<GifExportModalState | null>(null)
   const [clipboardCount, setClipboardCount] = useState(0)
+  const [recentFiles, setRecentFiles] = useState<RecentSceneEntry[]>([])
+  const [pendingOpenRevision, setPendingOpenRevision] = useState(desktopRuntime ? 1 : 0)
   const scene = useDocumentStore((state) => state.scene)
   const fileName = useDocumentStore((state) => state.fileName)
   const isDirty = useDocumentStore((state) => state.isDirty)
@@ -70,6 +87,7 @@ export function App() {
   const gridVisible = useEditorStore((state) => state.gridVisible)
   const snapEnabled = useEditorStore((state) => state.snapEnabled)
   const workspacePanels = useWorkspaceLayoutStore((state) => state.layout.panels)
+  const simulationLocked = useSimulationStore((state) => isSimulationRuntimeLocked(state))
 
   useEffect(() => {
     physicsClient.start()
@@ -111,54 +129,82 @@ export function App() {
     return () => window.removeEventListener('beforeunload', handleBeforeUnload)
   }, [])
 
-  const showNotice = (nextNotice: Notice) => {
+  const showNotice = useCallback((nextNotice: Notice) => {
     setNotice(nextNotice)
     window.setTimeout(() => setNotice(null), 3200)
-  }
+  }, [])
 
-  const confirmDiscardChanges = () =>
-    !useDocumentStore.getState().isDirty ||
-    window.confirm('当前场景有未保存更改。继续操作将放弃这些更改，是否继续？')
+  const confirmDiscardChanges = useCallback(
+    () =>
+      !useDocumentStore.getState().isDirty ||
+      window.confirm('当前场景有未保存更改。继续操作将放弃这些更改，是否继续？'),
+    [],
+  )
 
-  const resetEditorForDocument = () => {
-    useEditorStore.getState().resetForDocument()
-    useChartStore.getState().clearHistory()
-  }
+  const refreshRecentFiles = useCallback(async () => {
+    if (!desktopRuntime) return
+    try {
+      setRecentFiles(await sceneFileService.listRecent())
+    } catch (error) {
+      showNotice({
+        tone: 'error',
+        message: error instanceof Error ? error.message : '无法读取最近文件。',
+      })
+    }
+  }, [showNotice])
 
   const handleNew = () => {
     if (!confirmDiscardChanges()) return
     createNewScene()
-    fileHandleRef.current = null
+    fileTokenRef.current = null
     resetEditorForDocument()
     void clearSceneDraft()
     showNotice({ tone: 'success', message: '已创建新的空场景' })
   }
 
-  const applyOpenedScene = (
-    nextScene: typeof scene,
-    nextFileName: string,
-    handle: FileSystemFileHandle | null,
-  ) => {
-    replaceScene(nextScene, nextFileName)
-    fileHandleRef.current = handle
-    resetEditorForDocument()
-    void clearSceneDraft()
-    showNotice({ tone: 'success', message: `已打开 ${nextFileName}` })
-  }
+  const applyOpenedScene = useCallback(
+    (opened: Omit<OpenedScene, 'token'> & { token: SceneFileToken | null }) => {
+      replaceScene(opened.scene, opened.fileName)
+      fileTokenRef.current = opened.token
+      resetEditorForDocument()
+      void clearSceneDraft()
+      if (opened.token) {
+        void sceneFileService
+          .confirmOpened(opened.token)
+          .then(refreshRecentFiles)
+          .catch(() => undefined)
+      }
+      showNotice({ tone: 'success', message: `已打开 ${opened.fileName}` })
+    },
+    [refreshRecentFiles, replaceScene, showNotice],
+  )
 
   const handleOpenRequest = async () => {
     if (!confirmDiscardChanges()) return
-    if (!supportsDirectFileAccess()) {
+    if (!sceneFileService.supportsNativeOpen()) {
       inputRef.current?.click()
       return
     }
     try {
-      const opened = await openSceneWithPicker()
-      if (opened) applyOpenedScene(opened.scene, opened.fileName, opened.handle)
+      const opened = await sceneFileService.open()
+      if (opened) applyOpenedScene(opened)
     } catch (error) {
-      if (isFilePickerCancellation(error)) return
+      if (isSceneFileCancellation(error)) return
       const message = error instanceof Error ? error.message : '无法读取该场景文件。'
       showNotice({ tone: 'error', message })
+    }
+  }
+
+  const handleOpenRecent = async (id: string) => {
+    if (!confirmDiscardChanges()) return
+    try {
+      applyOpenedScene(await sceneFileService.openRecent(id))
+    } catch (error) {
+      await refreshRecentFiles()
+      showNotice({
+        tone: 'error',
+        message: error instanceof Error ? error.message : '无法打开最近文件。',
+      })
     }
   }
 
@@ -169,7 +215,7 @@ export function App() {
 
     try {
       const nextScene = await readSceneFile(file)
-      applyOpenedScene(nextScene, file.name, null)
+      applyOpenedScene({ scene: nextScene, fileName: file.name, token: null })
     } catch (error) {
       const message = error instanceof Error ? error.message : '无法读取该场景文件。'
       showNotice({ tone: 'error', message })
@@ -178,14 +224,15 @@ export function App() {
 
   const handleSave = async (saveAs = false) => {
     try {
-      const result = await saveScene(
+      const result = await sceneFileService.save(
         useDocumentStore.getState().scene,
-        fileHandleRef.current,
+        fileTokenRef.current,
         saveAs,
       )
-      fileHandleRef.current = result.handle
+      fileTokenRef.current = result.token
       markSaved(result.fileName)
       await clearSceneDraft()
+      await refreshRecentFiles()
       showNotice({
         tone: 'success',
         message:
@@ -194,7 +241,7 @@ export function App() {
             : `浏览器不支持直接覆盖文件，已下载 ${result.fileName}`,
       })
     } catch (error) {
-      if (isFilePickerCancellation(error)) return
+      if (isSceneFileCancellation(error)) return
       const message = error instanceof Error ? error.message : '无法保存场景。'
       showNotice({ tone: 'error', message })
     }
@@ -323,6 +370,245 @@ export function App() {
     editor.setGroundJointMessage(null)
   }
 
+  const handleClearRecords = () => {
+    useChartStore.getState().clearHistory()
+    physicsClient.clearGifHistory()
+  }
+
+  const executeAppCommand = (command: AppCommand) => {
+    if (command.startsWith('view:toggle-panel:')) {
+      const panelId = command.slice('view:toggle-panel:'.length) as keyof typeof workspacePanels
+      useWorkspaceLayoutStore.getState().togglePanelVisible(panelId)
+      return
+    }
+
+    switch (command) {
+      case 'file:new':
+        handleNew()
+        break
+      case 'file:open':
+        void handleOpenRequest()
+        break
+      case 'file:save':
+        void handleSave()
+        break
+      case 'file:save-as':
+        void handleSave(true)
+        break
+      case 'file:export-csv':
+        handleExportCsv()
+        break
+      case 'file:export-gif':
+        void handleOpenGifExport()
+        break
+      case 'file:exit':
+        void import('@tauri-apps/api/window').then(({ getCurrentWindow }) =>
+          getCurrentWindow().close(),
+        )
+        break
+      case 'edit:undo':
+        handleUndo()
+        break
+      case 'edit:redo':
+        handleRedo()
+        break
+      case 'edit:copy':
+        handleCopy()
+        break
+      case 'edit:paste':
+        handlePaste()
+        break
+      case 'edit:delete':
+        handleDelete()
+        break
+      case 'edit:select-all':
+        handleSelectAll()
+        break
+      case 'view:toggle-grid':
+        useEditorStore.getState().toggleGrid()
+        break
+      case 'view:toggle-snap':
+        useEditorStore.getState().toggleSnap()
+        break
+      case 'view:reset-layout':
+        useWorkspaceLayoutStore.getState().resetLayout()
+        break
+      case 'simulation:play-pause':
+        handlePlayPause()
+        break
+      case 'simulation:step':
+        handleStep()
+        break
+      case 'simulation:reset':
+        handleResetSimulation()
+        break
+      case 'simulation:clear-records':
+        handleClearRecords()
+        break
+      case 'help:shortcuts':
+        setHelpTopic('shortcuts')
+        break
+      case 'help:physics':
+        setHelpTopic('physics')
+        break
+      case 'help:about':
+        setHelpTopic('about')
+        break
+    }
+  }
+
+  useEffect(() => {
+    desktopHandlersRef.current = {
+      execute: executeAppCommand,
+      openRecent: (id) => void handleOpenRecent(id),
+      clearRecent: () => {
+        void sceneFileService.clearRecent().then(refreshRecentFiles)
+      },
+    }
+  })
+
+  useEffect(() => {
+    if (!desktopRuntime) return
+    let disposed = false
+    let unsubscribe: (() => void) | undefined
+
+    const initialRefresh = window.setTimeout(() => void refreshRecentFiles(), 0)
+    void sceneFileService
+      .subscribeOpenRequests(() => setPendingOpenRevision((revision) => revision + 1))
+      .then((nextUnsubscribe) => {
+        if (disposed) nextUnsubscribe()
+        else unsubscribe = nextUnsubscribe
+      })
+      .catch((error) =>
+        showNotice({
+          tone: 'error',
+          message: error instanceof Error ? error.message : '无法监听关联文件。',
+        }),
+      )
+
+    return () => {
+      disposed = true
+      window.clearTimeout(initialRefresh)
+      unsubscribe?.()
+    }
+  }, [refreshRecentFiles, showNotice])
+
+  useEffect(() => {
+    if (!desktopRuntime || gifExportModal || draftPrompt || helpTopic) return
+    let cancelled = false
+
+    void sceneFileService
+      .takePendingOpen()
+      .then((opened) => {
+        if (!opened || cancelled) return
+        if (confirmDiscardChanges()) applyOpenedScene(opened)
+        setPendingOpenRevision((revision) => revision + 1)
+      })
+      .catch((error) => {
+        if (cancelled) return
+        showNotice({
+          tone: 'error',
+          message: error instanceof Error ? error.message : '无法打开关联场景文件。',
+        })
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [
+    applyOpenedScene,
+    confirmDiscardChanges,
+    draftPrompt,
+    gifExportModal,
+    helpTopic,
+    pendingOpenRevision,
+    showNotice,
+  ])
+
+  useEffect(() => {
+    if (!desktopRuntime) return
+    let unlisten: (() => void) | undefined
+    let disposed = false
+
+    void import('@tauri-apps/api/window').then(async ({ getCurrentWindow }) => {
+      const appWindow = getCurrentWindow()
+      await appWindow.setTitle(`${isDirty ? '*' : ''}${scene.metadata.name} — Motion Studio`)
+      unlisten = await appWindow.onCloseRequested(async (event) => {
+        event.preventDefault()
+        if (
+          gifExportModal &&
+          !window.confirm('GIF 导出窗口仍在工作。确认放弃导出并退出 Motion Studio？')
+        ) {
+          return
+        }
+        if (!confirmDiscardChanges()) return
+        await appWindow.destroy()
+      })
+      if (disposed) unlisten()
+    })
+
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
+  }, [confirmDiscardChanges, gifExportModal, isDirty, scene.metadata.name])
+
+  useEffect(() => {
+    if (!desktopRuntime) return
+    void installDesktopMenu(
+      {
+        canUndo: undoStackLength > 0,
+        canRedo: redoStackLength > 0,
+        canPaste: clipboardCount > 0,
+        hasSelection: selectedIds.length > 0,
+        hasChartData,
+        simulationLocked,
+        modalLocked: Boolean(gifExportModal || draftPrompt || helpTopic),
+        gridVisible,
+        snapEnabled,
+        panelVisibility: {
+          tools: workspacePanels.tools.visible,
+          layers: workspacePanels.layers.visible,
+          inspector: workspacePanels.inspector.visible,
+          charts: workspacePanels.charts.visible,
+        },
+        recentFiles,
+      },
+      {
+        execute: (command) => desktopHandlersRef.current?.execute(command),
+        openRecent: (id) => desktopHandlersRef.current?.openRecent(id),
+        clearRecent: () => desktopHandlersRef.current?.clearRecent(),
+      },
+    ).catch((error) =>
+      showNotice({
+        tone: 'error',
+        message: error instanceof Error ? error.message : '无法更新桌面系统菜单。',
+      }),
+    )
+  }, [
+    clipboardCount,
+    gridVisible,
+    hasChartData,
+    draftPrompt,
+    gifExportModal,
+    helpTopic,
+    recentFiles,
+    redoStackLength,
+    selectedIds,
+    simulationLocked,
+    showNotice,
+    snapEnabled,
+    undoStackLength,
+    workspacePanels,
+  ])
+
+  useEffect(
+    () => () => {
+      if (desktopRuntime) void closeDesktopMenu()
+    },
+    [],
+  )
+
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (gifExportModal || draftPrompt || helpTopic) return
@@ -431,52 +717,54 @@ export function App() {
 
   return (
     <div
-      className={styles.appShell}
+      className={desktopRuntime ? `${styles.appShell} ${styles.appShellDesktop}` : styles.appShell}
       onPointerDownCapture={(event) => commitPendingEditorEdit(event.target)}
     >
-      <MenuBar
-        sceneName={scene.metadata.name}
-        fileName={fileName}
-        isDirty={isDirty}
-        onNew={handleNew}
-        onOpen={handleOpenRequest}
-        onSave={() => void handleSave()}
-        onSaveAs={() => void handleSave(true)}
-        onExportCsv={handleExportCsv}
-        onExportGif={() => void handleOpenGifExport()}
-        onUndo={handleUndo}
-        onRedo={handleRedo}
-        onCopy={handleCopy}
-        onPaste={handlePaste}
-        onDelete={handleDelete}
-        onSelectAll={handleSelectAll}
-        onToggleGrid={() => useEditorStore.getState().toggleGrid()}
-        onToggleSnap={() => useEditorStore.getState().toggleSnap()}
-        onPlayPause={handlePlayPause}
-        onStepSimulation={handleStep}
-        onResetSimulation={handleResetSimulation}
-        onClearRecords={() => {
-          useChartStore.getState().clearHistory()
-          physicsClient.clearGifHistory()
-        }}
-        onShowShortcuts={() => setHelpTopic('shortcuts')}
-        onShowPhysics={() => setHelpTopic('physics')}
-        canUndo={undoStackLength > 0}
-        canRedo={redoStackLength > 0}
-        canPaste={clipboardCount > 0}
-        hasSelection={selectedIds.length > 0}
-        hasChartData={hasChartData}
-        gridVisible={gridVisible}
-        snapEnabled={snapEnabled}
-        panelVisibility={{
-          tools: workspacePanels.tools.visible,
-          layers: workspacePanels.layers.visible,
-          inspector: workspacePanels.inspector.visible,
-          charts: workspacePanels.charts.visible,
-        }}
-        onTogglePanel={(panelId) => useWorkspaceLayoutStore.getState().togglePanelVisible(panelId)}
-        onResetWorkspaceLayout={() => useWorkspaceLayoutStore.getState().resetLayout()}
-      />
+      {!desktopRuntime ? (
+        <MenuBar
+          navigationVisible
+          sceneName={scene.metadata.name}
+          fileName={fileName}
+          isDirty={isDirty}
+          onNew={handleNew}
+          onOpen={handleOpenRequest}
+          onSave={() => void handleSave()}
+          onSaveAs={() => void handleSave(true)}
+          onExportCsv={handleExportCsv}
+          onExportGif={() => void handleOpenGifExport()}
+          onUndo={handleUndo}
+          onRedo={handleRedo}
+          onCopy={handleCopy}
+          onPaste={handlePaste}
+          onDelete={handleDelete}
+          onSelectAll={handleSelectAll}
+          onToggleGrid={() => useEditorStore.getState().toggleGrid()}
+          onToggleSnap={() => useEditorStore.getState().toggleSnap()}
+          onPlayPause={handlePlayPause}
+          onStepSimulation={handleStep}
+          onResetSimulation={handleResetSimulation}
+          onClearRecords={handleClearRecords}
+          onShowShortcuts={() => setHelpTopic('shortcuts')}
+          onShowPhysics={() => setHelpTopic('physics')}
+          canUndo={undoStackLength > 0}
+          canRedo={redoStackLength > 0}
+          canPaste={clipboardCount > 0}
+          hasSelection={selectedIds.length > 0}
+          hasChartData={hasChartData}
+          gridVisible={gridVisible}
+          snapEnabled={snapEnabled}
+          panelVisibility={{
+            tools: workspacePanels.tools.visible,
+            layers: workspacePanels.layers.visible,
+            inspector: workspacePanels.inspector.visible,
+            charts: workspacePanels.charts.visible,
+          }}
+          onTogglePanel={(panelId) =>
+            useWorkspaceLayoutStore.getState().togglePanelVisible(panelId)
+          }
+          onResetWorkspaceLayout={() => useWorkspaceLayoutStore.getState().resetLayout()}
+        />
+      ) : null}
       <ToolOptionsBar />
 
       <DockableWorkspace />
@@ -504,7 +792,7 @@ export function App() {
         ref={inputRef}
         className={styles.hiddenInput}
         type="file"
-        accept=".json,.motion.json,application/json"
+        accept=".motionstudio,.motion.json,.json,application/vnd.motion-studio.scene+json,application/json"
         onChange={handleFileChange}
         aria-hidden="true"
         tabIndex={-1}
@@ -534,7 +822,7 @@ export function App() {
                 type="button"
                 onClick={() => {
                   restoreDraft(draftPrompt.scene, draftPrompt.fileName)
-                  fileHandleRef.current = null
+                  fileTokenRef.current = null
                   resetEditorForDocument()
                   setDraftPrompt(null)
                   showNotice({ tone: 'success', message: '已恢复草稿，请手动保存以保留它。' })
@@ -564,7 +852,13 @@ export function App() {
             aria-modal="true"
             aria-labelledby="help-title"
           >
-            <h2 id="help-title">{helpTopic === 'shortcuts' ? '快捷键与入门' : '物理模型与近似'}</h2>
+            <h2 id="help-title">
+              {helpTopic === 'shortcuts'
+                ? '快捷键与入门'
+                : helpTopic === 'physics'
+                  ? '物理模型与近似'
+                  : '关于 Motion Studio'}
+            </h2>
             {helpTopic === 'shortcuts' ? (
               <ul>
                 <li>V / R / S：选择移动 / 旋转 / 对象缩放；Z：画布缩放。</li>
@@ -573,13 +867,19 @@ export function App() {
                 <li>Ctrl+S / O / Z / Y / C / V：保存、打开、撤销、重做、复制、粘贴。</li>
                 <li>J 地面连接点；空格临时抓手；Alt 临时关闭吸附；Delete 删除选择。</li>
               </ul>
-            ) : (
+            ) : helpTopic === 'physics' ? (
               <ul>
                 <li>模拟使用固定时间步长，结果存在可测量的离散误差。</li>
                 <li>圆弧与贝塞尔地面通常以误差受控的折线参与碰撞。</li>
                 <li>场边界按物体中心判断；小球关闭碰撞时不会创建碰撞体。</li>
                 <li>浮点数会产生极小误差。本工具适合教学和常规模拟，不替代科研验证。</li>
               </ul>
+            ) : (
+              <div>
+                <p>Motion Studio 1.0.0</p>
+                <p>二维物理运动建模、仿真与可视化工具。</p>
+                <p>采用 Apache-2.0 许可证开源。</p>
+              </div>
             )}
             <div className={styles.modalActions}>
               <button type="button" autoFocus onClick={() => setHelpTopic(null)}>

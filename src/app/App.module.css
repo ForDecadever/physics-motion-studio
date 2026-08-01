@@ -8,6 +8,10 @@
   background: var(--color-bg-app);
 }
 
+.appShellDesktop {
+  grid-template-rows: 42px minmax(0, 1fr) 43px;
+}
+
 .hiddenInput {
   display: none;
 }

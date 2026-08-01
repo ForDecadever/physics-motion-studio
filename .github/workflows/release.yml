@@ -1,0 +1,69 @@
+name: Windows Release
+
+on:
+  push:
+    tags:
+      - v1.0.0
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          version: 11.9.0
+
+      - name: Install Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build NSIS and create draft release
+        id: tauri
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v1.0.0
+          releaseName: Motion Studio v1.0.0
+          releaseBody: |
+            Motion Studio 首个 Windows x64 桌面版本。
+
+            安装包尚未进行代码签名，Windows 可能显示 SmartScreen 或“未知发布者”信誉提示。请核对随附 SHA-256 文件。
+          releaseDraft: true
+          generateReleaseNotes: true
+          includeUpdaterJson: false
+          args: --target x86_64-pc-windows-msvc
+          assetNamePattern: physics-motion-studio_[version]_x64[setup][ext]
+
+      - name: Generate and upload SHA-256
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $installer = Get-ChildItem -Path "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis" -Filter "*-setup.exe" | Select-Object -First 1
+          if (-not $installer) { throw "NSIS installer was not generated." }
+          $assetName = "physics-motion-studio_1.0.0_x64-setup.exe"
+          $checksumName = "$assetName.sha256"
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer.FullName).Hash.ToLowerInvariant()
+          "$hash  $assetName" | Set-Content -Encoding ascii -NoNewline -LiteralPath $checksumName
+          gh release upload v1.0.0 $checksumName --clobber

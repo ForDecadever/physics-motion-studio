@@ -1,8 +1,8 @@
 # 物理运动模拟工具：产品与代码规范
 
-> 文档版本：1.3.1<br>
-> 状态：第一版已完成<br>
-> 最后更新：2026-07-29<br>
+> 文档版本：1.0.0<br>
+> 状态：Web 第一版与 Windows 桌面版已完成<br>
+> 最后更新：2026-07-30<br>
 > 暂定名称：Motion Studio（名称后续可替换，不进入核心代码）
 
 ---
@@ -702,12 +702,12 @@ type SceneEntity = GroundEntity | GroundJointEntity | BodyEntity | FieldEntity |
 
 ### 8.3 场景文件
 
-第一版使用可读 JSON，推荐扩展名 `.motion.json`。文件顶层必须包含：
+第一版使用可读 JSON，新文件默认扩展名为 `.motionstudio`，并兼容旧 `.motion.json` 与 `.json`。文件顶层必须包含：
 
 ```json
 {
   "schemaVersion": 7,
-  "appVersion": "1.3.1",
+  "appVersion": "1.0.0",
   "metadata": {
     "name": "未命名场景",
     "createdAt": "2026-07-21T00:00:00.000Z",
@@ -744,6 +744,8 @@ type SceneEntity = GroundEntity | GroundJointEntity | BodyEntity | FieldEntity |
 - 保存采用临时内容生成成功后再替换目标的策略，减少半写入文件。
 - 浏览器不支持直接文件写入时，退化为下载文件，不假装已经覆盖原文件。
 - 自动恢复草稿使用 IndexedDB；正式存档仍以用户明确保存为准。
+- 桌面版前端只能持有 Rust 生成的不透明文档令牌，不得从前端提交任意本地路径。
+- Web 与桌面读取上限均为 `10 MB`；关联文件、最近文件和文件选择器入口必须经过相同的解析、迁移与校验。
 
 ### 8.4 版本迁移
 
@@ -768,6 +770,7 @@ type SceneEntity = GroundEntity | GroundJointEntity | BodyEntity | FieldEntity |
 | 画布渲染 | PixiJS，生产默认 WebGL | 适合高频二维渲染、场景树、命中与图形元素 |
 | 物理引擎 | Rapier 2D JavaScript/WASM | 提供刚体、碰撞、关节、CCD、传感器和快照能力 |
 | 状态管理 | Zustand | 管理文档、编辑器和模拟状态，API 较轻量 |
+| 桌面封装 | Tauri v2 + Rust | 使用原生菜单和对话框，并把文件路径授权限制在 Rust 边界 |
 | 数据校验 | Zod | 校验存档、表单和线程消息边界 |
 | 图表 | Apache ECharts，Canvas 渲染 | 支持多序列、缩放、提示和较大时间序列 |
 | 单元测试 | Vitest | 与 Vite/TypeScript 集成简单 |
@@ -1148,11 +1151,15 @@ Worker 返回：
 
 完成标志：本文件第 15 节验收清单全部通过。
 
-### 阶段 5：桌面版与扩展
+### 阶段 5：Windows 桌面版与开源发布
 
-- 在 Web 版稳定后使用 Tauri 封装。
-- 增加桌面文件关联、最近文件和系统菜单。
-- 根据真实需求开始新物体、新场和 3D 的独立设计。
+- 使用 Tauri v2 封装 Windows x64 桌面版，生成每用户安装的 NSIS 安装包。
+- 用统一 `SceneFileService` 复用场景解析、迁移、校验、保存提示和 SHA-256 校验。
+- 增加 `.motionstudio` 文件关联、单实例、最近文件、原生系统菜单、窗口标题和统一未保存确认。
+- 只开放最小桌面能力；不启用 Shell、HTTP、遥测或宽泛文件系统权限。
+- 补齐 Apache-2.0 许可证、第三方声明、贡献与安全文档，以及 Windows CI/Release 工作流。
+
+完成标志：Web 全套回归通过，Windows x64 NSIS 成功构建；安装、文件关联、单实例、原生菜单、最近文件和未保存确认完成桌面冒烟测试。
 
 ---
 
@@ -1178,6 +1185,18 @@ Worker 返回：
 - [x] 达到或诚实记录第 13 节性能目标的测试结果。
 - [x] 主要操作可用键盘完成，错误信息能指导用户修正。
 - [x] 无默认遥测、无不必要网络请求、无动态执行存档内容。
+
+### Windows 桌面版验收
+
+- [x] Web 与桌面文件服务共用场景解析、迁移与校验。
+- [x] 新文件默认使用 `.motionstudio`，旧扩展仍可打开和覆盖。
+- [x] 桌面前端不持有本地路径，只持有不透明文档令牌。
+- [x] 原生系统菜单与 Web 菜单调用同一命令分发，快捷键不会重复执行。
+- [x] 最近文件按 Windows 路径去重，失效记录可清理，最多保存 10 条。
+- [x] 文件关联和第二实例请求不会绕过未保存确认或 GIF 模态。
+- [x] 本机完成未签名 NSIS 安装、卸载、重装、首次关联启动、运行中第二实例转交、严格 CSP 画布初始化和离线连接检查。
+- [ ] 未签名 NSIS 在干净 Windows 环境完成安装、卸载、重装和双击关联最终人工验收。
+- [ ] GitHub 公开仓库、`v1.0.0` 标签和 Release 草稿在连接已验证账号后发布。
 
 ---
 

@@ -5,6 +5,7 @@ import {
 } from '../scene/model/types'
 import { migrateScene, SceneVersionError } from '../scene/migrations/migrateScene'
 import { validateSceneDocument } from '../scene/validation/sceneSchema'
+import { SCENE_FILE_EXTENSION } from './sceneFileNames'
 
 const maxSceneFileBytes = 10 * 1024 * 1024
 
@@ -66,7 +67,7 @@ function safeFileStem(name: string): string {
 }
 
 export function downloadScene(scene: SceneDocument): string {
-  const fileName = `${safeFileStem(scene.metadata.name)}.motion.json`
+  const fileName = `${safeFileStem(scene.metadata.name)}${SCENE_FILE_EXTENSION}`
   const blob = new Blob([serializeScene(scene)], { type: 'application/json;charset=utf-8' })
   const url = URL.createObjectURL(blob)
   const anchor = document.createElement('a')

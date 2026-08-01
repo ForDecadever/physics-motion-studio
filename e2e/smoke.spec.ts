@@ -20,7 +20,7 @@ test('显示编辑器的主要区域', async ({ page }) => {
   ).toBeVisible()
   await expect(page.getByRole('region', { name: '属性面板' })).toBeVisible()
   await expect(page.getByText('多坐标系图像区', { exact: true })).toBeVisible()
-  await expect(page.getByText('阶段 4', { exact: true })).toBeVisible()
+  await expect(page.getByText('阶段 5', { exact: true })).toBeVisible()
 })
 
 test('可以冻结已有记录并导出运动 GIF', async ({ page }) => {

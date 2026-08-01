@@ -2,6 +2,9 @@ node_modules/
 .pnpm-store/
 .tools/
 dist/
+release-artifacts/
+src-tauri/target/
+src-tauri/gen/
 coverage/
 playwright-report/
 test-results/

@@ -1,29 +1,21 @@
 import type { SceneDocument } from '../scene/model/types'
 import { downloadScene, readSceneFile, serializeScene, SceneFileError } from './sceneFile'
+import type { OpenedScene, SavedScene, SceneFileService, SceneFileToken } from './sceneFileService'
+import { SCENE_FILE_EXTENSION } from './sceneFileNames'
 
 interface ScenePickerWindow extends Window {
   showOpenFilePicker?: (options?: unknown) => Promise<FileSystemFileHandle[]>
   showSaveFilePicker?: (options?: unknown) => Promise<FileSystemFileHandle>
 }
 
-export interface OpenedScene {
-  scene: SceneDocument
-  fileName: string
-  handle: FileSystemFileHandle
-}
-
-export interface SavedScene {
-  fileName: string
-  handle: FileSystemFileHandle | null
-  method: 'direct' | 'download'
-  sha256: string
-}
-
 const pickerOptions = {
   types: [
     {
       description: 'Motion Studio 场景',
-      accept: { 'application/json': ['.motion.json', '.json'] },
+      accept: {
+        'application/vnd.motion-studio.scene+json': [SCENE_FILE_EXTENSION],
+        'application/json': ['.motion.json', '.json'],
+      },
     },
   ],
   excludeAcceptAllOption: false,
@@ -57,7 +49,11 @@ export async function openSceneWithPicker(): Promise<OpenedScene | null> {
   const [handle] = await showOpenFilePicker(pickerOptions)
   if (!handle) return null
   const file = await handle.getFile()
-  return { scene: await readSceneFile(file), fileName: file.name, handle }
+  return {
+    scene: await readSceneFile(file),
+    fileName: file.name,
+    token: { kind: 'web', handle },
+  }
 }
 
 async function writeAndVerifyScene(
@@ -91,29 +87,45 @@ async function writeAndVerifyScene(
 
 export async function saveScene(
   scene: SceneDocument,
-  existingHandle: FileSystemFileHandle | null,
+  existingToken: SceneFileToken | null,
   saveAs = false,
 ): Promise<SavedScene> {
-  let handle = saveAs ? null : existingHandle
+  let handle = !saveAs && existingToken?.kind === 'web' ? existingToken.handle : null
   const showSaveFilePicker = pickerWindow().showSaveFilePicker
 
   if (!handle && showSaveFilePicker) {
     handle = await showSaveFilePicker({
       ...pickerOptions,
-      suggestedName: `${scene.metadata.name}.motion.json`,
+      suggestedName: `${scene.metadata.name}${SCENE_FILE_EXTENSION}`,
     })
   }
 
   if (handle) {
     const result = await writeAndVerifyScene(handle, scene)
-    return { ...result, handle, method: 'direct' }
+    return { ...result, token: { kind: 'web', handle }, method: 'direct' }
   }
 
   const text = serializeScene(scene)
   return {
     fileName: downloadScene(scene),
-    handle: null,
+    token: null,
     method: 'download',
     sha256: await sha256(text),
   }
+}
+
+export const webSceneFileService: SceneFileService = {
+  platform: 'web',
+  supportsNativeOpen: supportsDirectFileAccess,
+  open: openSceneWithPicker,
+  save: saveScene,
+  confirmOpened: async () => undefined,
+  listRecent: async () => [],
+  openRecent: async () => {
+    throw new SceneFileError('Web 版不提供最近文件列表。')
+  },
+  removeRecent: async () => undefined,
+  clearRecent: async () => undefined,
+  takePendingOpen: async () => null,
+  subscribeOpenRequests: async () => () => undefined,
 }

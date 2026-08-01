@@ -1,6 +1,6 @@
 # Motion Studio
 
-一个采用专业图形编辑器布局的二维物理运动模拟工具。当前版本为 `1.3.1`，已形成可编辑、可模拟、可分析、可导出和可保存的 Web 第一版。
+一个采用专业图形编辑器布局的二维物理运动模拟工具。当前公开版本为 `1.0.0`，同时提供 Web 源码和 Windows x64 桌面版。
 
 ## 当前已经具备
 
@@ -28,19 +28,26 @@
 - 图表刻度、十字坐标和提示统一限制为最多六位有效数字，极大或极小值使用科学计数法，绘图区不会因超长小数反复改变宽度；
 - 图层与所有实体可通过铅笔按钮或双击名称重命名；复制完整端点集合时会自动带上绳、杆、弹簧和地面连接点，并把关系重定向到副本；
 - 工具、图层、属性和图像面板支持左、右、底部停靠、应用内浮动、缩放、关闭与恢复；布局只保存在本机，播放栏始终固定可见；
-- 新建、打开、直接保存/另存或下载 `.motion.json` 场景，写入后执行 SHA-256 内容校验；
+- Web 与桌面共用场景打开、迁移、校验和保存流程；新文件默认使用 `.motionstudio`，并继续兼容 `.motion.json` 和 `.json`，写入后执行 SHA-256 内容校验；
+- Windows 桌面版提供原生系统菜单、系统文件对话框、`.motionstudio` 文件关联、单实例和最多 10 条最近文件；前端只持有不透明文件令牌；
 - IndexedDB 自动草稿、意外刷新恢复，以及格式 1 到当前格式 7 的逐级纯函数迁移；格式 3 的旧单面地面会迁移为双面碰撞，格式 4 的连接点会补齐自动过渡设置，格式 5 的物体会默认补齐旋转开关，格式 6 会补入默认空白坐标系；
 - 复制/粘贴、播放快捷键、键盘可调面板、减少动态效果和明确焦点样式；
 - ESLint、Prettier、TypeScript、Vitest、Playwright 视觉回归和物理性能基准。
 
 物理验证方法与误差边界记录在 [docs/PHYSICS_VALIDATION.md](./docs/PHYSICS_VALIDATION.md)，性能结果记录在 [docs/PERFORMANCE_BASELINE.md](./docs/PERFORMANCE_BASELINE.md)。
 
-## 第一次运行
+## 安装 Windows 桌面版
+
+从 GitHub Releases 下载 `physics-motion-studio_1.0.0_x64-setup.exe`，双击后按提示安装。首发安装包尚未进行代码签名，Windows 可能显示 SmartScreen 或“未知发布者”信誉提示；请只从本项目官方 Release 和匹配的 SHA-256 校验文件下载。
+
+安装后可以从开始菜单启动 Motion Studio，也可以双击 `.motionstudio` 场景。旧 `.motion.json` 和 `.json` 文件可在“文件 → 打开”中选择。
+
+## 从源码运行
 
 打开 PowerShell，进入项目文件夹：
 
 ```powershell
-cd "C:\Users\FD\Desktop\chengxu\题目可视化"
+cd "C:\path\to\physics-motion-studio"
 ```
 
 安装依赖：
@@ -56,6 +63,18 @@ pnpm dev
 ```
 
 成功时会显示 `http://127.0.0.1:4173/`。终止服务器时按 `Ctrl+C`。
+
+启动桌面开发版还需要 Rust stable、MSVC 编译工具和 WebView2：
+
+```powershell
+pnpm tauri dev
+```
+
+生成 Windows x64 NSIS 安装包：
+
+```powershell
+pnpm tauri build --target x86_64-pc-windows-msvc
+```
 
 ## 如何搭建第一个运动场景
 
@@ -96,10 +115,15 @@ src/physics/client/      界面与物理线程之间的控制器
 src/features/            菜单、工具栏、画布、属性、播放和图表区域
 src/scene/               场景数据、校验、迁移和实体工厂
 src/stores/              文档、编辑器和运行时状态
+src-tauri/               Windows 桌面壳、受限文件命令和打包配置
 docs/                    物理验证报告和架构决策记录
 e2e/                     真实浏览器测试
 ```
 
-## 下一阶段
+## 场景文件与安全
 
-阶段 5 将在 Web 第一版稳定后评估 Tauri 桌面封装、最近文件、更多物体/场/连接器，以及独立设计的 3D 模式。
+场景格式当前为 `schemaVersion: 7`。`.motionstudio` 是 JSON 文档，不包含可执行脚本；读取上限为 10 MB，解析后执行版本迁移与严格数据校验。安全边界和漏洞报告方式见 [SECURITY.md](./SECURITY.md)。
+
+## 贡献与许可证
+
+贡献流程见 [CONTRIBUTING.md](./CONTRIBUTING.md)。Motion Studio 依据 [Apache License 2.0](./LICENSE) 发布，版权与第三方声明见 [NOTICE](./NOTICE) 和 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)。

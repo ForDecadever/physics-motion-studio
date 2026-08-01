@@ -1,5 +1,5 @@
 export const CURRENT_SCHEMA_VERSION = 7 as const
-export const CURRENT_APP_VERSION = '1.3.1'
+export const CURRENT_APP_VERSION = '1.0.0'
 
 export type EntityId = string
 export type LayerId = string
