@@ -50,6 +50,8 @@ function postFrame(): void {
     type: 'frame',
     simulationTime: simulation.simulationTime,
     bodies: simulation.getBodyStates(),
+    connectors: simulation.getConnectorStates(),
+    particleSources: simulation.getParticleSourceStates(),
     samples: pendingSamples,
   })
   pendingSamples = []
@@ -68,7 +70,14 @@ function recordCurrentState(force = false): void {
 function recordGifCurrentState(force = false): void {
   if (!simulation || gifTelemetry.status.kind === 'blocked') return
   if (!force && simulation.simulationTime + Number.EPSILON < nextGifRecordTime) return
-  if (gifTelemetry.append(simulation.simulationTime, simulation.getBodyStates())) {
+  if (
+    gifTelemetry.append(
+      simulation.simulationTime,
+      simulation.getBodyStates(),
+      simulation.getConnectorStates(),
+      simulation.getParticleSourceStates(),
+    )
+  ) {
     const length = gifTelemetry.length
     if (length === 1 || length % GIF_RECORDING_SAMPLE_RATE === 0) {
       post({ type: 'gifHistoryStatus', status: gifTelemetry.getStatus() })
@@ -81,14 +90,24 @@ function buildSimulation(scene: SceneDocument): void {
   if (!SimulationWorldConstructor) {
     throw new Error('物理引擎尚未完成初始化。')
   }
-  simulation?.dispose()
-  simulation = new SimulationWorldConstructor(scene)
+  const previous = simulation
+  simulation = null
+  previous?.dispose()
+  let nextSimulation: SimulationWorld | null = null
+  try {
+    nextSimulation = new SimulationWorldConstructor(scene)
+    const nextGifTelemetry = new GifTelemetryBuffer(
+      nextSimulation.getBodyStates().map((body) => body.entityId),
+      nextSimulation.getConnectorStates(),
+      nextSimulation.getParticleSourceStates(),
+    )
+    simulation = nextSimulation
+    gifTelemetry = nextGifTelemetry
+  } catch (error) {
+    nextSimulation?.dispose()
+    throw error
+  }
   recordIntervalSeconds = 1 / scene.settings.recordingSampleRate
-  gifTelemetry = new GifTelemetryBuffer(
-    scene.entities
-      .filter((entity) => entity.kind === 'body' && entity.simulationEnabled)
-      .map((entity) => entity.id),
-  )
   accumulatorSeconds = 0
   pendingSamples = []
   nextRecordTime = 0
@@ -98,9 +117,15 @@ function buildSimulation(scene: SceneDocument): void {
   post({ type: 'ready', fixedTimeStep: simulation.fixedTimeStep })
   post({ type: 'gifHistoryStatus', status: gifTelemetry.getStatus() })
   if (gifTelemetry.status.kind === 'blocked') {
+    const message =
+      gifTelemetry.status.reason === 'body-limit'
+        ? `GIF 记录最多支持 ${gifTelemetry.status.maxBodies} 个动态物体；当前有 ${gifTelemetry.status.bodyCount} 个，请减少物体并重置模拟。`
+        : gifTelemetry.status.reason === 'connector-point-limit'
+          ? `GIF 记录最多支持 ${gifTelemetry.status.maxPoints} 个运行时连接器节点；当前有 ${gifTelemetry.status.pointCount} 个，请减少带质量或带碰撞的连接器并重置模拟。`
+          : `GIF 记录最多支持 ${gifTelemetry.status.maxIons} 个粒子源离子；当前有 ${gifTelemetry.status.ionCount} 个，请缩短线源或减少粒子源并重置模拟。`
     post({
       type: 'warning',
-      message: `GIF 记录最多支持 ${gifTelemetry.status.maxBodies} 个动态物体；当前有 ${gifTelemetry.status.bodyCount} 个，请减少物体并重置模拟。`,
+      message,
     })
   }
   for (const warning of simulation.warnings) post({ type: 'warning', ...warning })
@@ -153,7 +178,14 @@ function handleMessage(message: MainToPhysicsMessage): void {
     post({ type: 'gifHistoryStatus', status: gifTelemetry.getStatus() })
   } else if (message.type === 'requestGifHistory') {
     const snapshot = gifTelemetry.snapshot(message.requestId)
-    post({ type: 'gifHistorySnapshot', snapshot }, [snapshot.times.buffer, snapshot.values.buffer])
+    post({ type: 'gifHistorySnapshot', snapshot }, [
+      snapshot.times.buffer,
+      snapshot.values.buffer,
+      snapshot.connectorPointOffsets.buffer,
+      snapshot.connectorValues.buffer,
+      snapshot.particleIonTs.buffer,
+      snapshot.particleValues.buffer,
+    ])
   }
 }
 

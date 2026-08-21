@@ -5,28 +5,55 @@ import {
   add,
   createScaleHandleGeometry,
   getEntityBounds,
-  getScalableSelectionBounds,
+  getEntityTransform,
   isScalableEntity,
   resolveConnectorEndpoint,
   rotateVector,
 } from '../../editor/geometry/entityGeometry'
+import {
+  listEditingSelectionTargets,
+  selectionTargetBounds,
+} from '../../editor/geometry/selectionTargets'
 import { resolveGroundEndpoint, resolveGroundJoint } from '../../scene/model/groundEndpoints'
+import {
+  booleanGeometryRings,
+  resolveBooleanScene,
+  transformBooleanBodyGeometry,
+  type BooleanMultiPolygon,
+  type ResolvedBooleanBody,
+  type ResolvedBooleanResult,
+} from '../../scene/model/booleanGeometry'
+import {
+  analyzeBezierBodyPath,
+  sampleBezierBodyWorldPoints,
+  worldBezierPathNodes,
+} from '../../scene/model/bodyPath'
+import {
+  findBooleanNode,
+  isTreeItemEffectivelyLocked,
+  isTreeItemEffectivelyVisible,
+} from '../../scene/model/booleanLayerGraph'
 import type {
   GroundPath as ResolvedGroundPath,
   GroundPathNetwork,
 } from '../../scene/model/groundPath'
 import type {
+  ConnectorEndpoint,
+  ConnectorEntity,
   EntityId,
   GroundEndpointRef,
+  ParticleSourceEntity,
   SceneDocument,
   SceneEntity,
   Vec2,
 } from '../../scene/model/types'
 import type { EditorTool } from '../../stores/editorStore'
-import type { RuntimeBodyState } from '../../physics/worker/messages'
+import type { RuntimeBodyState, RuntimeConnectorState } from '../../physics/worker/messages'
+import { createSpringEndBar } from './connectorGeometry'
 import { appendGroundPath } from './groundPath'
 import { AUTO_JOINT_PREVIEW_ID, GroundRenderNetworkCache } from './groundNetworkCache'
-import { resolveRenderedEntity } from './renderEntityState'
+import { resolveBooleanBodyRenderTransform, resolveRenderedEntity } from './renderEntityState'
+import { sceneContentPaintOrder } from './sceneContentOrder'
 
 export interface PixiRenderState {
   scene: SceneDocument
@@ -37,13 +64,15 @@ export interface PixiRenderState {
   previewEntities: Record<EntityId, SceneEntity>
   draftEntity: SceneEntity | null
   marquee: { start: Vec2; end: Vec2 } | null
-  connectorStartBodyId: EntityId | null
+  connectorStartEndpoint: ConnectorEndpoint | null
   activeTool: EditorTool
   groundJointStart: GroundEndpointRef | null
   groundJointHover: GroundEndpointRef | null
   pendingGroundEndpoint: GroundEndpointRef | null
   runtimeBodies: Record<EntityId, RuntimeBodyState>
+  runtimeConnectors: Record<EntityId, RuntimeConnectorState>
   runtimeTrajectories: Record<EntityId, Vec2[]>
+  particleTrajectories: Array<{ t: number; points: Vec2[] }>
   runtimeLocked: boolean
   motionGuides?: {
     trajectoryIds: EntityId[]
@@ -79,21 +108,102 @@ const colors = {
   connector: 0xf2b55b,
   groundJoint: 0x72d6a0,
   groundJointInvalid: 0xe45d68,
+  particleSource: 0x9dd0ff,
   trajectory: 0x78d6c6,
   velocity: 0x73c7ff,
   force: 0xffb45e,
   collisionOn: 0xe45d68,
   collisionOff: 0x4e9eeb,
+  booleanBodyFill: 0x725bd8,
+  booleanBodyStroke: 0xd8d0ff,
+  booleanInvalid: 0xf2b55b,
 }
 
 const TAU = Math.PI * 2
 
+function ionTrajectoryColor(t: number): number {
+  const hue = Math.min(1, Math.max(0, t)) * 300
+  const h = hue / 60
+  const chroma = 0.85
+  const x = chroma * (1 - Math.abs((h % 2) - 1))
+  let r = 0
+  let g = 0
+  let b = 0
+  if (h < 1) {
+    r = chroma
+    g = x
+  } else if (h < 2) {
+    r = x
+    g = chroma
+  } else if (h < 3) {
+    g = chroma
+    b = x
+  } else if (h < 4) {
+    g = x
+    b = chroma
+  } else if (h < 5) {
+    r = x
+    b = chroma
+  } else {
+    r = chroma
+    b = x
+  }
+  const floor = 0.12
+  const rr = Math.round((r + floor) * 255)
+  const gg = Math.round((g + floor) * 255)
+  const bb = Math.round((b + floor) * 255)
+  return (rr << 16) | (gg << 8) | bb
+}
+
+function particleEmissionDirection(entity: ParticleSourceEntity): Vec2 {
+  if (entity.shape.type === 'point') {
+    return { x: Math.cos(entity.directionRad), y: Math.sin(entity.directionRad) }
+  }
+  const { start, end } = entity.shape
+  const dx = end.x - start.x
+  const dy = end.y - start.y
+  const length = Math.hypot(dx, dy)
+  const side = entity.flipEmission ? -1 : 1
+  if (length <= Number.EPSILON) return { x: 0, y: side }
+  return { x: (-dy / length) * side, y: (dx / length) * side }
+}
+
+function drawArrow(
+  graphics: Graphics,
+  from: Vec2,
+  direction: Vec2,
+  length: number,
+  width: number,
+  color: number,
+): void {
+  const tip = { x: from.x + direction.x * length, y: from.y + direction.y * length }
+  const headLength = length * 0.35
+  const headWidth = length * 0.22
+  const back = { x: tip.x - direction.x * headLength, y: tip.y - direction.y * headLength }
+  const perpendicular = { x: -direction.y, y: direction.x }
+  const left = { x: back.x + perpendicular.x * headWidth, y: back.y + perpendicular.y * headWidth }
+  const right = { x: back.x - perpendicular.x * headWidth, y: back.y - perpendicular.y * headWidth }
+  graphics
+    .moveTo(from.x, from.y)
+    .lineTo(tip.x, tip.y)
+    .moveTo(tip.x, tip.y)
+    .lineTo(left.x, left.y)
+    .moveTo(tip.x, tip.y)
+    .lineTo(right.x, right.y)
+    .stroke({ color, alpha: 0.9, width })
+}
+
 function transformedEntities(state: PixiRenderState): SceneEntity[] {
-  const visibleLayers = new Set(
-    state.scene.layers.filter((layer) => layer.visible).map((layer) => layer.id),
+  const booleanSourceIds = new Set(
+    resolveBooleanScene(state.scene).roots.flatMap((result) => result.sourceEntityIds),
   )
+  const selected = new Set(state.selectedIds)
   const entities = state.scene.entities
-    .filter((entity) => entity.visible && visibleLayers.has(entity.layerId))
+    .filter(
+      (entity) =>
+        isTreeItemEffectivelyVisible(state.scene.rootItems, entity.id) &&
+        (booleanSourceIds.has(entity.id) ? selected.has(entity.id) : entity.visible),
+    )
     .map((entity) => resolveRenderedEntity(entity, state.runtimeBodies, state.previewEntities))
 
   return state.draftEntity ? [...entities, state.draftEntity] : entities
@@ -122,16 +232,104 @@ function flattenPoints(points: Vec2[]): number[] {
   return points.flatMap((point) => [point.x, point.y])
 }
 
+function appendBooleanGeometry(
+  graphics: Graphics,
+  geometry: BooleanMultiPolygon,
+  fill: { color: number; alpha: number } | null,
+  stroke: { color: number; alpha: number; width: number },
+): void {
+  for (const polygon of booleanGeometryRings(geometry)) {
+    const outer = polygon[0]
+    if (!outer || outer.length < 3) continue
+    graphics.poly(flattenPoints(outer), true)
+    if (fill) {
+      graphics.fill(fill)
+      for (const hole of polygon.slice(1)) {
+        if (hole.length >= 3) graphics.poly(flattenPoints(hole), true).cut()
+      }
+    }
+    graphics.poly(flattenPoints(outer), true).stroke(stroke)
+    for (const hole of polygon.slice(1)) {
+      if (hole.length >= 3) graphics.poly(flattenPoints(hole), true).stroke(stroke)
+    }
+  }
+}
+
+function rigidBooleanPreviewTransform(
+  result: ResolvedBooleanBody,
+  sceneEntities: readonly SceneEntity[],
+  previewEntities: Record<EntityId, SceneEntity>,
+): { position: Vec2; angleRad: number } | null {
+  if (result.sourceEntityIds.length === 0) return null
+  const entityById = new Map(sceneEntities.map((entity) => [entity.id, entity]))
+  const referenceId = result.sourceEntityIds[0]!
+  const reference = entityById.get(referenceId)
+  const referencePreview = previewEntities[referenceId]
+  const referenceTransform = reference ? getEntityTransform(reference) : null
+  const referencePreviewTransform = referencePreview ? getEntityTransform(referencePreview) : null
+  if (!reference || !referencePreview || !referenceTransform || !referencePreviewTransform)
+    return null
+  if (
+    (reference.kind === 'body' &&
+      (referencePreview.kind !== 'body' || referencePreview.shape !== reference.shape)) ||
+    (reference.kind === 'field' &&
+      (referencePreview.kind !== 'field' || referencePreview.region !== reference.region))
+  ) {
+    return null
+  }
+  const angleDelta = referencePreviewTransform.angleRad - referenceTransform.angleRad
+  const cosine = Math.cos(angleDelta)
+  const sine = Math.sin(angleDelta)
+  const translation = {
+    x:
+      referencePreviewTransform.position.x -
+      (referenceTransform.position.x * cosine - referenceTransform.position.y * sine),
+    y:
+      referencePreviewTransform.position.y -
+      (referenceTransform.position.x * sine + referenceTransform.position.y * cosine),
+  }
+  for (const sourceId of result.sourceEntityIds) {
+    const source = entityById.get(sourceId)
+    const preview = previewEntities[sourceId]
+    const sourceTransform = source ? getEntityTransform(source) : null
+    const previewTransform = preview ? getEntityTransform(preview) : null
+    if (!source || !preview || !sourceTransform || !previewTransform) return null
+    if (
+      (source.kind === 'body' && (preview.kind !== 'body' || preview.shape !== source.shape)) ||
+      (source.kind === 'field' && (preview.kind !== 'field' || preview.region !== source.region))
+    ) {
+      return null
+    }
+    const expected = {
+      x: sourceTransform.position.x * cosine - sourceTransform.position.y * sine + translation.x,
+      y: sourceTransform.position.x * sine + sourceTransform.position.y * cosine + translation.y,
+    }
+    if (
+      Math.abs(previewTransform.angleRad - sourceTransform.angleRad - angleDelta) > 1e-9 ||
+      Math.hypot(
+        previewTransform.position.x - expected.x,
+        previewTransform.position.y - expected.y,
+      ) > 1e-8
+    ) {
+      return null
+    }
+  }
+  return {
+    position: {
+      x: result.centerOfMass.x * cosine - result.centerOfMass.y * sine + translation.x,
+      y: result.centerOfMass.x * sine + result.centerOfMass.y * cosine + translation.y,
+    },
+    angleRad: result.angleRad + angleDelta,
+  }
+}
+
 export class PixiSceneRenderer {
   private readonly app = new Application()
   private readonly world = new Container()
   private readonly grid = new Graphics()
-  private readonly fields = new Graphics()
-  private readonly grounds = new Graphics()
+  private readonly content = new Graphics()
   private readonly groundJoints = new Graphics()
-  private readonly connectors = new Graphics()
   private readonly motionGuides = new Graphics()
-  private readonly bodies = new Graphics()
   private readonly overlays = new Graphics()
   private readonly groundNetworkCache = new GroundRenderNetworkCache()
   private captureBackgroundColor = '#000000'
@@ -154,12 +352,9 @@ export class PixiSceneRenderer {
 
     this.world.addChild(
       this.grid,
-      this.fields,
-      this.grounds,
+      this.content,
       this.groundJoints,
-      this.connectors,
       this.motionGuides,
-      this.bodies,
       this.overlays,
     )
     this.app.stage.addChild(this.world)
@@ -198,6 +393,50 @@ export class PixiSceneRenderer {
 
     this.drawGrid(state)
     const entities = transformedEntities(state)
+    const baseBooleanScene = resolveBooleanScene(state.scene)
+    const previewIds = new Set(Object.keys(state.previewEntities))
+    const rigidPreviewTransforms = new Map<EntityId, { position: Vec2; angleRad: number }>()
+    let requiresBooleanRebuild = false
+    for (const result of baseBooleanScene.roots) {
+      const hasSourcePreview = result.sourceEntityIds.some((id) => previewIds.has(id))
+      if (!hasSourcePreview) continue
+      if (result.valid && result.kind === 'body') {
+        const rigidTransform = rigidBooleanPreviewTransform(
+          result,
+          state.scene.entities,
+          state.previewEntities,
+        )
+        if (rigidTransform) {
+          rigidPreviewTransforms.set(result.resultId, rigidTransform)
+          continue
+        }
+      }
+      requiresBooleanRebuild = true
+    }
+    const booleanScene = requiresBooleanRebuild
+      ? resolveBooleanScene({
+          ...state.scene,
+          entities: state.scene.entities.map(
+            (entity) => state.previewEntities[entity.id] ?? entity,
+          ),
+        })
+      : baseBooleanScene
+    const booleanBodyTransforms = new Map(
+      booleanScene.roots.flatMap((result) => {
+        if (!result.valid || result.kind !== 'body') return []
+        return [
+          [
+            result.resultId,
+            rigidPreviewTransforms.get(result.resultId) ??
+              resolveBooleanBodyRenderTransform(
+                result,
+                state.runtimeBodies[result.resultId],
+                result.sourceEntityIds.some((id) => previewIds.has(id)),
+              ),
+          ] as const,
+        ]
+      }),
+    )
     const groundRender = this.groundNetworkCache.resolve(
       entities,
       state.draftEntity,
@@ -205,14 +444,96 @@ export class PixiSceneRenderer {
       state.groundJointStart,
       state.groundJointHover,
     )
-    this.drawFields(state, entities)
-    this.drawGrounds(entities, groundRender.network, camera.pixelsPerMeter)
+    this.content.clear()
+    const entityById = new Map(entities.map((entity) => [entity.id, entity]))
+    const resultById = new Map(booleanScene.roots.map((result) => [result.resultId, result]))
+    const rootEntityIds = new Set(
+      state.scene.rootItems.flatMap((item) => (item.kind === 'entity' ? [item.entityId] : [])),
+    )
+    for (const targetId of sceneContentPaintOrder(state.scene.rootItems)) {
+      const item = state.scene.rootItems.find(
+        (candidate) =>
+          (candidate.kind === 'entity' ? candidate.entityId : candidate.resultId) === targetId,
+      )
+      if (!item) continue
+      if (item.kind === 'boolean') {
+        const result = resultById.get(item.resultId)
+        if (!result) continue
+        this.drawBooleanFields(state, [result])
+        this.drawBooleanBodies(state, [result], booleanBodyTransforms)
+        continue
+      }
+      const entity = entityById.get(item.entityId)
+      if (!entity) continue
+      this.drawEntityContent(state, entities, entity, groundRender.network, booleanBodyTransforms)
+    }
+    for (const entity of entities) {
+      if (rootEntityIds.has(entity.id)) continue
+      this.drawEntityContent(state, entities, entity, groundRender.network, booleanBodyTransforms)
+    }
+    this.drawParticleTrajectories(state)
     this.drawGroundJoints(state, entities, groundRender.network, groundRender.previewJointId)
-    this.drawConnectors(entities, camera.pixelsPerMeter)
     this.drawMotionGuides(state)
-    this.drawBodies(entities, camera.pixelsPerMeter)
-    this.drawOverlays(state, entities)
+    this.drawOverlays(state, entities, groundRender.network, booleanBodyTransforms)
+    this.drawBooleanOverlays(state, booleanScene.roots, booleanBodyTransforms)
     this.app.render()
+  }
+
+  private drawEntityContent(
+    state: PixiRenderState,
+    allEntities: SceneEntity[],
+    entity: SceneEntity,
+    groundPathNetwork: GroundPathNetwork,
+    booleanBodyTransforms: ReadonlyMap<EntityId, { position: Vec2; angleRad: number }>,
+  ): void {
+    if (entity.kind === 'field') {
+      this.drawFields(state, [entity])
+      return
+    }
+    if (entity.kind === 'ground' || entity.kind === 'groundJoint') {
+      this.drawGrounds(allEntities, groundPathNetwork, state.camera.pixelsPerMeter, entity.id)
+      return
+    }
+    if (entity.kind === 'connector') {
+      this.drawConnectors(
+        allEntities,
+        groundPathNetwork,
+        state.camera.pixelsPerMeter,
+        state.runtimeConnectors,
+        booleanBodyTransforms,
+        entity.id,
+      )
+      return
+    }
+    if (entity.kind === 'particleSource') {
+      this.drawParticleSource(state, entity)
+      return
+    }
+    this.drawBodies([entity], state.camera.pixelsPerMeter)
+    if (
+      entity === state.draftEntity &&
+      entity.kind === 'body' &&
+      entity.shape.type === 'bezierPath'
+    ) {
+      const analysis = analyzeBezierBodyPath(worldBezierPathNodes(entity))
+      if (!analysis.valid && analysis.sampledPoints.length > 1) {
+        const invalidSegments =
+          analysis.invalidSegmentIndices.length > 0
+            ? analysis.invalidSegmentIndices
+            : analysis.sampledPoints.map((_, index) => index)
+        for (const index of invalidSegments) {
+          const start = analysis.sampledPoints[index]
+          const end = analysis.sampledPoints[(index + 1) % analysis.sampledPoints.length]
+          if (!start || !end) continue
+          this.content.moveTo(start.x, start.y).lineTo(end.x, end.y)
+        }
+        this.content.stroke({
+          color: colors.booleanInvalid,
+          alpha: 1,
+          width: 2.5 / state.camera.pixelsPerMeter,
+        })
+      }
+    }
   }
 
   destroy(): void {
@@ -296,8 +617,46 @@ export class PixiSceneRenderer {
       })
   }
 
+  private drawParticleSource(state: PixiRenderState, entity: ParticleSourceEntity): void {
+    const pixelsPerMeter = state.camera.pixelsPerMeter
+    const color = colors.particleSource
+    const glyphRadius = 6 / pixelsPerMeter
+    const arrowLength = 14 / pixelsPerMeter
+    const strokeWidth = 1.5 / pixelsPerMeter
+    const direction = particleEmissionDirection(entity)
+
+    if (entity.shape.type === 'point') {
+      const p = entity.shape.position
+      this.content.circle(p.x, p.y, glyphRadius).fill({ color, alpha: 0.9 })
+      drawArrow(this.content, p, direction, arrowLength, strokeWidth, color)
+      return
+    }
+
+    const { start, end } = entity.shape
+    this.content
+      .moveTo(start.x, start.y)
+      .lineTo(end.x, end.y)
+      .stroke({ color, alpha: 0.9, width: strokeWidth })
+    const midpoint = { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 }
+    drawArrow(this.content, midpoint, direction, arrowLength, strokeWidth, color)
+  }
+
+  private drawParticleTrajectories(state: PixiRenderState): void {
+    if (state.particleTrajectories.length === 0) return
+    const width = 1.5 / state.camera.pixelsPerMeter
+    for (const trajectory of state.particleTrajectories) {
+      const points = trajectory.points
+      if (points.length < 2) continue
+      const color = ionTrajectoryColor(trajectory.t)
+      this.content.moveTo(points[0]!.x, points[0]!.y)
+      for (let index = 1; index < points.length; index += 1) {
+        this.content.lineTo(points[index]!.x, points[index]!.y)
+      }
+      this.content.stroke({ color, alpha: 0.9, width })
+    }
+  }
+
   private drawFields(state: PixiRenderState, entities: SceneEntity[]): void {
-    this.fields.clear()
     const { camera, size } = state
     const pixelsPerMeter = camera.pixelsPerMeter
     const lineWidth = 1.25 / pixelsPerMeter
@@ -314,9 +673,9 @@ export class PixiSceneRenderer {
       if (entity.region.type === 'infinite') {
         const width = size.width / pixelsPerMeter
         const height = size.height / pixelsPerMeter
-        this.fields.rect(camera.center.x - width / 2, camera.center.y - height / 2, width, height)
+        this.content.rect(camera.center.x - width / 2, camera.center.y - height / 2, width, height)
       } else if (entity.region.type === 'rectangle') {
-        this.fields.poly(
+        this.content.poly(
           flattenPoints(
             rotatedRectangle(
               entity.region.center,
@@ -329,13 +688,13 @@ export class PixiSceneRenderer {
         )
       } else if (entity.region.type === 'circle') {
         if (Math.abs(entity.region.sweepRad) >= TAU - 1e-7) {
-          this.fields.circle(entity.region.center.x, entity.region.center.y, entity.region.radius)
+          this.content.circle(entity.region.center.x, entity.region.center.y, entity.region.radius)
         } else {
           const start = {
             x: entity.region.center.x + Math.cos(entity.region.startRad) * entity.region.radius,
             y: entity.region.center.y + Math.sin(entity.region.startRad) * entity.region.radius,
           }
-          this.fields
+          this.content
             .moveTo(entity.region.center.x, entity.region.center.y)
             .lineTo(start.x, start.y)
             .arc(
@@ -349,16 +708,16 @@ export class PixiSceneRenderer {
             .closePath()
         }
       } else if (entity.region.type === 'polygon') {
-        this.fields.poly(flattenPoints(entity.region.points), true)
+        this.content.poly(flattenPoints(entity.region.points), true)
       } else {
         const first = entity.region.nodes[0]
         if (first) {
-          this.fields.moveTo(first.anchor.x, first.anchor.y)
+          this.content.moveTo(first.anchor.x, first.anchor.y)
           for (let index = 0; index < entity.region.nodes.length; index += 1) {
             const current = entity.region.nodes[index]
             const next = entity.region.nodes[(index + 1) % entity.region.nodes.length]
             if (!current || !next) continue
-            this.fields.bezierCurveTo(
+            this.content.bezierCurveTo(
               current.outHandle.x,
               current.outHandle.y,
               next.inHandle.x,
@@ -367,11 +726,11 @@ export class PixiSceneRenderer {
               next.anchor.y,
             )
           }
-          this.fields.closePath()
+          this.content.closePath()
         }
       }
 
-      this.fields.fill({ color, alpha: 0.12 }).stroke({ color, alpha: 0.72, width: lineWidth })
+      this.content.fill({ color, alpha: 0.12 }).stroke({ color, alpha: 0.72, width: lineWidth })
       this.drawFieldLegend(entity, state, color)
     }
   }
@@ -408,12 +767,12 @@ export class PixiSceneRenderer {
       const magnitude = Math.abs(entity.field.bzTesla)
       const radius = Math.min(14, 8 + 2 * Math.log10(1 + magnitude)) / pixelsPerMeter
       const stroke = { color, alpha: 1, width: 2 / pixelsPerMeter }
-      this.fields.circle(position.x, position.y, radius).stroke(stroke)
+      this.content.circle(position.x, position.y, radius).stroke(stroke)
       if (entity.field.bzTesla >= 0) {
-        this.fields.circle(position.x, position.y, 2.2 / pixelsPerMeter).fill({ color, alpha: 1 })
+        this.content.circle(position.x, position.y, 2.2 / pixelsPerMeter).fill({ color, alpha: 1 })
       } else {
         const diagonal = radius * 0.55
-        this.fields
+        this.content
           .moveTo(position.x - diagonal, position.y - diagonal)
           .lineTo(position.x + diagonal, position.y + diagonal)
           .moveTo(position.x - diagonal, position.y + diagonal)
@@ -440,8 +799,8 @@ export class PixiSceneRenderer {
     const headLength = 8 / pixelsPerMeter
     const normal = { x: -direction.y, y: direction.x }
     const stroke = { color, alpha: 1, width: 2.2 / pixelsPerMeter }
-    this.fields.moveTo(start.x, start.y).lineTo(end.x, end.y).stroke(stroke)
-    this.fields
+    this.content.moveTo(start.x, start.y).lineTo(end.x, end.y).stroke(stroke)
+    this.content
       .moveTo(end.x, end.y)
       .lineTo(
         end.x - direction.x * headLength + normal.x * headLength * 0.55,
@@ -455,31 +814,134 @@ export class PixiSceneRenderer {
       .stroke(stroke)
   }
 
+  private drawBooleanFields(state: PixiRenderState, results: ResolvedBooleanResult[]): void {
+    const lineWidth = 1.25 / state.camera.pixelsPerMeter
+    for (const result of results) {
+      const node = findBooleanNode(state.scene.rootItems, result.nodeId)
+      if (!result.valid || result.kind !== 'field' || !node?.visible) {
+        continue
+      }
+      const color =
+        result.fieldType === 'uniformGravity'
+          ? colors.fieldGravity
+          : result.fieldType === 'uniformElectric'
+            ? colors.fieldElectric
+            : colors.fieldMagnetic
+      for (const region of result.regions) {
+        appendBooleanGeometry(
+          this.content,
+          region.geometry,
+          { color, alpha: 0.12 },
+          { color, alpha: 0.72, width: lineWidth },
+        )
+      }
+    }
+  }
+
+  private drawBooleanBodies(
+    state: PixiRenderState,
+    results: ResolvedBooleanResult[],
+    transforms: ReadonlyMap<EntityId, { position: Vec2; angleRad: number }>,
+  ): void {
+    const lineWidth = 1.5 / state.camera.pixelsPerMeter
+    for (const result of results) {
+      if (!findBooleanNode(state.scene.rootItems, result.nodeId)?.visible) continue
+      if (!result.valid) {
+        for (const outline of result.sourceOutlines) {
+          appendBooleanGeometry(this.content, outline, null, {
+            color: colors.booleanInvalid,
+            alpha: 0.72,
+            width: lineWidth,
+          })
+        }
+        continue
+      }
+      if (result.kind !== 'body') continue
+      const transform = transforms.get(result.resultId) ?? {
+        position: result.centerOfMass,
+        angleRad: result.angleRad,
+      }
+      const geometry = transformBooleanBodyGeometry(result, transform.position, transform.angleRad)
+      appendBooleanGeometry(
+        this.content,
+        geometry,
+        { color: colors.booleanBodyFill, alpha: 0.78 },
+        { color: colors.booleanBodyStroke, alpha: 0.96, width: lineWidth },
+      )
+      const center = transform.position
+      this.content
+        .circle(center.x, center.y, 2.2 / state.camera.pixelsPerMeter)
+        .fill({ color: 0xffffff, alpha: 0.85 })
+      if (result.chargeC !== 0) {
+        const markRadius = 6 / state.camera.pixelsPerMeter
+        this.content.moveTo(center.x - markRadius, center.y).lineTo(center.x + markRadius, center.y)
+        if (result.chargeC > 0) {
+          this.content
+            .moveTo(center.x, center.y - markRadius)
+            .lineTo(center.x, center.y + markRadius)
+        }
+        this.content.stroke({ color: 0xffffff, alpha: 0.95, width: lineWidth })
+      }
+    }
+  }
+
+  private drawBooleanOverlays(
+    state: PixiRenderState,
+    results: ResolvedBooleanResult[],
+    transforms: ReadonlyMap<EntityId, { position: Vec2; angleRad: number }>,
+  ): void {
+    if (state.showOverlays === false) return
+    const selected = new Set(state.selectedIds)
+    const lineWidth = 2 / state.camera.pixelsPerMeter
+    for (const result of results) {
+      if (!selected.has(result.resultId)) continue
+      const geometry =
+        result.valid && result.kind === 'body'
+          ? (() => {
+              const transform = transforms.get(result.resultId)
+              return transformBooleanBodyGeometry(result, transform?.position, transform?.angleRad)
+            })()
+          : result.valid
+            ? result.geometry
+            : result.sourceOutlines.reduce<BooleanMultiPolygon>(
+                (combined, outline) => [...combined, ...outline],
+                [],
+              )
+      appendBooleanGeometry(this.overlays, geometry, null, {
+        color: result.valid ? colors.selection : colors.booleanInvalid,
+        alpha: 1,
+        width: lineWidth,
+      })
+    }
+  }
+
   private drawGrounds(
     entities: SceneEntity[],
     network: GroundPathNetwork,
     pixelsPerMeter: number,
+    entityId: EntityId,
   ): void {
-    this.grounds.clear()
     const lineWidth = 3 / pixelsPerMeter
 
-    for (const effective of network.groundPaths.values()) {
-      appendResolvedGroundPath(this.grounds, effective.path)
-      this.grounds.stroke({ color: colors.ground, alpha: 0.95, width: lineWidth })
+    const ground = network.groundPaths.get(entityId)
+    if (ground) {
+      appendResolvedGroundPath(this.content, ground.path)
+      this.content.stroke({ color: colors.ground, alpha: 0.95, width: lineWidth })
+      return
     }
-
-    for (const resolved of network.jointPaths.values()) {
-      if (!resolved.path || resolved.joint.id === AUTO_JOINT_PREVIEW_ID) continue
-      appendResolvedGroundPath(this.grounds, resolved.path)
-      this.grounds.stroke({ color: colors.ground, alpha: 0.95, width: lineWidth })
+    const joint = network.jointPaths.get(entityId)
+    if (joint?.path && joint.joint.id !== AUTO_JOINT_PREVIEW_ID) {
+      appendResolvedGroundPath(this.content, joint.path)
+      this.content.stroke({ color: colors.ground, alpha: 0.95, width: lineWidth })
+      return
     }
-
-    const resolvedGroundIds = new Set(network.groundPaths.keys())
-    for (const entity of entities) {
-      if (entity.kind !== 'ground' || resolvedGroundIds.has(entity.id)) continue
-      appendGroundPath(this.grounds, entity.geometry)
-      this.grounds.stroke({ color: colors.groundJointInvalid, alpha: 0.72, width: lineWidth })
-    }
+    const entity = entities.find(
+      (candidate): candidate is Extract<SceneEntity, { kind: 'ground' }> =>
+        candidate.id === entityId && candidate.kind === 'ground',
+    )
+    if (!entity) return
+    appendGroundPath(this.content, entity.geometry)
+    this.content.stroke({ color: colors.groundJointInvalid, alpha: 0.72, width: lineWidth })
   }
 
   private drawGroundJoints(
@@ -495,11 +957,13 @@ export class PixiSceneRenderer {
     const jointRadius = 5 / pixelsPerMeter
 
     if (state.activeTool === 'groundJoint') {
-      const lockedLayers = new Set(
-        state.scene.layers.filter((layer) => layer.locked).map((layer) => layer.id),
-      )
       for (const entity of entities) {
-        if (entity.kind !== 'ground' || entity.locked || lockedLayers.has(entity.layerId)) continue
+        if (
+          entity.kind !== 'ground' ||
+          entity.locked ||
+          isTreeItemEffectivelyLocked(state.scene.rootItems, entity.id)
+        )
+          continue
         for (const endpoint of ['start', 'end'] as const) {
           const resolved = resolveGroundEndpoint(entities, { groundId: entity.id, endpoint })
           if (!resolved) continue
@@ -623,39 +1087,54 @@ export class PixiSceneRenderer {
     }
   }
 
-  private drawConnectors(entities: SceneEntity[], pixelsPerMeter: number): void {
-    this.connectors.clear()
+  private drawConnectors(
+    entities: SceneEntity[],
+    groundPathNetwork: GroundPathNetwork,
+    pixelsPerMeter: number,
+    runtimeConnectors: Record<EntityId, RuntimeConnectorState>,
+    booleanBodyTransforms: ReadonlyMap<EntityId, { position: Vec2; angleRad: number }>,
+    entityId: EntityId,
+  ): void {
     const lineWidth = 2 / pixelsPerMeter
 
     for (const entity of entities) {
-      if (entity.kind !== 'connector') continue
-      const start = resolveConnectorEndpoint(entities, entity.a)
-      const end = resolveConnectorEndpoint(entities, entity.b)
+      if (entity.kind !== 'connector' || entity.id !== entityId) continue
+      const runtimePoints = runtimeConnectors[entity.id]?.points
+      if (runtimePoints && runtimePoints.length >= 2) {
+        if (entity.connector.type === 'spring') {
+          const start = runtimePoints[0]!
+          const end = runtimePoints[runtimePoints.length - 1]!
+          this.drawSpring(start, end, lineWidth)
+          this.drawSpringEndBars(entity, start, end, lineWidth)
+          continue
+        }
+        this.content.moveTo(runtimePoints[0]!.x, runtimePoints[0]!.y)
+        for (const point of runtimePoints.slice(1)) this.content.lineTo(point.x, point.y)
+        this.content.stroke({
+          color: colors.connector,
+          alpha: entity.connector.type === 'rod' ? 1 : 0.9,
+          width: Math.max(lineWidth, entity.radiusM * 2),
+        })
+        continue
+      }
+      const start = resolveConnectorEndpoint(
+        entities,
+        entity.a,
+        groundPathNetwork,
+        booleanBodyTransforms,
+      )
+      const end = resolveConnectorEndpoint(
+        entities,
+        entity.b,
+        groundPathNetwork,
+        booleanBodyTransforms,
+      )
       if (!start || !end) continue
       if (entity.connector.type === 'spring') {
-        const dx = end.x - start.x
-        const dy = end.y - start.y
-        const length = Math.hypot(dx, dy)
-        if (length <= Number.EPSILON) continue
-        const normal = { x: -dy / length, y: dx / length }
-        const turns = 12
-        const amplitude = Math.min(0.12, length / 10)
-        this.connectors.moveTo(start.x, start.y)
-        for (let index = 1; index < turns; index += 1) {
-          const ratio = index / turns
-          const offset = (index % 2 === 0 ? -1 : 1) * amplitude
-          this.connectors.lineTo(
-            start.x + dx * ratio + normal.x * offset,
-            start.y + dy * ratio + normal.y * offset,
-          )
-        }
-        this.connectors.lineTo(end.x, end.y).stroke({
-          color: colors.connector,
-          alpha: 0.95,
-          width: lineWidth,
-        })
+        this.drawSpring(start, end, lineWidth)
+        this.drawSpringEndBars(entity, start, end, lineWidth)
       } else {
-        this.connectors
+        this.content
           .moveTo(start.x, start.y)
           .lineTo(end.x, end.y)
           .stroke({
@@ -664,6 +1143,49 @@ export class PixiSceneRenderer {
             width: entity.connector.type === 'rod' ? lineWidth * 1.8 : lineWidth,
           })
       }
+    }
+  }
+
+  private drawSpring(start: Vec2, end: Vec2, lineWidth: number): void {
+    const dx = end.x - start.x
+    const dy = end.y - start.y
+    const length = Math.hypot(dx, dy)
+    if (length <= Number.EPSILON) return
+    const normal = { x: -dy / length, y: dx / length }
+    const turns = 12
+    const amplitude = Math.min(0.12, length / 10)
+    this.content.moveTo(start.x, start.y)
+    for (let index = 1; index < turns; index += 1) {
+      const ratio = index / turns
+      const offset = (index % 2 === 0 ? -1 : 1) * amplitude
+      this.content.lineTo(
+        start.x + dx * ratio + normal.x * offset,
+        start.y + dy * ratio + normal.y * offset,
+      )
+    }
+    this.content.lineTo(end.x, end.y).stroke({
+      color: colors.connector,
+      alpha: 0.95,
+      width: lineWidth,
+    })
+  }
+
+  private drawSpringEndBars(
+    entity: ConnectorEntity,
+    start: Vec2,
+    end: Vec2,
+    lineWidth: number,
+  ): void {
+    for (const [endpoint, definition] of [
+      ['start', entity.a],
+      ['end', entity.b],
+    ] as const) {
+      if (definition.type !== 'free') continue
+      const bar = createSpringEndBar(start, end, endpoint, entity.radiusM)
+      this.content
+        .moveTo(bar.start.x, bar.start.y)
+        .lineTo(bar.end.x, bar.end.y)
+        .stroke({ color: colors.connector, alpha: 1, width: lineWidth * 1.6 })
     }
   }
 
@@ -748,21 +1270,22 @@ export class PixiSceneRenderer {
   }
 
   private drawBodies(entities: SceneEntity[], pixelsPerMeter: number): void {
-    this.bodies.clear()
     const lineWidth = 2 / pixelsPerMeter
 
     for (const entity of entities) {
       if (entity.kind !== 'body') continue
       const { position, angleRad } = entity.transform
       if (entity.shape.type === 'box') {
-        this.bodies.poly(
+        this.content.poly(
           flattenPoints(
             rotatedRectangle(position, entity.shape.width, entity.shape.height, angleRad),
           ),
           true,
         )
+      } else if (entity.shape.type === 'circle') {
+        this.content.circle(position.x, position.y, entity.shape.radius)
       } else {
-        this.bodies.circle(position.x, position.y, entity.shape.radius)
+        this.content.poly(flattenPoints(sampleBezierBodyWorldPoints(entity)), true)
       }
       const bodyColor =
         entity.shape.type === 'circle'
@@ -770,50 +1293,69 @@ export class PixiSceneRenderer {
             ? colors.collisionOn
             : colors.collisionOff
           : colors.bodyFill
-      this.bodies
+      this.content
         .fill({ color: bodyColor, alpha: 0.9 })
         .stroke({ color: colors.bodyStroke, alpha: 0.95, width: lineWidth })
 
-      const radius =
-        entity.shape.type === 'circle'
-          ? entity.shape.radius
-          : Math.min(entity.shape.width, entity.shape.height) / 2
+      const radius = (() => {
+        if (entity.shape.type === 'circle') return entity.shape.radius
+        if (entity.shape.type === 'box')
+          return Math.min(entity.shape.width, entity.shape.height) / 2
+        return Math.max(
+          0.001,
+          ...entity.shape.nodes.map((node) => Math.hypot(node.anchor.x, node.anchor.y)),
+        )
+      })()
       const direction = rotateVector({ x: radius * 0.8, y: 0 }, angleRad)
-      this.bodies
+      this.content
         .moveTo(position.x, position.y)
         .lineTo(position.x + direction.x, position.y + direction.y)
         .stroke({ color: 0xe9f5ff, alpha: 0.7, width: lineWidth })
 
       if (entity.chargeC !== 0) {
         const markRadius = Math.max(5 / pixelsPerMeter, radius * 0.3)
-        this.bodies
+        this.content
           .moveTo(position.x - markRadius, position.y)
           .lineTo(position.x + markRadius, position.y)
         if (entity.chargeC > 0) {
-          this.bodies
+          this.content
             .moveTo(position.x, position.y - markRadius)
             .lineTo(position.x, position.y + markRadius)
         }
-        this.bodies.stroke({ color: 0xffffff, alpha: 0.95, width: lineWidth * 1.2 })
+        this.content.stroke({ color: 0xffffff, alpha: 0.95, width: lineWidth * 1.2 })
       }
     }
   }
 
-  private drawOverlays(state: PixiRenderState, entities: SceneEntity[]): void {
+  private drawOverlays(
+    state: PixiRenderState,
+    entities: SceneEntity[],
+    groundPathNetwork: GroundPathNetwork,
+    booleanBodyTransforms: ReadonlyMap<EntityId, { position: Vec2; angleRad: number }>,
+  ): void {
     this.overlays.clear()
     if (state.showOverlays === false) return
     const lineWidth = 1.5 / state.camera.pixelsPerMeter
     const handleRadius = 5 / state.camera.pixelsPerMeter
     const selected = new Set(state.selectedIds)
-    const lockedLayerIds = new Set(
-      state.scene.layers.filter((layer) => layer.locked).map((layer) => layer.id),
-    )
     const overlayEntities = entities.map((entity) =>
-      lockedLayerIds.has(entity.layerId) ? { ...entity, locked: true } : entity,
+      isTreeItemEffectivelyLocked(state.scene.rootItems, entity.id)
+        ? { ...entity, locked: true }
+        : entity,
     )
     const scaleBounds =
       state.activeTool === 'scale' && !state.runtimeLocked
-        ? getScalableSelectionBounds(overlayEntities, state.selectedIds)
+        ? selectionTargetBounds(
+            listEditingSelectionTargets(
+              state.scene,
+              overlayEntities,
+              state.runtimeBodies,
+              new Set(Object.keys(state.previewEntities)),
+              new Set(state.selectedIds),
+            ),
+            state.selectedIds,
+            true,
+          )
         : null
 
     for (const entity of entities) {
@@ -822,7 +1364,7 @@ export class PixiSceneRenderer {
         scaleBounds &&
         isScalableEntity(entity) &&
         !entity.locked &&
-        !lockedLayerIds.has(entity.layerId)
+        !isTreeItemEffectivelyLocked(state.scene.rootItems, entity.id)
       ) {
         continue
       }
@@ -841,18 +1383,51 @@ export class PixiSceneRenderer {
         continue
       }
       if (entity.kind === 'connector') {
-        const start = resolveConnectorEndpoint(entities, entity.a)
-        const end = resolveConnectorEndpoint(entities, entity.b)
+        const start = resolveConnectorEndpoint(
+          entities,
+          entity.a,
+          groundPathNetwork,
+          booleanBodyTransforms,
+        )
+        const end = resolveConnectorEndpoint(
+          entities,
+          entity.b,
+          groundPathNetwork,
+          booleanBodyTransforms,
+        )
         if (!start || !end) continue
         this.overlays
           .moveTo(start.x, start.y)
           .lineTo(end.x, end.y)
           .stroke({ color: colors.selection, alpha: 0.75, width: lineWidth * 1.5 })
-        for (const point of [start, end]) {
+        for (const [index, point] of [start, end].entries()) {
           this.overlays
             .circle(point.x, point.y, handleRadius * 1.25)
             .fill({ color: colors.connector, alpha: 1 })
             .stroke({ color: colors.selection, alpha: 1, width: lineWidth })
+          const glyphHeight = 7 / state.camera.pixelsPerMeter
+          const glyphWidth = 5 / state.camera.pixelsPerMeter
+          const glyphX = point.x + handleRadius * 1.8
+          const glyphY = point.y - glyphHeight / 2
+          if (index === 0) {
+            this.overlays
+              .moveTo(glyphX, glyphY + glyphHeight)
+              .lineTo(glyphX + glyphWidth / 2, glyphY)
+              .lineTo(glyphX + glyphWidth, glyphY + glyphHeight)
+              .moveTo(glyphX + glyphWidth * 0.25, glyphY + glyphHeight * 0.58)
+              .lineTo(glyphX + glyphWidth * 0.75, glyphY + glyphHeight * 0.58)
+              .stroke({ color: colors.selection, alpha: 1, width: lineWidth })
+          } else {
+            this.overlays
+              .moveTo(glyphX, glyphY)
+              .lineTo(glyphX, glyphY + glyphHeight)
+              .moveTo(glyphX, glyphY)
+              .lineTo(glyphX + glyphWidth, glyphY + glyphHeight * 0.25)
+              .lineTo(glyphX, glyphY + glyphHeight * 0.5)
+              .lineTo(glyphX + glyphWidth, glyphY + glyphHeight * 0.75)
+              .lineTo(glyphX, glyphY + glyphHeight)
+              .stroke({ color: colors.selection, alpha: 1, width: lineWidth })
+          }
         }
         continue
       }
@@ -914,6 +1489,25 @@ export class PixiSceneRenderer {
           }
         }
       }
+
+      if (entity.kind === 'body' && entity.shape.type === 'bezierPath') {
+        for (const node of worldBezierPathNodes(entity)) {
+          this.overlays
+            .moveTo(node.anchor.x, node.anchor.y)
+            .lineTo(node.inHandle.x, node.inHandle.y)
+            .moveTo(node.anchor.x, node.anchor.y)
+            .lineTo(node.outHandle.x, node.outHandle.y)
+            .stroke({ color: colors.selection, alpha: 0.62, width: lineWidth })
+          this.overlays
+            .circle(node.anchor.x, node.anchor.y, handleRadius * 1.1)
+            .fill({ color: colors.selection, alpha: 1 })
+          for (const handle of [node.inHandle, node.outHandle]) {
+            this.overlays
+              .circle(handle.x, handle.y, handleRadius * 0.82)
+              .fill({ color: colors.connector, alpha: 1 })
+          }
+        }
+      }
     }
 
     if (scaleBounds) {
@@ -954,17 +1548,16 @@ export class PixiSceneRenderer {
         .stroke({ color: colors.selection, alpha: 0.9, width: lineWidth })
     }
 
-    if (state.connectorStartBodyId) {
-      const body = entities.find(
-        (entity) => entity.id === state.connectorStartBodyId && entity.kind === 'body',
+    if (state.connectorStartEndpoint) {
+      const endpoint = resolveConnectorEndpoint(
+        entities,
+        state.connectorStartEndpoint,
+        groundPathNetwork,
+        booleanBodyTransforms,
       )
-      if (body?.kind === 'body') {
+      if (endpoint) {
         this.overlays
-          .circle(
-            body.transform.position.x,
-            body.transform.position.y,
-            10 / state.camera.pixelsPerMeter,
-          )
+          .circle(endpoint.x, endpoint.y, 10 / state.camera.pixelsPerMeter)
           .stroke({ color: colors.connector, alpha: 1, width: 2 * lineWidth })
       }
     }

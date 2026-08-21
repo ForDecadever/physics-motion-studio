@@ -20,67 +20,110 @@ import {
 } from '../../editor/ground/autoGroundJoint'
 import {
   createScaleHandleGeometry,
+  clampBodyLocalAnchor,
+  createBodyCenterConnectorEndpoint,
+  connectorEndpointTargetId,
   distance,
   dot,
-  getEntityById,
   getEntityTransform,
-  getScalableSelectionBounds,
   isScalableEntity,
   resolveConnectorEndpoint,
+  rotateVector,
   scaleEntitiesAroundPivot,
   snapBodyToSurfaces,
+  snapBooleanBodyToSurfaces,
   subtract,
+  type BodySnapSurfaceTarget,
   type ScaleHandle,
   worldToLocalAnchor,
   withEntityTransform,
 } from '../../editor/geometry/entityGeometry'
 import {
-  entitiesInsideBounds,
   findNearestGroundEndpoint,
+  findTopBooleanResult,
   findTopEntity,
+  snappedGroundPathRatio,
+  type GridSnapStep,
 } from '../../editor/geometry/hitTest'
+import {
+  listEditingSelectionTargets,
+  selectionTargetBounds,
+  selectionSourceEntityIds,
+  selectionTargetsInsideBounds,
+} from '../../editor/geometry/selectionTargets'
 import { PixiSceneRenderer } from '../../renderer/pixi/PixiSceneRenderer'
-import { resolveRenderedEntity } from '../../renderer/pixi/renderEntityState'
+import {
+  resolveBooleanBodyRenderTransform,
+  resolveRenderedEntity,
+} from '../../renderer/pixi/renderEntityState'
 import {
   createArcGround,
   createBall,
   createBezierGround,
+  createBezierBlock,
   createBlock,
   createElectricField,
   createGravityField,
   createGroundJoint,
   createLineGround,
   createMagneticField,
+  createParticleSource,
   createRod,
   createRope,
   createSpring,
 } from '../../scene/model/entityFactories'
-import { createSmoothBezierPathNodes, moveBezierPathPoint } from '../../scene/model/bezierPath'
+import {
+  createSmoothBezierPathNodes,
+  moveBezierPathPoint,
+  toggleBezierPathNodeMode,
+  type BezierPathPointKey,
+} from '../../scene/model/bezierPath'
+import {
+  analyzeBezierBodyPath,
+  centerBezierPathNodes,
+  worldBezierPathNodes,
+} from '../../scene/model/bodyPath'
+import {
+  createCurvedBlockPresetNodes,
+  createTriangleBlockNodes,
+} from '../../scene/model/blockPresets'
 import { sameGroundEndpoint } from '../../scene/model/groundEndpoints'
+import { minimumFixedRopeLength } from '../../scene/model/connectorRules'
+import {
+  isTreeItemEffectivelyLocked,
+  isTreeItemEffectivelyVisible,
+} from '../../scene/model/booleanLayerGraph'
+import {
+  booleanBodyWorldToLocal,
+  resolveBooleanScene,
+  transformBooleanBodyGeometry,
+} from '../../scene/model/booleanGeometry'
 import {
   buildGroundPathNetwork,
+  type GroundPathNetwork,
   type GroundJointPathIssue,
   type ResolvedGroundJointPath,
 } from '../../scene/model/groundPath'
 import type {
-  BezierPathNode,
   BodyEntity,
+  ConnectorEndpoint,
   ConnectorEntity,
   EntityId,
   FieldEntity,
   GroundEndpointRef,
   GroundEntity,
-  LayerId,
   SceneEntity,
   Vec2,
 } from '../../scene/model/types'
 import { useDocumentStore } from '../../stores/documentStore'
 import {
   useEditorStore,
+  type BlockToolShape,
   type BodyToolPreset,
   type EditorTool,
   type FieldToolPreset,
   type FieldRegionToolShape,
+  type ParticleSourceToolShape,
 } from '../../stores/editorStore'
 import { isSimulationRuntimeLocked, useSimulationStore } from '../../stores/simulationStore'
 import styles from './CanvasWorkspace.module.css'
@@ -89,11 +132,32 @@ type Interaction =
   | { type: 'idle' }
   | { type: 'pan'; startScreen: Vec2; startCamera: Camera2D }
   | { type: 'marquee'; startWorld: Vec2 }
-  | { type: 'move'; startWorld: Vec2; originals: SceneEntity[]; anchorId: EntityId }
+  | {
+      type: 'move'
+      startWorld: Vec2
+      originals: SceneEntity[]
+      anchorId: EntityId
+      booleanResultIds: EntityId[]
+    }
+  | {
+      type: 'booleanMove'
+      startWorld: Vec2
+      pivot: Vec2
+      resultId: EntityId
+      originals: SceneEntity[]
+      selectedTargetIds: EntityId[]
+    }
   | {
       type: 'rotate'
       pivot: Vec2
       startPointerAngle: number
+      originals: SceneEntity[]
+    }
+  | {
+      type: 'booleanRotate'
+      pivot: Vec2
+      startPointerAngle: number
+      resultId: EntityId
       originals: SceneEntity[]
     }
   | {
@@ -102,26 +166,38 @@ type Interaction =
       startHandle: Vec2
       originals: SceneEntity[]
       targetIds: EntityId[]
+      booleanResultIds: EntityId[]
       cursor: 'nwse-resize' | 'nesw-resize'
     }
   | {
+      type: 'booleanScale'
+      pivot: Vec2
+      startHandle: Vec2
+      resultId: EntityId
+      sourceIds: EntityId[]
+      originals: SceneEntity[]
+    }
+  | {
       type: 'create'
-      tool: 'ground' | 'body' | 'field'
+      tool: 'ground' | 'body' | 'field' | 'particleSource'
       startWorld: Vec2
       draftId: EntityId
-      layerId: LayerId
+      layerId: string
       index: number
       groundShape: 'line' | 'arc' | 'cubicBezier'
       bodyPreset: BodyToolPreset
+      blockShape: BlockToolShape
+      triangleAngleDeg: number
       fieldPreset: FieldToolPreset
       fieldRegionShape: FieldRegionToolShape
+      particleSourceShape: ParticleSourceToolShape
       pendingGroundEndpoint: GroundEndpointRef | null
     }
   | {
       type: 'groundPen'
       startWorld: Vec2
       draftId: EntityId
-      layerId: LayerId
+      layerId: string
       index: number
       pendingGroundEndpoint: GroundEndpointRef | null
     }
@@ -129,9 +205,16 @@ type Interaction =
       type: 'fieldPen'
       points: Vec2[]
       draftId: EntityId
-      layerId: LayerId
+      layerId: string
       index: number
       fieldPreset: FieldToolPreset
+    }
+  | {
+      type: 'bodyPen'
+      points: Vec2[]
+      draftId: EntityId
+      layerId: string
+      index: number
     }
   | {
       type: 'editBezierPoint'
@@ -147,7 +230,17 @@ type Interaction =
       type: 'editFieldPathPoint'
       original: FieldEntity
       nodeIndex: number
-      pointKey: keyof BezierPathNode
+      pointKey: BezierPathPointKey
+      startScreen: Vec2
+      toggleCandidate: boolean
+    }
+  | {
+      type: 'editBodyPathPoint'
+      original: BodyEntity
+      nodeIndex: number
+      pointKey: BezierPathPointKey
+      startScreen: Vec2
+      toggleCandidate: boolean
     }
   | {
       type: 'editConnectorAnchor'
@@ -242,14 +335,119 @@ function resolveGroundJointPath(
   return buildGroundPathNetwork([...entities, joint]).jointPaths.get(joint.id) ?? null
 }
 
-function activeLayerId(): LayerId | null {
-  const scene = useDocumentStore.getState().scene
-  const requestedId = useEditorStore.getState().activeLayerId
-  const requestedLayer = scene.layers.find((layer) => layer.id === requestedId)
-  if (requestedLayer?.visible && !requestedLayer.locked) return requestedLayer.id
-  return (
-    scene.layers.find((layer) => layer.visible && !layer.locked)?.id ?? scene.layers[0]?.id ?? null
-  )
+function connectorEndpointAt(
+  entities: SceneEntity[],
+  point: Vec2,
+  toleranceM: number,
+  fallbackEndpoint: ConnectorEndpoint | null,
+  gridSnap: GridSnapStep | null = null,
+): ConnectorEndpoint | null {
+  const hit =
+    findTopEntity(
+      entities.filter((entity) => entity.kind === 'body'),
+      point,
+      toleranceM,
+    ) ??
+    findTopEntity(
+      entities.filter((entity) => entity.kind === 'groundJoint'),
+      point,
+      toleranceM,
+    ) ??
+    findTopEntity(
+      entities.filter((entity) => entity.kind === 'ground'),
+      point,
+      toleranceM,
+    )
+  if (!hit) return fallbackEndpoint
+  if (hit.kind === 'body') {
+    return createBodyCenterConnectorEndpoint(hit)
+  }
+  const network = buildGroundPathNetwork(entities)
+  if (hit.kind === 'ground') {
+    const path = network.groundPaths.get(hit.id)?.path
+    if (!path) return fallbackEndpoint
+    return {
+      type: 'ground',
+      groundId: hit.id,
+      pathRatio: snappedGroundPathRatio(path, point, gridSnap),
+    }
+  }
+  const path = network.jointPaths.get(hit.id)?.path
+  if (!path) return fallbackEndpoint
+  return {
+    type: 'groundJoint',
+    groundJointId: hit.id,
+    pathRatio: snappedGroundPathRatio(path, point, gridSnap),
+  }
+}
+
+function resolveCanvasConnectorEndpoint(
+  entities: SceneEntity[],
+  endpoint: ConnectorEndpoint,
+  groundPathNetwork: GroundPathNetwork,
+): Vec2 | null {
+  if (endpoint.type === 'body') {
+    const result = resolveBooleanScene(useDocumentStore.getState().scene).byResultId.get(
+      endpoint.bodyId,
+    )
+    if (result?.valid && result.kind === 'body') {
+      const runtime = useSimulationStore.getState().runtimeBodies[result.resultId]
+      const position = runtime?.position ?? result.centerOfMass
+      const angle = runtime?.angleRad ?? result.angleRad
+      const cosine = Math.cos(angle)
+      const sine = Math.sin(angle)
+      return {
+        x: position.x + endpoint.localAnchor.x * cosine - endpoint.localAnchor.y * sine,
+        y: position.y + endpoint.localAnchor.x * sine + endpoint.localAnchor.y * cosine,
+      }
+    }
+  }
+  return resolveConnectorEndpoint(entities, endpoint, groundPathNetwork)
+}
+
+function moveConnectorEndpoint(
+  connector: ConnectorEntity,
+  endpointKey: 'a' | 'b',
+  endpoint: ConnectorEndpoint,
+  entities: SceneEntity[],
+  point: Vec2,
+  toleranceM: number,
+  gridSnap: GridSnapStep | null,
+): ConnectorEndpoint {
+  if (connector.connector.type === 'spring') {
+    const attached = connectorEndpointAt(entities, point, toleranceM, null, gridSnap)
+    if (attached) return attached
+    return { type: 'free', position: point }
+  }
+  if (endpoint.type === 'body') {
+    const body = entities.find(
+      (entity): entity is BodyEntity => entity.kind === 'body' && entity.id === endpoint.bodyId,
+    )
+    if (!body) return endpoint
+    return {
+      ...endpoint,
+      localAnchor: clampBodyLocalAnchor(body, worldToLocalAnchor(body, point)),
+    }
+  }
+  const network: GroundPathNetwork = buildGroundPathNetwork(entities)
+  const path =
+    endpoint.type === 'ground'
+      ? network.groundPaths.get(endpoint.groundId)?.path
+      : endpoint.type === 'groundJoint'
+        ? network.jointPaths.get(endpoint.groundJointId)?.path
+        : null
+  if (!path) return endpoint
+  const pathRatio = snappedGroundPathRatio(path, point, gridSnap)
+  return endpoint.type === 'ground'
+    ? { ...endpoint, pathRatio }
+    : endpoint.type === 'groundJoint'
+      ? { ...endpoint, pathRatio }
+      : endpoint
+}
+
+function entityFactoryContextId(): string {
+  // 实体工厂的首个参数仅保留调用签名，不再写入实体或表示图层归属。
+  return 'scene-root'
 }
 
 function nextEntityIndex(kind: SceneEntity['kind']): number {
@@ -313,8 +511,36 @@ function getDraft(
 
   if (tool === 'body') {
     if (interaction.bodyPreset === 'block') {
+      if (interaction.blockShape === 'triangle') {
+        const useDefault = useDefaultSize && distance(start, end) < 0.05
+        const baseLength = useDefault ? 3 : end.x - start.x
+        const riseDirection = useDefault || end.y >= start.y ? 1 : -1
+        const body = createBezierBlock(
+          layerId,
+          createTriangleBlockNodes(start, baseLength, interaction.triangleAngleDeg, riseDirection),
+          index,
+        )
+        if (body) return { ...body, id: draftId, name: `物块 ${index}` }
+      }
       const defaultEnd = { x: start.x + 0.5, y: start.y + 0.5 }
       const resolvedEnd = useDefaultSize && distance(start, end) < 0.05 ? defaultEnd : end
+      if (
+        interaction.blockShape === 'quarterRamp' ||
+        interaction.blockShape === 'semicircleCutout' ||
+        interaction.blockShape === 'quarterCircleCutout'
+      ) {
+        const body = createBezierBlock(
+          layerId,
+          createCurvedBlockPresetNodes(
+            interaction.blockShape,
+            start,
+            Math.max(0.2, Math.abs(resolvedEnd.x - start.x) * 2),
+            Math.max(0.2, Math.abs(resolvedEnd.y - start.y) * 2),
+          ),
+          index,
+        )
+        if (body) return { ...body, id: draftId, name: `物块 ${index}` }
+      }
       return {
         ...createBlock(
           layerId,
@@ -329,6 +555,21 @@ function getDraft(
     const radius =
       useDefaultSize && distance(start, end) < 0.05 ? 0.5 : Math.max(0.15, distance(start, end))
     return { ...createBall(layerId, start, radius, index), id: draftId }
+  }
+
+  if (tool === 'particleSource') {
+    if (interaction.particleSourceShape === 'point') {
+      return {
+        ...createParticleSource(layerId, { type: 'point', position: start }, index),
+        id: draftId,
+      }
+    }
+    const resolvedEnd =
+      useDefaultSize && distance(start, end) < 0.05 ? { x: start.x + 2, y: start.y } : end
+    return {
+      ...createParticleSource(layerId, { type: 'line', start, end: resolvedEnd }, index),
+      id: draftId,
+    }
   }
 
   const defaultEnd = { x: start.x + 4, y: start.y + 3 }
@@ -375,8 +616,11 @@ function createGroundPenDraft(
       index: interaction.index,
       groundShape: 'cubicBezier',
       bodyPreset: 'ball',
+      blockShape: 'rectangle',
+      triangleAngleDeg: 30,
       fieldPreset: 'uniformGravity',
       fieldRegionShape: 'rectangle',
+      particleSourceShape: 'point',
       pendingGroundEndpoint: interaction.pendingGroundEndpoint,
     },
     end,
@@ -410,6 +654,84 @@ function createFieldPenDraft(
   }
 }
 
+function createBodyPenDraft(
+  interaction: Extract<Interaction, { type: 'bodyPen' }>,
+  points: Vec2[],
+): BodyEntity {
+  const safePoints = points.length >= 3 ? points : [...points, ...points.slice(-1)]
+  const nodes = createSmoothBezierPathNodes(safePoints)
+  const validBody = createBezierBlock(interaction.layerId, nodes, interaction.index)
+  if (validBody) return { ...validBody, id: interaction.draftId }
+  return {
+    ...createBlock(interaction.layerId, { x: 0, y: 0 }, 1, 1, interaction.index),
+    id: interaction.draftId,
+    name: `钢笔物块 ${interaction.index}`,
+    shape: { type: 'bezierPath', nodes },
+    transform: { position: { x: 0, y: 0 }, angleRad: 0 },
+  }
+}
+
+function finalizeBodyPen(
+  interaction: Extract<Interaction, { type: 'bodyPen' }>,
+): BodyEntity | null {
+  return createBezierBlock(
+    interaction.layerId,
+    createSmoothBezierPathNodes(interaction.points),
+    interaction.index,
+  )
+}
+
+function withEditedBodyPath(
+  original: BodyEntity,
+  nodeIndex: number,
+  pointKey: BezierPathPointKey,
+  worldPoint: Vec2,
+  independent: boolean,
+): BodyEntity {
+  if (original.shape.type !== 'bezierPath') return original
+  const localPoint = rotateVector(
+    subtract(worldPoint, original.transform.position),
+    -original.transform.angleRad,
+  )
+  const movedNodes = moveBezierPathPoint(
+    original.shape.nodes,
+    nodeIndex,
+    pointKey,
+    localPoint,
+    independent ? 'independent' : 'mirrored',
+  )
+  const centered = centerBezierPathNodes(movedNodes)
+  const centerOffset = rotateVector(centered.center, original.transform.angleRad)
+  return {
+    ...original,
+    shape: { type: 'bezierPath', nodes: centered.nodes },
+    transform: {
+      ...original.transform,
+      position: {
+        x: original.transform.position.x + centerOffset.x,
+        y: original.transform.position.y + centerOffset.y,
+      },
+    },
+  }
+}
+
+function withToggledBodyPathNode(original: BodyEntity, nodeIndex: number): BodyEntity {
+  if (original.shape.type !== 'bezierPath') return original
+  const centered = centerBezierPathNodes(toggleBezierPathNodeMode(original.shape.nodes, nodeIndex))
+  const centerOffset = rotateVector(centered.center, original.transform.angleRad)
+  return {
+    ...original,
+    shape: { type: 'bezierPath', nodes: centered.nodes },
+    transform: {
+      ...original.transform,
+      position: {
+        x: original.transform.position.x + centerOffset.x,
+        y: original.transform.position.y + centerOffset.y,
+      },
+    },
+  }
+}
+
 type EditableHandle =
   | { type: 'bezier'; entity: GroundEntity; pointKey: 'p0' | 'p1' | 'p2' | 'p3' }
   | { type: 'fieldPoint'; entity: FieldEntity; pointIndex: number }
@@ -417,7 +739,13 @@ type EditableHandle =
       type: 'fieldPathPoint'
       entity: FieldEntity
       nodeIndex: number
-      pointKey: keyof BezierPathNode
+      pointKey: BezierPathPointKey
+    }
+  | {
+      type: 'bodyPathPoint'
+      entity: BodyEntity
+      nodeIndex: number
+      pointKey: BezierPathPointKey
     }
   | { type: 'connectorAnchor'; entity: ConnectorEntity; endpointKey: 'a' | 'b' }
 
@@ -427,19 +755,36 @@ interface ScaleHandleHit {
 }
 
 function findScaleHandle(
+  scene: ReturnType<typeof useDocumentStore.getState>['scene'],
   entities: SceneEntity[],
   selectedIds: EntityId[],
   point: Vec2,
   pixelsPerMeter: number,
 ): ScaleHandleHit | null {
-  const bounds = getScalableSelectionBounds(entities, selectedIds)
+  const editor = useEditorStore.getState()
+  const bounds = selectionTargetBounds(
+    listEditingSelectionTargets(
+      scene,
+      entities,
+      useSimulationStore.getState().runtimeBodies,
+      new Set(Object.keys(editor.previewEntities)),
+      new Set(selectedIds),
+    ),
+    selectedIds,
+    true,
+  )
   if (!bounds) return null
   const geometry = createScaleHandleGeometry(bounds, 5 / pixelsPerMeter)
   const tolerance = 9 / pixelsPerMeter
   const handle = geometry.handles.find(
     (candidate) => distance(candidate.position, point) <= tolerance,
   )
-  return handle ? { handle, pivot: geometry.center } : null
+  if (!handle) return null
+  const pivot = {
+    x: handle.id.startsWith('min') ? geometry.bounds.maxX : geometry.bounds.minX,
+    y: handle.id.endsWith('min') ? geometry.bounds.maxY : geometry.bounds.minY,
+  }
+  return { handle, pivot }
 }
 
 function findEditableHandle(
@@ -447,6 +792,7 @@ function findEditableHandle(
   selectedIds: EntityId[],
   point: Vec2,
   tolerance: number,
+  preferAnchorOnTie = false,
 ): EditableHandle | null {
   for (let index = entities.length - 1; index >= 0; index -= 1) {
     const entity = entities[index]
@@ -468,10 +814,32 @@ function findEditableHandle(
       for (let nodeIndex = 0; nodeIndex < entity.region.nodes.length; nodeIndex += 1) {
         const node = entity.region.nodes[nodeIndex]
         if (!node) continue
-        for (const pointKey of ['inHandle', 'outHandle', 'anchor'] as const) {
-          if (distance(node[pointKey], point) <= tolerance) {
-            return { type: 'fieldPathPoint', entity, nodeIndex, pointKey }
-          }
+        const pointKeys = preferAnchorOnTie
+          ? (['anchor', 'inHandle', 'outHandle'] as const)
+          : (['outHandle', 'inHandle', 'anchor'] as const)
+        const pointKey = pointKeys
+          .map((key) => ({ key, distance: distance(node[key], point) }))
+          .filter((candidate) => candidate.distance <= tolerance)
+          .sort((left, right) => left.distance - right.distance)[0]?.key
+        if (pointKey) {
+          return { type: 'fieldPathPoint', entity, nodeIndex, pointKey }
+        }
+      }
+    }
+    if (entity.kind === 'body' && entity.shape.type === 'bezierPath') {
+      const nodes = worldBezierPathNodes(entity)
+      for (let nodeIndex = 0; nodeIndex < nodes.length; nodeIndex += 1) {
+        const node = nodes[nodeIndex]
+        if (!node) continue
+        const pointKeys = preferAnchorOnTie
+          ? (['anchor', 'inHandle', 'outHandle'] as const)
+          : (['outHandle', 'inHandle', 'anchor'] as const)
+        const pointKey = pointKeys
+          .map((key) => ({ key, distance: distance(node[key], point) }))
+          .filter((candidate) => candidate.distance <= tolerance)
+          .sort((left, right) => left.distance - right.distance)[0]?.key
+        if (pointKey) {
+          return { type: 'bodyPathPoint', entity, nodeIndex, pointKey }
         }
       }
     }
@@ -488,12 +856,33 @@ function findEditableHandle(
 }
 
 function editableEntities(entities: SceneEntity[]): SceneEntity[] {
-  const layers = useDocumentStore.getState().scene.layers
-  const lockedLayers = new Set(layers.filter((layer) => layer.locked).map((layer) => layer.id))
-  const hiddenLayers = new Set(layers.filter((layer) => !layer.visible).map((layer) => layer.id))
+  const rootItems = useDocumentStore.getState().scene.rootItems
+  const selectedIds = new Set(useEditorStore.getState().selectedIds)
+  const booleanSourceIds = new Set(
+    resolveBooleanScene(useDocumentStore.getState().scene).roots.flatMap(
+      (result) => result.sourceEntityIds,
+    ),
+  )
   return entities
-    .filter((entity) => !hiddenLayers.has(entity.layerId))
-    .map((entity) => (lockedLayers.has(entity.layerId) ? { ...entity, locked: true } : entity))
+    .filter(
+      (entity) =>
+        isTreeItemEffectivelyVisible(rootItems, entity.id) &&
+        (!booleanSourceIds.has(entity.id) || selectedIds.has(entity.id)),
+    )
+    .map((entity) =>
+      isTreeItemEffectivelyLocked(rootItems, entity.id) ? { ...entity, locked: true } : entity,
+    )
+}
+
+function movableEntitiesForSelection(selectedIds: readonly EntityId[]): SceneEntity[] {
+  const scene = useDocumentStore.getState().scene
+  const sourceIds = new Set(
+    selectionSourceEntityIds(
+      listEditingSelectionTargets(scene, scene.entities, {}, new Set(), new Set(selectedIds)),
+      selectedIds,
+    ),
+  )
+  return scene.entities.filter((entity) => sourceIds.has(entity.id) && getEntityTransform(entity))
 }
 
 function renderEntities(): SceneEntity[] {
@@ -523,19 +912,24 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
   const previewEntities = useEditorStore((state) => state.previewEntities)
   const draftEntity = useEditorStore((state) => state.draftEntity)
   const marquee = useEditorStore((state) => state.marquee)
-  const connectorStartBodyId = useEditorStore((state) => state.connectorStartBodyId)
+  const connectorStartEndpoint = useEditorStore((state) => state.connectorStartEndpoint)
   const groundJointStart = useEditorStore((state) => state.groundJointStart)
   const groundJointHover = useEditorStore((state) => state.groundJointHover)
   const pendingGroundEndpoint = useEditorStore((state) => state.pendingGroundEndpoint)
   const runtimeBodies = useSimulationStore((state) => state.runtimeBodies)
+  const runtimeConnectors = useSimulationStore((state) => state.runtimeConnectors)
   const runtimeTrajectories = useSimulationStore((state) => state.runtimeTrajectories)
+  const runtimeParticleTrajectories = useSimulationStore(
+    (state) => state.runtimeParticleTrajectories,
+  )
   const runtimeLocked = useSimulationStore(isSimulationRuntimeLocked)
 
   useEffect(() => {
     const interaction = interactionRef.current
     const penStillActive =
       (interaction.type === 'groundPen' && activeTool === 'ground') ||
-      (interaction.type === 'fieldPen' && activeTool === 'field')
+      (interaction.type === 'fieldPen' && activeTool === 'field') ||
+      (interaction.type === 'bodyPen' && activeTool === 'body')
     if (interaction.type !== 'idle' && !penStillActive) {
       interactionRef.current = { type: 'idle' }
       useEditorStore.getState().clearPreview()
@@ -557,6 +951,14 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
       editor.setGroundJointMessage('第一个端点已不存在，请重新选择。')
     }
   }, [groundJointStart, scene.entities])
+
+  useEffect(() => {
+    if (!connectorStartEndpoint) return
+    const targetId = connectorEndpointTargetId(connectorStartEndpoint)
+    if (targetId && !scene.entities.some((entity) => entity.id === targetId)) {
+      useEditorStore.getState().setConnectorStartEndpoint(null)
+    }
+  }, [connectorStartEndpoint, scene.entities])
 
   useEffect(() => {
     sizeRef.current = size
@@ -606,13 +1008,15 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
       previewEntities,
       draftEntity,
       marquee,
-      connectorStartBodyId,
+      connectorStartEndpoint,
       activeTool,
       groundJointStart,
       groundJointHover,
       pendingGroundEndpoint,
       runtimeBodies,
+      runtimeConnectors,
       runtimeTrajectories,
+      particleTrajectories: runtimeParticleTrajectories,
       runtimeLocked,
     })
     if (canvasRef.current && interactionRef.current.type === 'idle' && !spacePressedRef.current) {
@@ -621,7 +1025,7 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
   }, [
     activeTool,
     camera,
-    connectorStartBodyId,
+    connectorStartEndpoint,
     draftEntity,
     gridVisible,
     groundJointHover,
@@ -631,7 +1035,9 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
     previewEntities,
     ready,
     runtimeBodies,
+    runtimeConnectors,
     runtimeLocked,
+    runtimeParticleTrajectories,
     runtimeTrajectories,
     scene,
     selectedIds,
@@ -653,7 +1059,9 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
         canvas.style.cursor = 'zoom-in'
       } else if (tool === 'rotate') {
         canvas.style.cursor = 'crosshair'
-      } else if (['ground', 'groundJoint', 'body', 'field', 'connector'].includes(tool)) {
+      } else if (
+        ['ground', 'groundJoint', 'body', 'field', 'connector', 'particleSource'].includes(tool)
+      ) {
         canvas.style.cursor = 'crosshair'
       } else {
         canvas.style.cursor = toolCursor(tool)
@@ -677,6 +1085,60 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
         : world
     }
 
+    const surfaceSnapTargets = (): BodySnapSurfaceTarget[] => {
+      const editor = useEditorStore.getState()
+      const document = useDocumentStore.getState().scene
+      const ordinaryTargets = editableEntities(renderEntities()).filter(
+        (candidate): candidate is GroundEntity | BodyEntity =>
+          candidate.visible &&
+          ((editor.wallSnapEnabled && candidate.kind === 'ground') ||
+            (editor.blockSnapEnabled &&
+              candidate.kind === 'body' &&
+              candidate.shape.type !== 'circle')),
+      )
+      if (!editor.blockSnapEnabled) return ordinaryTargets
+
+      const booleanScene = resolveBooleanScene(document)
+      const runtimeBodies = useSimulationStore.getState().runtimeBodies
+      const booleanTargets: BodySnapSurfaceTarget[] = booleanScene.roots.flatMap((result) => {
+        if (
+          !result.valid ||
+          result.kind !== 'body' ||
+          !isTreeItemEffectivelyVisible(document.rootItems, result.nodeId)
+        ) {
+          return []
+        }
+        const transform = resolveBooleanBodyRenderTransform(
+          result,
+          runtimeBodies[result.resultId],
+          false,
+        )
+        return [
+          {
+            kind: 'booleanResult',
+            id: result.resultId,
+            visible: true,
+            centerOfMass: transform.position,
+            geometry: transformBooleanBodyGeometry(result, transform.position, transform.angleRad),
+          },
+        ]
+      })
+      const rootOrder = new Map(
+        document.rootItems.map((item, index) => [
+          item.kind === 'entity' ? item.entityId : item.resultId,
+          index,
+        ]),
+      )
+      const entityOrder = new Map(document.entities.map((entity, index) => [entity.id, index]))
+      return [...ordinaryTargets, ...booleanTargets].sort((first, second) => {
+        const rootDifference =
+          (rootOrder.get(first.id) ?? Number.MAX_SAFE_INTEGER) -
+          (rootOrder.get(second.id) ?? Number.MAX_SAFE_INTEGER)
+        if (rootDifference !== 0) return rootDifference
+        return (entityOrder.get(first.id) ?? -1) - (entityOrder.get(second.id) ?? -1)
+      })
+    }
+
     const applySurfaceSnap = (
       entity: SceneEntity,
       bypassSnap = false,
@@ -690,28 +1152,38 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
       ) {
         return entity
       }
-      const targets = editableEntities(renderEntities()).filter(
-        (candidate): candidate is GroundEntity | BodyEntity =>
-          candidate.visible &&
-          ((editor.wallSnapEnabled && candidate.kind === 'ground') ||
-            (editor.blockSnapEnabled &&
-              candidate.kind === 'body' &&
-              candidate.shape.type === 'box')),
+      const scene = useDocumentStore.getState().scene
+      const booleanScene = resolveBooleanScene(scene)
+      const expandedExcludedIds = new Set(excludedIds)
+      for (const excludedId of excludedIds) {
+        const rootResultId = booleanScene.rootResultIdBySourceId.get(excludedId)
+        if (rootResultId) expandedExcludedIds.add(rootResultId)
+      }
+      return snapBodyToSurfaces(
+        entity,
+        surfaceSnapTargets(),
+        12 / editor.camera.pixelsPerMeter,
+        expandedExcludedIds,
       )
-      return snapBodyToSurfaces(entity, targets, 12 / editor.camera.pixelsPerMeter, excludedIds)
     }
 
     const startCreation = (
-      tool: 'ground' | 'body' | 'field',
+      tool: 'ground' | 'body' | 'field' | 'particleSource',
       world: Vec2,
       pendingGroundEndpoint: GroundEndpointRef | null = null,
       bypassSurfaceSnap = false,
     ) => {
-      const layerId = activeLayerId()
-      if (!layerId) return
+      const layerId = entityFactoryContextId()
       const editor = useEditorStore.getState()
       editor.setPendingGroundEndpoint(tool === 'ground' ? pendingGroundEndpoint : null)
-      const kind = tool === 'ground' ? 'ground' : tool === 'body' ? 'body' : 'field'
+      const kind =
+        tool === 'ground'
+          ? 'ground'
+          : tool === 'body'
+            ? 'body'
+            : tool === 'field'
+              ? 'field'
+              : 'particleSource'
       if (tool === 'ground' && editor.groundToolShape === 'cubicBezier') {
         const interaction: Extract<Interaction, { type: 'groundPen' }> = {
           type: 'groundPen',
@@ -738,6 +1210,22 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
         editor.setDraftEntity(createFieldPenDraft(interaction, [world, world]))
         return
       }
+      if (
+        tool === 'body' &&
+        editor.bodyToolPreset === 'block' &&
+        editor.blockToolShape === 'freeform'
+      ) {
+        const interaction: Extract<Interaction, { type: 'bodyPen' }> = {
+          type: 'bodyPen',
+          points: [world],
+          draftId: crypto.randomUUID(),
+          layerId,
+          index: nextEntityIndex('body'),
+        }
+        interactionRef.current = interaction
+        editor.setDraftEntity(createBodyPenDraft(interaction, [world, world]))
+        return
+      }
       const interaction: Extract<Interaction, { type: 'create' }> = {
         type: 'create',
         tool,
@@ -747,8 +1235,11 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
         index: nextEntityIndex(kind),
         groundShape: editor.groundToolShape,
         bodyPreset: editor.bodyToolPreset,
+        blockShape: editor.blockToolShape,
+        triangleAngleDeg: editor.triangleAngleDeg,
         fieldPreset: editor.fieldToolPreset,
         fieldRegionShape: editor.fieldRegionToolShape,
+        particleSourceShape: editor.particleSourceToolShape,
         pendingGroundEndpoint,
       }
       interactionRef.current = interaction
@@ -757,8 +1248,20 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
         .setDraftEntity(applySurfaceSnap(getDraft(interaction, world), bypassSurfaceSnap))
     }
 
+    let pendingPointerMove: PointerEvent | null = null
+    let pointerMoveFrame: number | null = null
+    const discardPendingPointerMove = () => {
+      if (pointerMoveFrame !== null) cancelAnimationFrame(pointerMoveFrame)
+      pointerMoveFrame = null
+      pendingPointerMove = null
+    }
+
     const handlePointerDown = (event: PointerEvent) => {
       if (event.button !== 0 && event.button !== 1) return
+      // A hover move queued immediately before this press belongs to the old interaction.
+      // Replaying it after pointerdown would create zero-distance drag commands or overwrite
+      // the first ground-endpoint selection with a stale hover diagnostic.
+      discardPendingPointerMove()
       canvas.focus()
       canvas.setPointerCapture(event.pointerId)
       const screen = localPoint(event, canvas)
@@ -782,43 +1285,86 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
       }
 
       const entities = editableEntities(renderEntities())
-      const hit = findTopEntity(entities, rawWorld, 8 / editor.camera.pixelsPerMeter)
+      const entityHit = findTopEntity(
+        entities,
+        rawWorld,
+        8 / editor.camera.pixelsPerMeter,
+        useSimulationStore.getState().runtimeConnectors,
+      )
+      const booleanHit =
+        entityHit && editor.selectedIds.includes(entityHit.id)
+          ? null
+          : findTopBooleanResult(
+              useDocumentStore.getState().scene,
+              rawWorld,
+              useSimulationStore.getState().runtimeBodies,
+            )
+      const hit = entityHit
 
       if (isSimulationRuntimeLocked(useSimulationStore.getState())) {
-        if (!hit) {
+        const hitId = booleanHit?.resultId ?? hit?.id
+        if (!hitId) {
           if (!event.shiftKey) editor.clearSelection()
         } else if (event.shiftKey) {
-          editor.toggleSelectedId(hit.id)
+          editor.toggleSelectedId(hitId)
         } else {
-          editor.setSelectedIds([hit.id])
+          editor.setSelectedIds([hitId])
         }
         return
       }
 
       if (tool === 'scale') {
         const scaleHandle = findScaleHandle(
+          useDocumentStore.getState().scene,
           entities,
           editor.selectedIds,
           rawWorld,
           editor.camera.pixelsPerMeter,
         )
         if (scaleHandle) {
-          const targetIds = entities
+          const selectionTargets = listEditingSelectionTargets(
+            useDocumentStore.getState().scene,
+            entities,
+            useSimulationStore.getState().runtimeBodies,
+            new Set(Object.keys(editor.previewEntities)),
+            new Set(editor.selectedIds),
+          ).filter((target) => editor.selectedIds.includes(target.id) && target.scalable)
+          const booleanTargets = selectionTargets.filter(
+            (target) => target.kind === 'booleanResult',
+          )
+          if (booleanTargets.length === 1 && selectionTargets.length === 1) {
+            const booleanTarget = booleanTargets[0]!
+            interactionRef.current = {
+              type: 'booleanScale',
+              pivot: scaleHandle.pivot,
+              startHandle: scaleHandle.handle.position,
+              resultId: booleanTarget.id,
+              sourceIds: booleanTarget.sourceEntityIds,
+              originals: useDocumentStore.getState().scene.entities,
+            }
+            updateCursor(tool, true)
+            return
+          }
+          const targetIds = [
+            ...new Set(selectionTargets.flatMap((target) => target.sourceEntityIds)),
+          ]
+          const ordinaryTargetIds = entities
             .filter(
               (entity) =>
-                editor.selectedIds.includes(entity.id) &&
+                targetIds.includes(entity.id) &&
                 entity.visible &&
                 !entity.locked &&
                 isScalableEntity(entity),
             )
             .map((entity) => entity.id)
-          if (targetIds.length > 0) {
+          if (ordinaryTargetIds.length > 0) {
             interactionRef.current = {
               type: 'scale',
               pivot: scaleHandle.pivot,
               startHandle: scaleHandle.handle.position,
               originals: useDocumentStore.getState().scene.entities,
-              targetIds,
+              targetIds: ordinaryTargetIds,
+              booleanResultIds: booleanTargets.map((target) => target.id),
               cursor: scaleHandle.handle.cursor,
             }
             updateCursor(tool, true)
@@ -860,6 +1406,31 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
         }
         return
       }
+      if (pending.type === 'bodyPen' && tool === 'body') {
+        const closeToStart =
+          distance(world, pending.points[0] ?? world) <= 10 / editor.camera.pixelsPerMeter
+        if (pending.points.length >= 3 && (closeToStart || event.detail >= 2)) {
+          const entity = finalizeBodyPen(pending)
+          if (entity) {
+            const document = useDocumentStore.getState()
+            document.executeCommand(createAddEntityCommand(document.scene, entity))
+            editor.setDraftEntity(null)
+            editor.setSelectedIds([entity.id])
+            interactionRef.current = { type: 'idle' }
+          } else {
+            const analysis = analyzeBezierBodyPath(createSmoothBezierPathNodes(pending.points))
+            useSimulationStore
+              .getState()
+              .addWarning(analysis.diagnostics.join('；') || '钢笔物块轮廓无效，尚未创建。')
+            editor.setDraftEntity(createBodyPenDraft(pending, pending.points))
+          }
+        } else {
+          const points = [...pending.points, world]
+          interactionRef.current = { ...pending, points }
+          editor.setDraftEntity(createBodyPenDraft(pending, [...points, world]))
+        }
+        return
+      }
 
       if (tool === 'select') {
         const handle = findEditableHandle(
@@ -867,6 +1438,7 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
           editor.selectedIds,
           rawWorld,
           9 / editor.camera.pixelsPerMeter,
+          event.altKey,
         )
         if (handle?.type === 'bezier') {
           interactionRef.current = {
@@ -890,6 +1462,19 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
             original: handle.entity,
             nodeIndex: handle.nodeIndex,
             pointKey: handle.pointKey,
+            startScreen: screen,
+            toggleCandidate: event.altKey && handle.pointKey === 'anchor',
+          }
+          return
+        }
+        if (handle?.type === 'bodyPathPoint') {
+          interactionRef.current = {
+            type: 'editBodyPathPoint',
+            original: handle.entity,
+            nodeIndex: handle.nodeIndex,
+            pointKey: handle.pointKey,
+            startScreen: screen,
+            toggleCandidate: event.altKey && handle.pointKey === 'anchor',
           }
           return
         }
@@ -939,8 +1524,7 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
           return
         }
 
-        const layerId = activeLayerId()
-        if (!layerId) return
+        const layerId = entityFactoryContextId()
         const joint = createGroundJoint(
           layerId,
           first,
@@ -967,37 +1551,85 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
       }
 
       if (tool === 'connector') {
-        if (!hit || hit.kind !== 'body') return
-        if (!editor.connectorStartBodyId) {
-          editor.setConnectorStartBodyId(hit.id)
-          editor.setSelectedIds([hit.id])
+        const gridSnap: GridSnapStep | null =
+          editor.snapEnabled && !event.altKey
+            ? {
+                step: getVisibleSnapStep(
+                  useDocumentStore.getState().scene.settings.gridStep,
+                  editor.camera.pixelsPerMeter,
+                ),
+              }
+            : null
+        const booleanTarget = findTopBooleanResult(
+          useDocumentStore.getState().scene,
+          rawWorld,
+          useSimulationStore.getState().runtimeBodies,
+        )
+        const runtimeBooleanBody =
+          booleanTarget?.valid && booleanTarget.kind === 'body'
+            ? useSimulationStore.getState().runtimeBodies[booleanTarget.resultId]
+            : undefined
+        const endpoint: ConnectorEndpoint | null =
+          booleanTarget?.valid && booleanTarget.kind === 'body'
+            ? {
+                type: 'body',
+                bodyId: booleanTarget.resultId,
+                localAnchor: booleanBodyWorldToLocal(
+                  booleanTarget,
+                  rawWorld,
+                  runtimeBooleanBody?.position,
+                  runtimeBooleanBody?.angleRad,
+                ),
+              }
+            : connectorEndpointAt(
+                entities,
+                rawWorld,
+                9 / editor.camera.pixelsPerMeter,
+                editor.connectorToolPreset === 'spring' ? { type: 'free', position: world } : null,
+                gridSnap,
+              )
+        if (!endpoint) return
+        if (!editor.connectorStartEndpoint) {
+          editor.setConnectorStartEndpoint(endpoint)
+          const targetId =
+            endpoint.type === 'body'
+              ? endpoint.bodyId
+              : endpoint.type === 'ground'
+                ? endpoint.groundId
+                : endpoint.type === 'groundJoint'
+                  ? endpoint.groundJointId
+                  : null
+          if (targetId) editor.setSelectedIds([targetId])
           return
         }
-        if (editor.connectorStartBodyId === hit.id) {
-          editor.setConnectorStartBodyId(null)
-          return
-        }
-        const first = getEntityById(entities, editor.connectorStartBodyId)
-        const layerId = activeLayerId()
-        if (first?.kind === 'body' && layerId) {
-          const length = distance(first.transform.position, hit.transform.position)
+        const firstEndpoint = editor.connectorStartEndpoint
+        const layerId = entityFactoryContextId()
+        const network = buildGroundPathNetwork(entities)
+        const firstPosition = resolveCanvasConnectorEndpoint(entities, firstEndpoint, network)
+        const secondPosition = resolveCanvasConnectorEndpoint(entities, endpoint, network)
+        if (firstPosition && secondPosition && layerId) {
+          const length = distance(firstPosition, secondPosition)
+          if (length < 0.001) {
+            editor.setConnectorStartEndpoint(null)
+            return
+          }
           const index = nextEntityIndex('connector')
           const connector =
             editor.connectorToolPreset === 'rod'
-              ? createRod(layerId, first.id, hit.id, length, index)
+              ? createRod(layerId, firstEndpoint, endpoint, length, index)
               : editor.connectorToolPreset === 'spring'
-                ? createSpring(layerId, first.id, hit.id, length, index)
-                : createRope(layerId, first.id, hit.id, length, index)
+                ? createSpring(layerId, firstEndpoint, endpoint, length, index)
+                : createRope(layerId, firstEndpoint, endpoint, length, index)
           useDocumentStore
             .getState()
             .executeCommand(createAddEntityCommand(useDocumentStore.getState().scene, connector))
           editor.setSelectedIds([connector.id])
-          editor.setConnectorStartBodyId(null)
+          editor.setConnectorStartEndpoint(null)
         }
         return
       }
 
-      if (tool === 'ground' || tool === 'body' || tool === 'field') {
+      if (tool === 'ground' || tool === 'body' || tool === 'field' || tool === 'particleSource') {
         if (tool === 'ground') {
           const start = resolveGroundCreationStart({
             entities,
@@ -1015,6 +1647,35 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
       }
 
       if (tool === 'select') {
+        if (booleanHit) {
+          const resultId = booleanHit.resultId
+          const nextSelection = event.shiftKey
+            ? editor.selectedIds.includes(resultId)
+              ? editor.selectedIds.filter((id) => id !== resultId)
+              : [...editor.selectedIds, resultId]
+            : editor.selectedIds.includes(resultId)
+              ? editor.selectedIds
+              : [resultId]
+          editor.setSelectedIds(nextSelection)
+          if (nextSelection.includes(resultId) && booleanHit.valid) {
+            const pivot =
+              booleanHit.kind === 'body'
+                ? booleanHit.centerOfMass
+                : {
+                    x: (booleanHit.bounds.min.x + booleanHit.bounds.max.x) / 2,
+                    y: (booleanHit.bounds.min.y + booleanHit.bounds.max.y) / 2,
+                  }
+            interactionRef.current = {
+              type: 'booleanMove',
+              startWorld: rawWorld,
+              pivot,
+              resultId,
+              originals: movableEntitiesForSelection(nextSelection),
+              selectedTargetIds: nextSelection,
+            }
+          }
+          return
+        }
         if (!hit) {
           if (!event.shiftKey) editor.clearSelection()
           interactionRef.current = { type: 'marquee', startWorld: rawWorld }
@@ -1031,21 +1692,35 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
           nextSelection = [hit.id]
         }
         editor.setSelectedIds(nextSelection)
-        const originals = entities.filter(
-          (entity) => nextSelection.includes(entity.id) && getEntityTransform(entity),
-        )
+        const originals = movableEntitiesForSelection(nextSelection)
         if (originals.length > 0 && nextSelection.includes(hit.id)) {
+          const selectedTargets = listEditingSelectionTargets(
+            useDocumentStore.getState().scene,
+            useDocumentStore.getState().scene.entities,
+            {},
+            new Set(),
+            new Set(nextSelection),
+          )
           interactionRef.current = {
             type: 'move',
             startWorld: rawWorld,
             originals,
             anchorId: hit.id,
+            booleanResultIds: selectedTargets
+              .filter(
+                (target) => target.kind === 'booleanResult' && nextSelection.includes(target.id),
+              )
+              .map((target) => target.id),
           }
         }
         return
       }
 
       if (tool === 'scale') {
+        if (booleanHit) {
+          editor.setSelectedIds([booleanHit.resultId])
+          return
+        }
         if (!hit) {
           if (!event.shiftKey) editor.clearSelection()
           return
@@ -1062,6 +1737,28 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
       }
 
       if (tool === 'rotate') {
+        if (booleanHit) {
+          editor.setSelectedIds([booleanHit.resultId])
+          if (booleanHit.valid) {
+            const pivot =
+              booleanHit.kind === 'body'
+                ? booleanHit.centerOfMass
+                : {
+                    x: (booleanHit.bounds.min.x + booleanHit.bounds.max.x) / 2,
+                    y: (booleanHit.bounds.min.y + booleanHit.bounds.max.y) / 2,
+                  }
+            interactionRef.current = {
+              type: 'booleanRotate',
+              pivot,
+              startPointerAngle: Math.atan2(rawWorld.y - pivot.y, rawWorld.x - pivot.x),
+              resultId: booleanHit.resultId,
+              originals: useDocumentStore
+                .getState()
+                .scene.entities.filter((entity) => booleanHit.sourceEntityIds.includes(entity.id)),
+            }
+          }
+          return
+        }
         if (!hit) return
         if (!editor.selectedIds.includes(hit.id)) editor.setSelectedIds([hit.id])
         const transform = getEntityTransform(hit)
@@ -1081,7 +1778,7 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
       }
     }
 
-    const handlePointerMove = (event: PointerEvent) => {
+    const processPointerMove = (event: PointerEvent) => {
       const screen = localPoint(event, canvas)
       const editor = useEditorStore.getState()
       const unsnappedWorld = screenToWorld(screen, editor.camera, sizeRef.current)
@@ -1091,6 +1788,7 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
 
       if (editor.activeTool === 'scale' && interaction.type === 'idle') {
         const handle = findScaleHandle(
+          useDocumentStore.getState().scene,
           editableEntities(renderEntities()),
           editor.selectedIds,
           unsnappedWorld,
@@ -1123,18 +1821,15 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
                 editor.setGroundJointHover(null)
                 message = '第一个端点已不存在，请重新选择。'
               } else {
-                const preview = createGroundJoint(
-                  firstGround.layerId,
-                  editor.groundJointStart,
-                  hover,
-                  0,
-                )
+                const preview = createGroundJoint('', editor.groundJointStart, hover, 0)
                 const resolvedPath = resolveGroundJointPath(sceneEntities, preview)
                 message = resolvedPath?.issue
                   ? groundJointIssueMessage(resolvedPath.issue)
-                  : resolvedPath?.kind === 'linear'
-                    ? '预览：将生成端点间直线连接。'
-                    : '预览：将生成平滑连接线。'
+                  : resolvedPath?.kind === 'direct'
+                    ? '预览：将建立无形直接接缝。'
+                    : resolvedPath?.kind === 'linear'
+                      ? '预览：将生成端点间直线连接。'
+                      : '预览：将生成平滑连接线。'
               }
             }
           } else if (hover) {
@@ -1158,6 +1853,8 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
         editor.setDraftEntity(createGroundPenDraft(interaction, world))
       } else if (interaction.type === 'fieldPen') {
         editor.setDraftEntity(createFieldPenDraft(interaction, [...interaction.points, world]))
+      } else if (interaction.type === 'bodyPen') {
+        editor.setDraftEntity(createBodyPenDraft(interaction, [...interaction.points, world]))
       } else if (interaction.type === 'move') {
         const anchor = interaction.originals.find((entity) => entity.id === interaction.anchorId)
         const anchorTransform = anchor ? getEntityTransform(anchor) : null
@@ -1220,6 +1917,73 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
           }
         }
         editor.setPreviewEntities(moved)
+      } else if (interaction.type === 'booleanMove') {
+        let delta = subtract(unsnappedWorld, interaction.startWorld)
+        if (editor.snapEnabled && !event.altKey) {
+          const snappedPivot = snapPoint(
+            { x: interaction.pivot.x + delta.x, y: interaction.pivot.y + delta.y },
+            getVisibleSnapStep(
+              useDocumentStore.getState().scene.settings.gridStep,
+              editor.camera.pixelsPerMeter,
+            ),
+          )
+          delta = subtract(snappedPivot, interaction.pivot)
+        }
+        let moved = interaction.originals.map((entity) => {
+          const transform = getEntityTransform(entity)
+          return transform
+            ? withEntityTransform(entity, {
+                ...transform,
+                position: {
+                  x: transform.position.x + delta.x,
+                  y: transform.position.y + delta.y,
+                },
+              })
+            : entity
+        })
+        if (!event.altKey && (editor.wallSnapEnabled || editor.blockSnapEnabled)) {
+          const document = useDocumentStore.getState()
+          const baseResult = resolveBooleanScene(document.scene).byResultId.get(
+            interaction.resultId,
+          )
+          if (baseResult?.valid && baseResult.kind === 'body') {
+            const movedCenter = {
+              x: baseResult.centerOfMass.x + delta.x,
+              y: baseResult.centerOfMass.y + delta.y,
+            }
+            const snappedCenter = snapBooleanBodyToSurfaces(
+              {
+                resultId: baseResult.resultId,
+                centerOfMass: movedCenter,
+                geometry: transformBooleanBodyGeometry(
+                  baseResult,
+                  movedCenter,
+                  baseResult.angleRad,
+                ),
+              },
+              surfaceSnapTargets(),
+              12 / editor.camera.pixelsPerMeter,
+              new Set([
+                ...interaction.selectedTargetIds,
+                ...interaction.originals.map((entity) => entity.id),
+              ]),
+            )
+            const correction = subtract(snappedCenter, movedCenter)
+            moved = moved.map((entity) => {
+              const transform = getEntityTransform(entity)
+              return transform
+                ? withEntityTransform(entity, {
+                    ...transform,
+                    position: {
+                      x: transform.position.x + correction.x,
+                      y: transform.position.y + correction.y,
+                    },
+                  })
+                : entity
+            })
+          }
+        }
+        editor.setPreviewEntities(moved)
       } else if (interaction.type === 'rotate') {
         const pointerAngle = Math.atan2(
           unsnappedWorld.y - interaction.pivot.y,
@@ -1237,6 +2001,27 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
             return withEntityTransform(entity, { ...transform, angleRad })
           }),
         )
+      } else if (interaction.type === 'booleanRotate') {
+        const pointerAngle = Math.atan2(
+          unsnappedWorld.y - interaction.pivot.y,
+          unsnappedWorld.x - interaction.pivot.x,
+        )
+        const rawDelta = pointerAngle - interaction.startPointerAngle
+        const angleDelta = editor.snapEnabled && !event.altKey ? snapAngle(rawDelta) : rawDelta
+        editor.setPreviewEntities(
+          interaction.originals.map((entity) => {
+            const transform = getEntityTransform(entity)
+            if (!transform) return entity
+            const offset = rotateVector(subtract(transform.position, interaction.pivot), angleDelta)
+            return withEntityTransform(entity, {
+              position: {
+                x: interaction.pivot.x + offset.x,
+                y: interaction.pivot.y + offset.y,
+              },
+              angleRad: transform.angleRad + angleDelta,
+            })
+          }),
+        )
       } else if (interaction.type === 'scale') {
         const snapStep =
           editor.snapEnabled && !event.altKey
@@ -1251,14 +2036,67 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
           unsnappedWorld,
           snapStep,
         )
-        editor.setPreviewEntities(
-          scaleEntitiesAroundPivot(
-            interaction.originals,
-            interaction.targetIds,
-            interaction.pivot,
-            factor,
-          ).replacements,
+        const scaled = scaleEntitiesAroundPivot(
+          interaction.originals,
+          interaction.targetIds,
+          interaction.pivot,
+          factor,
         )
+        const resultIds = new Set(interaction.booleanResultIds)
+        const externalConnectors = interaction.originals.flatMap((entity): SceneEntity[] => {
+          if (entity.kind !== 'connector') return []
+          const scaleEndpoint = (endpoint: ConnectorEndpoint): ConnectorEndpoint =>
+            endpoint.type === 'body' && resultIds.has(endpoint.bodyId)
+              ? {
+                  ...endpoint,
+                  localAnchor: {
+                    x: endpoint.localAnchor.x * scaled.factor,
+                    y: endpoint.localAnchor.y * scaled.factor,
+                  },
+                }
+              : endpoint
+          const a = scaleEndpoint(entity.a)
+          const b = scaleEndpoint(entity.b)
+          return a === entity.a && b === entity.b ? [] : [{ ...entity, a, b }]
+        })
+        editor.setPreviewEntities([...scaled.replacements, ...externalConnectors])
+      } else if (interaction.type === 'booleanScale') {
+        const snapStep =
+          editor.snapEnabled && !event.altKey
+            ? getVisibleSnapStep(
+                useDocumentStore.getState().scene.settings.gridStep,
+                editor.camera.pixelsPerMeter,
+              )
+            : null
+        const requestedFactor = scaleFactorFromPointer(
+          interaction.pivot,
+          interaction.startHandle,
+          unsnappedWorld,
+          snapStep,
+        )
+        const scaled = scaleEntitiesAroundPivot(
+          interaction.originals,
+          interaction.sourceIds,
+          interaction.pivot,
+          requestedFactor,
+        )
+        const externalConnectors = interaction.originals.flatMap((entity): SceneEntity[] => {
+          if (entity.kind !== 'connector') return []
+          const scaleEndpoint = (endpoint: ConnectorEndpoint): ConnectorEndpoint =>
+            endpoint.type === 'body' && endpoint.bodyId === interaction.resultId
+              ? {
+                  ...endpoint,
+                  localAnchor: {
+                    x: endpoint.localAnchor.x * scaled.factor,
+                    y: endpoint.localAnchor.y * scaled.factor,
+                  },
+                }
+              : endpoint
+          const a = scaleEndpoint(entity.a)
+          const b = scaleEndpoint(entity.b)
+          return a === entity.a && b === entity.b ? [] : [{ ...entity, a, b }]
+        })
+        editor.setPreviewEntities([...scaled.replacements, ...externalConnectors])
       } else if (interaction.type === 'editBezierPoint') {
         const geometry = interaction.original.geometry
         if (geometry.type !== 'cubicBezier') return
@@ -1283,6 +2121,7 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
           },
         ])
       } else if (interaction.type === 'editFieldPathPoint') {
+        if (interaction.toggleCandidate && distance(screen, interaction.startScreen) <= 3) return
         const region = interaction.original.region
         if (region.type !== 'bezierPath') return
         const nodes = moveBezierPathPoint(
@@ -1290,25 +2129,76 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
           interaction.nodeIndex,
           interaction.pointKey,
           world,
+          event.altKey ? 'independent' : 'mirrored',
         )
         editor.setPreviewEntities([{ ...interaction.original, region: { ...region, nodes } }])
+      } else if (interaction.type === 'editBodyPathPoint') {
+        if (interaction.toggleCandidate && distance(screen, interaction.startScreen) <= 3) return
+        editor.setPreviewEntities([
+          withEditedBodyPath(
+            interaction.original,
+            interaction.nodeIndex,
+            interaction.pointKey,
+            world,
+            event.altKey,
+          ),
+        ])
       } else if (interaction.type === 'editConnectorAnchor') {
         const endpoint = interaction.original[interaction.endpointKey]
-        const body = getEntityById(editableEntities(renderEntities()), endpoint.bodyId)
-        if (body?.kind !== 'body') return
+        const entities = editableEntities(renderEntities())
+        const gridSnap: GridSnapStep | null =
+          editor.snapEnabled && !event.altKey
+            ? {
+                step: getVisibleSnapStep(
+                  useDocumentStore.getState().scene.settings.gridStep,
+                  editor.camera.pixelsPerMeter,
+                ),
+              }
+            : null
+        const nextEndpoint = moveConnectorEndpoint(
+          interaction.original,
+          interaction.endpointKey,
+          endpoint,
+          entities,
+          world,
+          9 / editor.camera.pixelsPerMeter,
+          gridSnap,
+        )
         editor.setPreviewEntities([
           {
             ...interaction.original,
-            [interaction.endpointKey]: {
-              ...endpoint,
-              localAnchor: worldToLocalAnchor(body, world),
-            },
+            [interaction.endpointKey]: nextEndpoint,
+            collisionEnabled:
+              interaction.original.connector.type === 'spring'
+                ? false
+                : interaction.original.collisionEnabled,
+            massKg:
+              interaction.original.connector.type === 'spring' ? 0 : interaction.original.massKg,
           },
         ])
       }
     }
 
+    const flushPointerMove = () => {
+      if (pointerMoveFrame !== null) cancelAnimationFrame(pointerMoveFrame)
+      pointerMoveFrame = null
+      const pending = pendingPointerMove
+      pendingPointerMove = null
+      if (pending) processPointerMove(pending)
+    }
+    const handlePointerMove = (event: PointerEvent) => {
+      pendingPointerMove = event
+      if (pointerMoveFrame !== null) return
+      pointerMoveFrame = requestAnimationFrame(() => {
+        pointerMoveFrame = null
+        const pending = pendingPointerMove
+        pendingPointerMove = null
+        if (pending) processPointerMove(pending)
+      })
+    }
+
     const finishInteraction = (event: PointerEvent) => {
+      flushPointerMove()
       const editor = useEditorStore.getState()
       const document = useDocumentStore.getState()
       const interaction = interactionRef.current
@@ -1317,42 +2207,140 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
 
       if (
         interaction.type === 'move' ||
+        interaction.type === 'booleanMove' ||
         interaction.type === 'rotate' ||
+        interaction.type === 'booleanRotate' ||
         interaction.type === 'scale' ||
+        interaction.type === 'booleanScale' ||
         interaction.type === 'editBezierPoint' ||
         interaction.type === 'editFieldPoint' ||
         interaction.type === 'editFieldPathPoint' ||
+        interaction.type === 'editBodyPathPoint' ||
         interaction.type === 'editConnectorAnchor'
       ) {
-        const replacements = Object.values(editor.previewEntities)
+        const pointerScreen = localPoint(event, canvas)
+        const toggledNode =
+          (interaction.type === 'editFieldPathPoint' || interaction.type === 'editBodyPathPoint') &&
+          interaction.toggleCandidate &&
+          distance(pointerScreen, interaction.startScreen) <= 3
+        let replacements = toggledNode
+          ? interaction.type === 'editBodyPathPoint'
+            ? [withToggledBodyPathNode(interaction.original, interaction.nodeIndex)]
+            : interaction.original.region.type === 'bezierPath'
+              ? [
+                  {
+                    ...interaction.original,
+                    region: {
+                      ...interaction.original.region,
+                      nodes: toggleBezierPathNodeMode(
+                        interaction.original.region.nodes,
+                        interaction.nodeIndex,
+                      ),
+                    },
+                  },
+                ]
+              : []
+          : Object.values(editor.previewEntities)
+        if (interaction.type === 'editBodyPathPoint') {
+          const body = replacements.find(
+            (candidate): candidate is BodyEntity =>
+              candidate.id === interaction.original.id && candidate.kind === 'body',
+          )
+          if (body?.shape.type === 'bezierPath') {
+            const analysis = analyzeBezierBodyPath(body.shape.nodes)
+            if (!analysis.valid) {
+              useSimulationStore
+                .getState()
+                .addWarning(`${analysis.diagnostics.join('；')} 已取消这次轮廓修改。`)
+              replacements = []
+            }
+          }
+        }
         if (replacements.length > 0) {
+          if (interaction.type === 'editConnectorAnchor') {
+            const connector = replacements.find(
+              (candidate): candidate is ConnectorEntity =>
+                candidate.kind === 'connector' && candidate.connector.type === 'rope',
+            )
+            if (connector) {
+              const candidateEntities = document.scene.entities.map((candidate) =>
+                candidate.id === connector.id ? connector : candidate,
+              )
+              const minimumLength = minimumFixedRopeLength(connector, (endpoint) =>
+                resolveConnectorEndpoint(candidateEntities, endpoint),
+              )
+              if (
+                minimumLength !== null &&
+                connector.connector.type === 'rope' &&
+                connector.connector.maxLength < minimumLength - 1e-6
+              ) {
+                useSimulationStore
+                  .getState()
+                  .addWarning(`两个固定端点至少需要 ${minimumLength.toPrecision(6)} m 的绳长。`)
+                editor.clearPreview()
+                interactionRef.current = { type: 'idle' }
+                updateCursor(editor.activeTool)
+                if (canvas.hasPointerCapture(event.pointerId)) {
+                  canvas.releasePointerCapture(event.pointerId)
+                }
+                return
+              }
+            }
+          }
           const label =
             interaction.type === 'move'
               ? '移动实体'
-              : interaction.type === 'rotate'
-                ? '旋转实体'
-                : interaction.type === 'scale'
-                  ? '缩放实体'
-                  : interaction.type === 'editBezierPoint'
-                    ? '拖动贝塞尔控制点'
-                    : interaction.type === 'editFieldPoint'
-                      ? '拖动场范围节点'
-                      : interaction.type === 'editFieldPathPoint'
-                        ? '拖动场范围贝塞尔控制点'
-                        : '拖动连接锚点'
-          document.executeCommand(createReplaceEntitiesCommand(document.scene, replacements, label))
+              : interaction.type === 'booleanMove'
+                ? '整体移动布尔结果'
+                : interaction.type === 'rotate'
+                  ? '旋转实体'
+                  : interaction.type === 'booleanRotate'
+                    ? '整体旋转布尔结果'
+                    : interaction.type === 'scale'
+                      ? '缩放实体'
+                      : interaction.type === 'booleanScale'
+                        ? '整体缩放布尔结果'
+                        : interaction.type === 'editBezierPoint'
+                          ? '拖动贝塞尔控制点'
+                          : interaction.type === 'editFieldPoint'
+                            ? '拖动场范围节点'
+                            : interaction.type === 'editFieldPathPoint'
+                              ? toggledNode
+                                ? '切换场范围贝塞尔节点模式'
+                                : '拖动场范围贝塞尔控制点'
+                              : interaction.type === 'editBodyPathPoint'
+                                ? toggledNode
+                                  ? '切换钢笔物块节点模式'
+                                  : '拖动钢笔物块控制点'
+                                : '拖动连接锚点'
+          document.executeCommand(
+            createReplaceEntitiesCommand(
+              document.scene,
+              replacements,
+              label,
+              interaction.type === 'booleanMove' ||
+                interaction.type === 'booleanRotate' ||
+                interaction.type === 'booleanScale' ||
+                (interaction.type === 'move' && interaction.booleanResultIds.length > 0)
+                ? 'follow-result'
+                : 'preserve-world',
+            ),
+          )
         }
         editor.clearPreview()
       } else if (interaction.type === 'marquee') {
-        const additions = entitiesInsideBounds(
-          editableEntities(renderEntities()),
-          interaction.startWorld,
-          rawWorld,
+        const rendered = editableEntities(renderEntities())
+        const targets = listEditingSelectionTargets(
+          document.scene,
+          rendered,
+          useSimulationStore.getState().runtimeBodies,
+          new Set(Object.keys(editor.previewEntities)),
         )
+        const additions = selectionTargetsInsideBounds(targets, interaction.startWorld, rawWorld)
         editor.setSelectedIds(
           event.shiftKey
-            ? [...new Set([...editor.selectedIds, ...additions.map((entity) => entity.id)])]
-            : additions.map((entity) => entity.id),
+            ? [...new Set([...editor.selectedIds, ...additions.map((target) => target.id)])]
+            : additions.map((target) => target.id),
         )
         editor.setMarquee(null)
       } else if (interaction.type === 'create') {
@@ -1365,7 +2353,11 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
         editor.setDraftEntity(null)
         editor.setPendingGroundEndpoint(null)
         editor.setSelectedIds([entity.id])
-      } else if (interaction.type === 'groundPen' || interaction.type === 'fieldPen') {
+      } else if (
+        interaction.type === 'groundPen' ||
+        interaction.type === 'fieldPen' ||
+        interaction.type === 'bodyPen'
+      ) {
         if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId)
         return
       }
@@ -1386,6 +2378,7 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
         editor.setGroundJointHover(null)
         editor.setGroundJointMessage(null)
       }
+      if (editor.activeTool === 'connector') editor.setConnectorStartEndpoint(null)
       interactionRef.current = { type: 'idle' }
       updateCursor(editor.activeTool)
     }
@@ -1417,6 +2410,23 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
           interactionRef.current = { type: 'idle' }
           event.preventDefault()
         }
+        if (interaction.type === 'bodyPen' && interaction.points.length >= 3) {
+          const editor = useEditorStore.getState()
+          const document = useDocumentStore.getState()
+          const entity = finalizeBodyPen(interaction)
+          if (entity) {
+            document.executeCommand(createAddEntityCommand(document.scene, entity))
+            editor.setDraftEntity(null)
+            editor.setSelectedIds([entity.id])
+            interactionRef.current = { type: 'idle' }
+          } else {
+            const analysis = analyzeBezierBodyPath(createSmoothBezierPathNodes(interaction.points))
+            useSimulationStore
+              .getState()
+              .addWarning(analysis.diagnostics.join('；') || '钢笔物块轮廓无效，尚未创建。')
+          }
+          event.preventDefault()
+        }
       }
       if (event.key === 'Escape') cancelInteraction()
     }
@@ -1431,10 +2441,12 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
     const handleContextMenu = (event: MouseEvent) => {
       event.preventDefault()
       const editor = useEditorStore.getState()
-      if (editor.activeTool !== 'groundJoint') return
-      editor.setGroundJointStart(null)
-      editor.setGroundJointHover(null)
-      editor.setGroundJointMessage(null)
+      if (editor.activeTool === 'groundJoint') {
+        editor.setGroundJointStart(null)
+        editor.setGroundJointHover(null)
+        editor.setGroundJointMessage(null)
+      }
+      if (editor.activeTool === 'connector') editor.setConnectorStartEndpoint(null)
     }
 
     updateCursor(useEditorStore.getState().activeTool)
@@ -1448,6 +2460,7 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
     window.addEventListener('keyup', handleKeyUp)
 
     return () => {
+      if (pointerMoveFrame !== null) cancelAnimationFrame(pointerMoveFrame)
       canvas.removeEventListener('pointerdown', handlePointerDown)
       canvas.removeEventListener('pointermove', handlePointerMove)
       canvas.removeEventListener('pointerup', finishInteraction)

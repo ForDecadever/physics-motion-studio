@@ -1,7 +1,13 @@
 import { create } from 'zustand'
 
 import { defaultCamera, type Camera2D } from '../editor/camera/viewport'
-import type { EntityId, GroundEndpointRef, LayerId, SceneEntity, Vec2 } from '../scene/model/types'
+import type {
+  ConnectorEndpoint,
+  EntityId,
+  GroundEndpointRef,
+  SceneEntity,
+  Vec2,
+} from '../scene/model/types'
 
 export type EditorTool =
   | 'select'
@@ -14,18 +20,25 @@ export type EditorTool =
   | 'body'
   | 'field'
   | 'connector'
+  | 'particleSource'
 export type BodyToolPreset = 'ball' | 'block'
+export type BlockToolShape =
+  'rectangle' | 'freeform' | 'quarterRamp' | 'semicircleCutout' | 'quarterCircleCutout' | 'triangle'
 export type FieldToolPreset = 'uniformGravity' | 'uniformElectric' | 'uniformMagnetic'
 export type FieldRegionToolShape = 'rectangle' | 'circle' | 'freeform' | 'infinite'
 export type ConnectorToolPreset = 'rope' | 'rod' | 'spring'
+export type ParticleSourceToolShape = 'point' | 'line'
 
 interface EditorState {
   activeTool: EditorTool
   groundToolShape: 'line' | 'arc' | 'cubicBezier'
   bodyToolPreset: BodyToolPreset
+  blockToolShape: BlockToolShape
+  triangleAngleDeg: number
   fieldToolPreset: FieldToolPreset
   fieldRegionToolShape: FieldRegionToolShape
   connectorToolPreset: ConnectorToolPreset
+  particleSourceToolShape: ParticleSourceToolShape
   gridVisible: boolean
   snapEnabled: boolean
   wallSnapEnabled: boolean
@@ -34,11 +47,10 @@ interface EditorState {
   camera: Camera2D
   cursorWorld: Vec2
   selectedIds: EntityId[]
-  activeLayerId: LayerId | null
   previewEntities: Record<EntityId, SceneEntity>
   draftEntity: SceneEntity | null
   marquee: { start: Vec2; end: Vec2 } | null
-  connectorStartBodyId: EntityId | null
+  connectorStartEndpoint: ConnectorEndpoint | null
   groundJointStart: GroundEndpointRef | null
   groundJointHover: GroundEndpointRef | null
   pendingGroundEndpoint: GroundEndpointRef | null
@@ -46,9 +58,12 @@ interface EditorState {
   setActiveTool: (tool: EditorTool) => void
   setGroundToolShape: (shape: 'line' | 'arc' | 'cubicBezier') => void
   setBodyToolPreset: (preset: BodyToolPreset) => void
+  setBlockToolShape: (shape: BlockToolShape) => void
+  setTriangleAngleDeg: (angleDeg: number) => void
   setFieldToolPreset: (preset: FieldToolPreset) => void
   setFieldRegionToolShape: (shape: FieldRegionToolShape) => void
   setConnectorToolPreset: (preset: ConnectorToolPreset) => void
+  setParticleSourceToolShape: (shape: ParticleSourceToolShape) => void
   toggleGrid: () => void
   toggleSnap: () => void
   toggleWallSnap: () => void
@@ -57,14 +72,13 @@ interface EditorState {
   setCamera: (camera: Camera2D) => void
   setCursorWorld: (cursorWorld: Vec2) => void
   setSelectedIds: (selectedIds: EntityId[]) => void
-  setActiveLayerId: (layerId: LayerId | null) => void
   toggleSelectedId: (entityId: EntityId) => void
   clearSelection: () => void
   setPreviewEntities: (entities: SceneEntity[]) => void
   clearPreview: () => void
   setDraftEntity: (draftEntity: SceneEntity | null) => void
   setMarquee: (marquee: { start: Vec2; end: Vec2 } | null) => void
-  setConnectorStartBodyId: (entityId: EntityId | null) => void
+  setConnectorStartEndpoint: (endpoint: ConnectorEndpoint | null) => void
   setGroundJointStart: (endpoint: GroundEndpointRef | null) => void
   setGroundJointHover: (endpoint: GroundEndpointRef | null) => void
   setPendingGroundEndpoint: (endpoint: GroundEndpointRef | null) => void
@@ -76,22 +90,24 @@ export const useEditorStore = create<EditorState>((set) => ({
   activeTool: 'select',
   groundToolShape: 'line',
   bodyToolPreset: 'ball',
+  blockToolShape: 'rectangle',
+  triangleAngleDeg: 30,
   fieldToolPreset: 'uniformGravity',
   fieldRegionToolShape: 'rectangle',
   connectorToolPreset: 'rope',
+  particleSourceToolShape: 'point',
   gridVisible: true,
   snapEnabled: true,
-  wallSnapEnabled: false,
+  wallSnapEnabled: true,
   blockSnapEnabled: true,
   autoGroundJointEnabled: true,
   camera: defaultCamera,
   cursorWorld: { x: 0, y: 0 },
   selectedIds: [],
-  activeLayerId: null,
   previewEntities: {},
   draftEntity: null,
   marquee: null,
-  connectorStartBodyId: null,
+  connectorStartEndpoint: null,
   groundJointStart: null,
   groundJointHover: null,
   pendingGroundEndpoint: null,
@@ -99,7 +115,7 @@ export const useEditorStore = create<EditorState>((set) => ({
   setActiveTool: (activeTool) =>
     set((state) => ({
       activeTool,
-      connectorStartBodyId: activeTool === 'connector' ? state.connectorStartBodyId : null,
+      connectorStartEndpoint: activeTool === 'connector' ? state.connectorStartEndpoint : null,
       groundJointStart: activeTool === 'groundJoint' ? state.groundJointStart : null,
       groundJointHover: activeTool === 'groundJoint' ? state.groundJointHover : null,
       pendingGroundEndpoint: null,
@@ -110,9 +126,13 @@ export const useEditorStore = create<EditorState>((set) => ({
     })),
   setGroundToolShape: (groundToolShape) => set({ groundToolShape }),
   setBodyToolPreset: (bodyToolPreset) => set({ bodyToolPreset }),
+  setBlockToolShape: (blockToolShape) => set({ blockToolShape }),
+  setTriangleAngleDeg: (triangleAngleDeg) =>
+    set({ triangleAngleDeg: Math.min(85, Math.max(5, triangleAngleDeg)) }),
   setFieldToolPreset: (fieldToolPreset) => set({ fieldToolPreset }),
   setFieldRegionToolShape: (fieldRegionToolShape) => set({ fieldRegionToolShape }),
   setConnectorToolPreset: (connectorToolPreset) => set({ connectorToolPreset }),
+  setParticleSourceToolShape: (particleSourceToolShape) => set({ particleSourceToolShape }),
   toggleGrid: () => set((state) => ({ gridVisible: !state.gridVisible })),
   toggleSnap: () => set((state) => ({ snapEnabled: !state.snapEnabled })),
   toggleWallSnap: () => set((state) => ({ wallSnapEnabled: !state.wallSnapEnabled })),
@@ -122,7 +142,6 @@ export const useEditorStore = create<EditorState>((set) => ({
   setCamera: (camera) => set({ camera }),
   setCursorWorld: (cursorWorld) => set({ cursorWorld }),
   setSelectedIds: (selectedIds) => set({ selectedIds }),
-  setActiveLayerId: (activeLayerId) => set({ activeLayerId }),
   toggleSelectedId: (entityId) =>
     set((state) => ({
       selectedIds: state.selectedIds.includes(entityId)
@@ -135,7 +154,7 @@ export const useEditorStore = create<EditorState>((set) => ({
   clearPreview: () => set({ previewEntities: {} }),
   setDraftEntity: (draftEntity) => set({ draftEntity }),
   setMarquee: (marquee) => set({ marquee }),
-  setConnectorStartBodyId: (connectorStartBodyId) => set({ connectorStartBodyId }),
+  setConnectorStartEndpoint: (connectorStartEndpoint) => set({ connectorStartEndpoint }),
   setGroundJointStart: (groundJointStart) => set({ groundJointStart }),
   setGroundJointHover: (groundJointHover) => set({ groundJointHover }),
   setPendingGroundEndpoint: (pendingGroundEndpoint) => set({ pendingGroundEndpoint }),
@@ -145,11 +164,10 @@ export const useEditorStore = create<EditorState>((set) => ({
       camera: defaultCamera,
       cursorWorld: { x: 0, y: 0 },
       selectedIds: [],
-      activeLayerId: null,
       previewEntities: {},
       draftEntity: null,
       marquee: null,
-      connectorStartBodyId: null,
+      connectorStartEndpoint: null,
       groundJointStart: null,
       groundJointHover: null,
       pendingGroundEndpoint: null,

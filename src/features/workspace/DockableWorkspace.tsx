@@ -1,6 +1,8 @@
 import { ChevronDown, GripHorizontal, X } from 'lucide-react'
 import {
   Fragment,
+  Suspense,
+  lazy,
   useEffect,
   useMemo,
   useRef,
@@ -13,7 +15,6 @@ import {
 import { commitPendingEditorEdit } from '../../editor/editing/pendingEditorEdit'
 import { useWorkspaceLayoutStore } from '../../stores/workspaceLayoutStore'
 import { CanvasWorkspace } from '../canvas/CanvasWorkspace'
-import { ChartPanel } from '../charts/ChartPanel'
 import { InspectorPanel } from '../inspector/InspectorPanel'
 import { LayersPanel } from '../layers/LayersPanel'
 import { Toolbar } from '../toolbar/Toolbar'
@@ -32,9 +33,13 @@ import {
 } from './workspaceLayout'
 import styles from './DockableWorkspace.module.css'
 
+const ChartPanel = lazy(() =>
+  import('../charts/ChartPanel').then(({ ChartPanel: Component }) => ({ default: Component })),
+)
+
 const panelTitles: Record<WorkspacePanelId, string> = {
   tools: '工具',
-  layers: '图层',
+  layers: '场景',
   inspector: '属性',
   charts: '图像',
 }
@@ -59,7 +64,17 @@ function panelContent(panelId: WorkspacePanelId, edge?: DockEdge): ReactNode {
     case 'inspector':
       return <InspectorPanel embedded />
     case 'charts':
-      return <ChartPanel embedded />
+      return (
+        <Suspense
+          fallback={
+            <div className={styles.panelLoading} role="status">
+              正在加载图像面板…
+            </div>
+          }
+        >
+          <ChartPanel embedded />
+        </Suspense>
+      )
   }
 }
 

@@ -48,7 +48,12 @@ class PhysicsClient {
       } else if (message.type === 'state') {
         store.setRuntimeState(message.status, message.simulationTime, message.playbackRate)
       } else if (message.type === 'frame') {
-        store.setFrame(message.simulationTime, message.bodies)
+        store.setFrame(
+          message.simulationTime,
+          message.bodies,
+          message.connectors,
+          message.particleSources,
+        )
         useChartStore.getState().appendSamples(message.samples)
       } else if (message.type === 'gifHistoryStatus') {
         store.setGifHistoryStatus(message.status)

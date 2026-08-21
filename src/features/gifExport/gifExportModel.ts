@@ -5,8 +5,15 @@ import {
   type ViewportSize,
 } from '../../editor/camera/viewport'
 import { getEntityBounds } from '../../editor/geometry/entityGeometry'
-import type { GifHistorySnapshot, RuntimeBodyState } from '../../physics/worker/messages'
+import type {
+  GifHistorySnapshot,
+  RuntimeBodyState,
+  RuntimeConnectorState,
+} from '../../physics/worker/messages'
 import type { BodyEntity, EntityId, SceneDocument, Vec2 } from '../../scene/model/types'
+import { resolveBooleanScene } from '../../scene/model/booleanGeometry'
+import { sampleAdaptiveClosedBezierPath } from '../../scene/model/bodyPath'
+import { listRuntimeBodyTargets } from '../../scene/model/runtimeBodyTargets'
 import { CHART_COLOR_PALETTE } from '../charts/chartPalette'
 
 export const GIF_MAX_PIXEL_FRAMES = 500_000_000
@@ -51,6 +58,7 @@ export interface GifExportLoad {
 export interface GifInterpolatedFrame {
   simulationTime: number
   bodies: Record<EntityId, RuntimeBodyState>
+  connectors: Record<EntityId, RuntimeConnectorState>
 }
 
 const BODY_CHANNELS = 7
@@ -220,7 +228,7 @@ export class GifHistoryReader {
 
   frameAt(time: number): GifInterpolatedFrame {
     const { times } = this.snapshot
-    if (times.length === 0) return { simulationTime: time, bodies: {} }
+    if (times.length === 0) return { simulationTime: time, bodies: {}, connectors: {} }
     const firstIndex = lowerSampleIndex(times, time)
     const secondIndex = Math.min(firstIndex + 1, times.length - 1)
     const firstTime = times[firstIndex]!
@@ -230,6 +238,7 @@ export class GifHistoryReader {
         ? Math.min(1, Math.max(0, (time - firstTime) / (secondTime - firstTime)))
         : 0
     const bodies: Record<EntityId, RuntimeBodyState> = {}
+    const connectors: Record<EntityId, RuntimeConnectorState> = {}
 
     for (const [bodyIndex, entityId] of this.snapshot.bodyIds.entries()) {
       const first = this.valueOffset(firstIndex, bodyIndex)
@@ -267,7 +276,46 @@ export class GifHistoryReader {
       }
     }
 
-    return { simulationTime: time, bodies }
+    const connectorPointCount =
+      this.snapshot.connectorPointOffsets[this.snapshot.connectorPointOffsets.length - 1] ?? 0
+    const connectorFrameStride = connectorPointCount * 2
+    for (const [connectorIndex, entityId] of this.snapshot.connectorIds.entries()) {
+      const pointStart = this.snapshot.connectorPointOffsets[connectorIndex]!
+      const pointEnd = this.snapshot.connectorPointOffsets[connectorIndex + 1]!
+      const points: Vec2[] = []
+      let valid = true
+      for (let pointIndex = pointStart; pointIndex < pointEnd; pointIndex += 1) {
+        const firstOffset = firstIndex * connectorFrameStride + pointIndex * 2
+        const secondOffset = secondIndex * connectorFrameStride + pointIndex * 2
+        const firstExists = Number.isFinite(this.snapshot.connectorValues[firstOffset])
+        const secondExists = Number.isFinite(this.snapshot.connectorValues[secondOffset])
+        if (
+          (ratio <= 0 && !firstExists) ||
+          (ratio >= 1 && !secondExists) ||
+          (ratio > 0 && ratio < 1 && (!firstExists || !secondExists))
+        ) {
+          valid = false
+          break
+        }
+        const effectiveFirst = ratio >= 1 ? secondOffset : firstOffset
+        const effectiveSecond = ratio <= 0 ? firstOffset : secondOffset
+        points.push({
+          x:
+            this.snapshot.connectorValues[effectiveFirst]! +
+            (this.snapshot.connectorValues[effectiveSecond]! -
+              this.snapshot.connectorValues[effectiveFirst]!) *
+              ratio,
+          y:
+            this.snapshot.connectorValues[effectiveFirst + 1]! +
+            (this.snapshot.connectorValues[effectiveSecond + 1]! -
+              this.snapshot.connectorValues[effectiveFirst + 1]!) *
+              ratio,
+        })
+      }
+      if (valid && points.length > 0) connectors[entityId] = { entityId, points }
+    }
+
+    return { simulationTime: time, bodies, connectors }
   }
 
   trajectory(
@@ -306,6 +354,52 @@ export class GifHistoryReader {
     const last = points.at(-1)
     if (current && (!last || current.x !== last.x || current.y !== last.y)) points.push(current)
     return points
+  }
+
+  particleTrajectories(
+    startTime: number,
+    endTime: number,
+    pixelsPerMeter: number,
+  ): Array<{ t: number; points: Vec2[] }> {
+    const ionCount = this.snapshot.particleIonCount
+    const result: Array<{ t: number; points: Vec2[] }> = []
+    if (ionCount === 0 || endTime < startTime || this.snapshot.particleValues.length === 0) {
+      return result
+    }
+    const stride = ionCount * 2
+    const minimumDistance = 0.75 / Math.max(pixelsPerMeter, MIN_PIXELS_PER_METER)
+    const minimumDistanceSquared = minimumDistance * minimumDistance
+    const firstIndex = lowerSampleIndex(this.snapshot.times, startTime)
+
+    for (let ionIndex = 0; ionIndex < ionCount; ionIndex += 1) {
+      const points: Vec2[] = []
+      for (
+        let sampleIndex = firstIndex;
+        sampleIndex < this.snapshot.times.length;
+        sampleIndex += 1
+      ) {
+        const time = this.snapshot.times[sampleIndex]!
+        if (time < startTime) continue
+        if (time > endTime) break
+        const offset = sampleIndex * stride + ionIndex * 2
+        const point = {
+          x: this.snapshot.particleValues[offset]!,
+          y: this.snapshot.particleValues[offset + 1]!,
+        }
+        if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) continue
+        const previous = points.at(-1)
+        if (
+          !previous ||
+          (point.x - previous.x) ** 2 + (point.y - previous.y) ** 2 >= minimumDistanceSquared
+        ) {
+          points.push(point)
+        }
+      }
+      if (points.length > 0) {
+        result.push({ t: this.snapshot.particleIonTs[ionIndex] ?? 0, points })
+      }
+    }
+    return result
   }
 
   private valueOffset(sampleIndex: number, bodyIndex: number): number {
@@ -347,9 +441,14 @@ export function fitGifPreviewDisplaySize(
 }
 
 function bodyMargin(body: BodyEntity): number {
-  return body.shape.type === 'circle'
-    ? body.shape.radius
-    : Math.hypot(body.shape.width, body.shape.height) / 2
+  if (body.shape.type === 'circle') return body.shape.radius
+  if (body.shape.type === 'box') return Math.hypot(body.shape.width, body.shape.height) / 2
+  return Math.max(
+    0,
+    ...sampleAdaptiveClosedBezierPath(body.shape.nodes).map((point) =>
+      Math.hypot(point.x, point.y),
+    ),
+  )
 }
 
 export function fitGifCamera(
@@ -360,15 +459,12 @@ export function fitGifCamera(
   endTime: number,
   includeVectorMargin: boolean,
 ): Camera2D {
-  const visibleLayerIds = new Set(
-    scene.layers.filter((layer) => layer.visible).map((layer) => layer.id),
-  )
-  const visibleEntities = scene.entities.filter(
-    (entity) => entity.visible && visibleLayerIds.has(entity.layerId),
-  )
+  const visibleEntities = scene.entities.filter((entity) => entity.visible)
+  const booleanScene = resolveBooleanScene(scene)
+  const booleanSourceIds = new Set(booleanScene.roots.flatMap((result) => result.sourceEntityIds))
   const bodyById = new Map(
-    visibleEntities
-      .filter((entity): entity is BodyEntity => entity.kind === 'body')
+    listRuntimeBodyTargets(scene)
+      .filter((body) => body.visible)
       .map((body) => [body.id, body]),
   )
   let minX = Number.POSITIVE_INFINITY
@@ -383,11 +479,33 @@ export function fitGifCamera(
   }
 
   for (const entity of visibleEntities) {
+    if (booleanSourceIds.has(entity.id)) continue
     if (entity.kind === 'body' && snapshot.bodyIds.includes(entity.id)) continue
     const bounds = getEntityBounds(entity)
     if (!bounds) continue
     include(bounds.minX, bounds.minY)
     include(bounds.maxX, bounds.maxY)
+  }
+
+  for (const result of booleanScene.roots) {
+    const rootItem = scene.rootItems.find(
+      (item) => item.kind === 'boolean' && item.resultId === result.resultId,
+    )
+    if (rootItem?.kind === 'boolean' && !rootItem.visible) continue
+    if (!result.valid) {
+      for (const sourceId of result.sourceEntityIds) {
+        const source = visibleEntities.find((entity) => entity.id === sourceId)
+        const bounds = source ? getEntityBounds(source) : null
+        if (bounds) {
+          include(bounds.minX, bounds.minY)
+          include(bounds.maxX, bounds.maxY)
+        }
+      }
+      continue
+    }
+    if (result.kind === 'body' && snapshot.bodyIds.includes(result.resultId)) continue
+    include(result.bounds.min.x, result.bounds.min.y)
+    include(result.bounds.max.x, result.bounds.max.y)
   }
 
   for (let sampleIndex = 0; sampleIndex < snapshot.times.length; sampleIndex += 1) {
@@ -400,6 +518,20 @@ export function fitGifCamera(
       const x = snapshot.values[offset + X]!
       const y = snapshot.values[offset + Y]!
       if (Number.isFinite(x) && Number.isFinite(y)) include(x, y, bodyMargin(body))
+    }
+  }
+
+  const particleStride = snapshot.particleIonCount * 2
+  if (particleStride > 0 && snapshot.particleValues.length > 0) {
+    for (let sampleIndex = 0; sampleIndex < snapshot.times.length; sampleIndex += 1) {
+      const time = snapshot.times[sampleIndex]!
+      if (time < startTime || time > endTime) continue
+      const offset = sampleIndex * particleStride
+      for (let ionIndex = 0; ionIndex < snapshot.particleIonCount; ionIndex += 1) {
+        const x = snapshot.particleValues[offset + ionIndex * 2]!
+        const y = snapshot.particleValues[offset + ionIndex * 2 + 1]!
+        if (Number.isFinite(x) && Number.isFinite(y)) include(x, y)
+      }
     }
   }
 

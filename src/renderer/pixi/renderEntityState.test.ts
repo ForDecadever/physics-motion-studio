@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import { createBall } from '../../scene/model/entityFactories'
 import type { RuntimeBodyState } from '../../physics/worker/messages'
-import { resolveRenderedEntity } from './renderEntityState'
+import { resolveBooleanBodyRenderTransform, resolveRenderedEntity } from './renderEntityState'
 
 describe('resolveRenderedEntity', () => {
   it('编辑预览优先于模拟运行时位置', () => {
@@ -51,5 +51,37 @@ describe('resolveRenderedEntity', () => {
     expect(rendered.kind).toBe('body')
     if (rendered.kind !== 'body') return
     expect(rendered.transform).toEqual({ position: runtime.position, angleRad: runtime.angleRad })
+  })
+})
+
+describe('resolveBooleanBodyRenderTransform', () => {
+  it('来源存在编辑预览时使用重新解析的布尔质心和角度', () => {
+    const runtime: RuntimeBodyState = {
+      entityId: 'boolean-result',
+      position: { x: 1, y: 2 },
+      angleRad: 0.25,
+      linearVelocity: { x: 0, y: 0 },
+      angularVelocityRad: 0,
+      netForce: { x: 0, y: 0 },
+      acceleration: { x: 0, y: 0 },
+      translationalKineticEnergyJ: 0,
+      rotationalKineticEnergyJ: 0,
+      kineticEnergyJ: 0,
+    }
+
+    expect(
+      resolveBooleanBodyRenderTransform(
+        { centerOfMass: { x: 4, y: 5 }, angleRad: 0.75 },
+        runtime,
+        true,
+      ),
+    ).toEqual({ position: { x: 4, y: 5 }, angleRad: 0.75 })
+    expect(
+      resolveBooleanBodyRenderTransform(
+        { centerOfMass: { x: 4, y: 5 }, angleRad: 0.75 },
+        runtime,
+        false,
+      ),
+    ).toEqual({ position: runtime.position, angleRad: runtime.angleRad })
   })
 })

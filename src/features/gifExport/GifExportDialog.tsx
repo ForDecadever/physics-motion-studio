@@ -14,7 +14,8 @@ import type { Camera2D } from '../../editor/camera/viewport'
 import { isFilePickerCancellation } from '../../persistence/fileSystemAccess'
 import { chooseGifFile, saveGif, supportsGifFilePicker } from '../../persistence/gifFile'
 import type { GifHistorySnapshot } from '../../physics/worker/messages'
-import type { BodyEntity, EntityId, SceneDocument } from '../../scene/model/types'
+import type { EntityId, SceneDocument } from '../../scene/model/types'
+import { listRuntimeBodyTargets } from '../../scene/model/runtimeBodyTargets'
 import { GifEncoderClient } from './gifEncoderClient'
 import {
   createDefaultGifExportSettings,
@@ -173,13 +174,7 @@ export function GifExportDialog({
   const customFpsValid =
     !customFps || (Number.isInteger(fpsDraftValue) && fpsDraftValue >= 1 && fpsDraftValue <= 30)
   const trackedIds = new Set(snapshot.bodyIds)
-  const visibleLayerIds = new Set(
-    scene.layers.filter((layer) => layer.visible).map((layer) => layer.id),
-  )
-  const bodies = scene.entities.filter(
-    (entity): entity is BodyEntity =>
-      entity.kind === 'body' && entity.visible && visibleLayerIds.has(entity.layerId),
-  )
+  const bodies = listRuntimeBodyTargets(scene).filter((body) => body.visible)
   const historyReady = status.kind === 'ready' && status.sampleCount >= 2
   const canExport =
     historyReady && previewReady && customFpsValid && load.valid && progress === null
@@ -457,7 +452,11 @@ export function GifExportDialog({
 
   const statusMessage =
     status.kind === 'blocked'
-      ? `当前有 ${status.bodyCount} 个动态物体，GIF 最多记录 ${status.maxBodies} 个。请减少物体并重置模拟。`
+      ? status.reason === 'body-limit'
+        ? `当前有 ${status.bodyCount} 个动态物体，GIF 最多记录 ${status.maxBodies} 个。请减少物体并重置模拟。`
+        : status.reason === 'connector-point-limit'
+          ? `当前有 ${status.pointCount} 个运行时连接器节点，GIF 最多记录 ${status.maxPoints} 个。请减少带质量或带碰撞的连接器并重置模拟。`
+          : `当前有 ${status.ionCount} 个粒子源离子，GIF 最多记录 ${status.maxIons} 个。请缩短线源或减少粒子源并重置模拟。`
       : status.sampleCount < 2
         ? '还没有足够的运动记录。请关闭窗口，播放或单步运行模拟后再试。'
         : null

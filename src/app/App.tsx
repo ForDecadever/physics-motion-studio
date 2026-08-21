@@ -1,10 +1,14 @@
 import { useCallback, useEffect, useRef, useState, type ChangeEvent } from 'react'
 
-import { collectClipboardEntities, duplicateEntities } from '../editor/clipboard/entityClipboard'
+import {
+  collectSceneClipboard,
+  duplicateSceneClipboard,
+  type SceneClipboardPayload,
+} from '../editor/clipboard/entityClipboard'
 import { commitPendingEditorEdit } from '../editor/editing/pendingEditorEdit'
 import {
-  createAddEntityCommand,
   createDeleteEntitiesCommand,
+  createReplaceSceneCommand,
 } from '../editor/commands/entityCommands'
 import { downloadAllChartsCsv } from '../features/charts/chartCsv'
 import { evaluateChart, type EvaluatedChart } from '../features/charts/chartSeries'
@@ -30,7 +34,9 @@ import {
 import { readSceneFile } from '../persistence/sceneFile'
 import { isDesktopRuntime } from '../platform/runtime'
 import { physicsClient } from '../physics/client/physicsClient'
-import type { BodyEntity, SceneDocument, SceneEntity } from '../scene/model/types'
+import { collectSceneTreeTargetIds, sceneTreeItemTargetId } from '../scene/model/booleanLayerGraph'
+import type { SceneDocument } from '../scene/model/types'
+import { listRuntimeBodyTargets } from '../scene/model/runtimeBodyTargets'
 import type { GifHistorySnapshot } from '../physics/worker/messages'
 import { getChartTelemetryBuffer, useChartStore } from '../stores/chartStore'
 import { useDocumentStore } from '../stores/documentStore'
@@ -57,7 +63,10 @@ function resetEditorForDocument() {
 export function App() {
   const inputRef = useRef<HTMLInputElement>(null)
   const fileTokenRef = useRef<SceneFileToken | null>(null)
-  const clipboardRef = useRef<SceneEntity[]>([])
+  const clipboardRef = useRef<SceneClipboardPayload>({
+    entities: [],
+    rootItems: [],
+  })
   const desktopHandlersRef = useRef<{
     execute: (command: AppCommand) => void
     openRecent: (id: string) => void
@@ -95,12 +104,12 @@ export function App() {
   }, [])
 
   const physicsEntities = scene.entities
-  const physicsLayers = scene.layers
+  const physicsRootItems = scene.rootItems
   const physicsSettings = scene.settings
 
   useEffect(() => {
     physicsClient.initialize(useDocumentStore.getState().scene)
-  }, [physicsEntities, physicsLayers, physicsSettings])
+  }, [physicsEntities, physicsRootItems, physicsSettings])
 
   useEffect(() => {
     void loadSceneDraft()
@@ -250,27 +259,35 @@ export function App() {
   const handleCopy = () => {
     const document = useDocumentStore.getState().scene
     clipboardRef.current = structuredClone(
-      collectClipboardEntities(document.entities, useEditorStore.getState().selectedIds),
+      collectSceneClipboard(document, useEditorStore.getState().selectedIds),
     )
-    setClipboardCount(clipboardRef.current.length)
-    if (clipboardRef.current.length > 0) {
-      showNotice({ tone: 'success', message: `已复制 ${clipboardRef.current.length} 个实体` })
+    const count = clipboardRef.current.rootItems.length
+    setClipboardCount(count)
+    if (count > 0) {
+      showNotice({ tone: 'success', message: `已复制 ${count} 个对象` })
     }
   }
 
   const handlePaste = () => {
     if (isSimulationRuntimeLocked(useSimulationStore.getState())) return
     const document = useDocumentStore.getState()
-    const copies = duplicateEntities(clipboardRef.current)
-    if (copies.length === 0) return
-    document.executeCommand(createAddEntityCommand(document.scene, copies))
-    useEditorStore.getState().setSelectedIds(copies.map((entity) => entity.id))
+    const copies = duplicateSceneClipboard(clipboardRef.current)
+    if (copies.entities.length === 0 && copies.rootItems.length === 0) return
+    const next = {
+      ...document.scene,
+      rootItems: [...document.scene.rootItems, ...copies.rootItems],
+      entities: [...document.scene.entities, ...copies.entities],
+    }
+    document.executeCommand(createReplaceSceneCommand(document.scene, next, '粘贴对象'))
+    useEditorStore.getState().setSelectedIds(copies.selectedIds)
   }
 
   const handleSelectAll = () => {
     useEditorStore
       .getState()
-      .setSelectedIds(useDocumentStore.getState().scene.entities.map((entity) => entity.id))
+      .setSelectedIds(
+        useDocumentStore.getState().scene.rootItems.map((item) => sceneTreeItemTargetId(item)),
+      )
   }
 
   const handlePlayPause = () => {
@@ -298,7 +315,7 @@ export function App() {
 
   const handleExportCsv = () => {
     if (getChartTelemetryBuffer().length === 0) return
-    const bodies = scene.entities.filter((entity): entity is BodyEntity => entity.kind === 'body')
+    const bodies = listRuntimeBodyTargets(scene)
     const evaluated = new Map<string, EvaluatedChart>()
     for (const chart of scene.charts) {
       try {
@@ -333,13 +350,17 @@ export function App() {
   }
 
   const pruneSelection = () => {
-    const validIds = new Set(useDocumentStore.getState().scene.entities.map((entity) => entity.id))
+    const currentScene = useDocumentStore.getState().scene
+    const validIds = new Set([
+      ...currentScene.entities.map((entity) => entity.id),
+      ...currentScene.rootItems.flatMap(collectSceneTreeTargetIds),
+    ])
     const editor = useEditorStore.getState()
     editor.setSelectedIds(editor.selectedIds.filter((id) => validIds.has(id)))
     editor.clearPreview()
     editor.setDraftEntity(null)
     editor.setMarquee(null)
-    editor.setConnectorStartBodyId(null)
+    editor.setConnectorStartEndpoint(null)
     editor.setGroundJointStart(null)
     editor.setGroundJointMessage(null)
   }
@@ -365,7 +386,7 @@ export function App() {
     if (!command) return
     documentState.executeCommand(command)
     editor.clearSelection()
-    editor.setConnectorStartBodyId(null)
+    editor.setConnectorStartEndpoint(null)
     editor.setGroundJointStart(null)
     editor.setGroundJointMessage(null)
   }
@@ -614,7 +635,7 @@ export function App() {
       if (gifExportModal || draftPrompt || helpTopic) return
       const target = event.target
       if (
-        target instanceof HTMLInputElement ||
+        (target instanceof HTMLInputElement && target.type !== 'checkbox') ||
         target instanceof HTMLTextAreaElement ||
         target instanceof HTMLSelectElement ||
         (target instanceof HTMLElement && target.isContentEditable)
@@ -723,9 +744,6 @@ export function App() {
       {!desktopRuntime ? (
         <MenuBar
           navigationVisible
-          sceneName={scene.metadata.name}
-          fileName={fileName}
-          isDirty={isDirty}
           onNew={handleNew}
           onOpen={handleOpenRequest}
           onSave={() => void handleSave()}
@@ -876,7 +894,7 @@ export function App() {
               </ul>
             ) : (
               <div>
-                <p>Motion Studio 1.0.0</p>
+                <p>Motion Studio 1.5.4</p>
                 <p>二维物理运动建模、仿真与可视化工具。</p>
                 <p>采用 Apache-2.0 许可证开源。</p>
               </div>

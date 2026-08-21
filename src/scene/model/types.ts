@@ -1,8 +1,7 @@
-export const CURRENT_SCHEMA_VERSION = 7 as const
-export const CURRENT_APP_VERSION = '1.0.0'
+export const CURRENT_SCHEMA_VERSION = 16 as const
+export const CURRENT_APP_VERSION = '1.5.4'
 
 export type EntityId = string
-export type LayerId = string
 export type ChartId = string
 export type ChartSeriesId = string
 
@@ -25,19 +24,56 @@ export interface BezierPathNode {
   anchor: Vec2
   inHandle: Vec2
   outHandle: Vec2
+  collapsedHandles?: {
+    inOffset: Vec2
+    outOffset: Vec2
+  }
 }
 
-export interface Layer {
-  id: LayerId
+export type BooleanOperation = 'union' | 'difference'
+
+export interface EntityTreeItem {
+  kind: 'entity'
+  entityId: EntityId
+}
+
+export type BooleanMassDistribution = { mode: 'source' } | { mode: 'uniform'; totalMassKg: number }
+
+export type BooleanChargeDistribution =
+  { mode: 'source' } | { mode: 'uniform'; totalChargeC: number }
+
+export type BooleanScalarDistribution = { mode: 'source' } | { mode: 'uniform'; value: number }
+
+export type BooleanInitialVelocity = { mode: 'source' } | { mode: 'override'; value: Vec2 }
+
+export type BooleanInitialAngularVelocity =
+  { mode: 'source' } | { mode: 'override'; valueRadPerSecond: number }
+
+export interface BooleanNode {
+  kind: 'boolean'
+  id: string
   name: string
   visible: boolean
   locked: boolean
+  operation: BooleanOperation
+  resultId: EntityId
+  operands: SceneTreeItem[]
+  simulationEnabled: boolean
+  rotationEnabled: boolean
+  continuousCollisionDetection: boolean
+  massDistribution: BooleanMassDistribution
+  chargeDistribution: BooleanChargeDistribution
+  frictionDistribution: BooleanScalarDistribution
+  restitutionDistribution: BooleanScalarDistribution
+  initialVelocity: BooleanInitialVelocity
+  initialAngularVelocity: BooleanInitialAngularVelocity
 }
+
+export type SceneTreeItem = EntityTreeItem | BooleanNode
 
 export interface BaseEntity {
   id: EntityId
   name: string
-  layerId: LayerId
   visible: boolean
   locked: boolean
   simulationEnabled: boolean
@@ -89,6 +125,7 @@ export interface GroundJointEntity extends BaseEntity {
 export type BodyShape =
   | { type: 'circle'; radius: number; collisionEnabled: boolean }
   | { type: 'box'; width: number; height: number }
+  | { type: 'bezierPath'; nodes: BezierPathNode[] }
 
 export interface BodyEntity extends BaseEntity {
   kind: 'body'
@@ -134,14 +171,50 @@ export interface FieldEntity extends BaseEntity {
   field: FieldDefinition
 }
 
-export interface ConnectorEndpoint {
+export interface BodyConnectorEndpoint {
+  type: 'body'
   bodyId: EntityId
   localAnchor: Vec2
 }
 
+export interface GroundConnectorEndpoint {
+  type: 'ground'
+  groundId: EntityId
+  pathRatio: number
+}
+
+export interface GroundJointConnectorEndpoint {
+  type: 'groundJoint'
+  groundJointId: EntityId
+  pathRatio: number
+}
+
+export interface WorldConnectorEndpoint {
+  type: 'world'
+  position: Vec2
+}
+
+export interface FreeConnectorEndpoint {
+  type: 'free'
+  position: Vec2
+}
+
+export type ConnectorEndpoint =
+  | BodyConnectorEndpoint
+  | GroundConnectorEndpoint
+  | GroundJointConnectorEndpoint
+  | WorldConnectorEndpoint
+  | FreeConnectorEndpoint
+
+export type RodEndpointRotation = 'free' | 'fixed'
+
 export type ConnectorDefinition =
   | { type: 'rope'; maxLength: number }
-  | { type: 'rod'; length: number; freeRotation: boolean }
+  | {
+      type: 'rod'
+      length: number
+      endpointRotation: { a: RodEndpointRotation; b: RodEndpointRotation }
+    }
   | {
       type: 'spring'
       restLength: number
@@ -154,10 +227,33 @@ export interface ConnectorEntity extends BaseEntity {
   a: ConnectorEndpoint
   b: ConnectorEndpoint
   connector: ConnectorDefinition
+  collisionEnabled: boolean
+  radiusM: number
+  massKg: number
+  material: Material2D
+}
+
+export type ParticleSourceShape =
+  { type: 'point'; position: Vec2 } | { type: 'line'; start: Vec2; end: Vec2 }
+
+export interface ParticleSourceEntity extends BaseEntity {
+  kind: 'particleSource'
+  shape: ParticleSourceShape
+  directionRad: number
+  flipEmission: boolean
+  speedMps: number
+  chargeC: number
+  massKg: number
+  coulombEnabled: boolean
 }
 
 export type SceneEntity =
-  GroundEntity | GroundJointEntity | BodyEntity | FieldEntity | ConnectorEntity
+  | GroundEntity
+  | GroundJointEntity
+  | BodyEntity
+  | FieldEntity
+  | ConnectorEntity
+  | ParticleSourceEntity
 
 export interface SceneMetadata {
   name: string
@@ -223,7 +319,7 @@ export interface SceneDocument {
   appVersion: string
   metadata: SceneMetadata
   settings: SceneSettings
-  layers: Layer[]
+  rootItems: SceneTreeItem[]
   entities: SceneEntity[]
   charts: ChartDefinition[]
 }

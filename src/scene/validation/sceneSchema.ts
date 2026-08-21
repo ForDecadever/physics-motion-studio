@@ -7,7 +7,14 @@ import {
   MAX_CHART_SERIES_PER_CHART,
   MAX_RECORDED_CHART_BODIES,
 } from '../model/chartDefaults'
-import { CURRENT_SCHEMA_VERSION, type ChartDefinition, type SceneDocument } from '../model/types'
+import { MAX_BOOLEAN_OPERANDS, validateBooleanLayerGraph } from '../model/booleanLayerGraph'
+import { analyzeBezierBodyPath } from '../model/bodyPath'
+import {
+  CURRENT_SCHEMA_VERSION,
+  type BezierPathNode,
+  type ChartDefinition,
+  type SceneDocument,
+} from '../model/types'
 
 const finiteNumber = z.number().finite()
 const positiveNumber = finiteNumber.positive()
@@ -34,10 +41,37 @@ const materialSchema = z
   })
   .passthrough()
 
+const bezierPathNodeSchema = z
+  .object({
+    anchor: vec2Schema,
+    inHandle: vec2Schema,
+    outHandle: vec2Schema,
+    collapsedHandles: z
+      .object({
+        inOffset: vec2Schema,
+        outOffset: vec2Schema,
+      })
+      .optional(),
+  })
+  .passthrough()
+  .superRefine((node, context) => {
+    if (
+      node.collapsedHandles &&
+      (node.inHandle.x !== node.anchor.x ||
+        node.inHandle.y !== node.anchor.y ||
+        node.outHandle.x !== node.anchor.x ||
+        node.outHandle.y !== node.anchor.y)
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: '折叠贝塞尔节点的可见控制棒必须与锚点重合。',
+      })
+    }
+  })
+
 const baseEntityShape = {
   id: entityId,
   name: z.string().trim().min(1).max(120),
-  layerId: entityId,
   visible: z.boolean(),
   locked: z.boolean(),
   simulationEnabled: z.boolean(),
@@ -120,6 +154,12 @@ const bodyShapeSchema = z.discriminatedUnion('type', [
       height: positiveNumber,
     })
     .passthrough(),
+  z
+    .object({
+      type: z.literal('bezierPath'),
+      nodes: z.array(bezierPathNodeSchema).min(3).max(2_048),
+    })
+    .passthrough(),
 ])
 
 const bodyEntitySchema = z
@@ -168,17 +208,7 @@ const fieldRegionSchema = z.discriminatedUnion('type', [
   z
     .object({
       type: z.literal('bezierPath'),
-      nodes: z
-        .array(
-          z
-            .object({
-              anchor: vec2Schema,
-              inHandle: vec2Schema,
-              outHandle: vec2Schema,
-            })
-            .passthrough(),
-        )
-        .min(3),
+      nodes: z.array(bezierPathNodeSchema).min(3),
     })
     .passthrough(),
 ])
@@ -198,12 +228,25 @@ const fieldEntitySchema = z
   })
   .passthrough()
 
-const endpointSchema = z
-  .object({
-    bodyId: entityId,
-    localAnchor: vec2Schema,
-  })
-  .passthrough()
+const endpointSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('body'), bodyId: entityId, localAnchor: vec2Schema }).passthrough(),
+  z
+    .object({
+      type: z.literal('ground'),
+      groundId: entityId,
+      pathRatio: finiteNumber.min(0).max(1),
+    })
+    .passthrough(),
+  z
+    .object({
+      type: z.literal('groundJoint'),
+      groundJointId: entityId,
+      pathRatio: finiteNumber.min(0).max(1),
+    })
+    .passthrough(),
+  z.object({ type: z.literal('world'), position: vec2Schema }).passthrough(),
+  z.object({ type: z.literal('free'), position: vec2Schema }).passthrough(),
+])
 
 const connectorDefinitionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('rope'), maxLength: positiveNumber }).passthrough(),
@@ -211,7 +254,9 @@ const connectorDefinitionSchema = z.discriminatedUnion('type', [
     .object({
       type: z.literal('rod'),
       length: positiveNumber,
-      freeRotation: z.boolean(),
+      endpointRotation: z
+        .object({ a: z.enum(['free', 'fixed']), b: z.enum(['free', 'fixed']) })
+        .passthrough(),
     })
     .passthrough(),
   z
@@ -231,6 +276,29 @@ const connectorEntitySchema = z
     a: endpointSchema,
     b: endpointSchema,
     connector: connectorDefinitionSchema,
+    collisionEnabled: z.boolean(),
+    radiusM: positiveNumber,
+    massKg: finiteNumber.min(0),
+    material: materialSchema,
+  })
+  .passthrough()
+
+const particleSourceShapeSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('point'), position: vec2Schema }).passthrough(),
+  z.object({ type: z.literal('line'), start: vec2Schema, end: vec2Schema }).passthrough(),
+])
+
+const particleSourceEntitySchema = z
+  .object({
+    ...baseEntityShape,
+    kind: z.literal('particleSource'),
+    shape: particleSourceShapeSchema,
+    directionRad: finiteNumber,
+    flipEmission: z.boolean(),
+    speedMps: finiteNumber.min(0),
+    chargeC: finiteNumber,
+    massKg: positiveNumber,
+    coulombEnabled: z.boolean(),
   })
   .passthrough()
 
@@ -240,7 +308,64 @@ const sceneEntitySchema = z.discriminatedUnion('kind', [
   bodyEntitySchema,
   fieldEntitySchema,
   connectorEntitySchema,
+  particleSourceEntitySchema,
 ])
+
+const sourceDistributionSchema = z.object({ mode: z.literal('source') }).passthrough()
+const massDistributionSchema = z.discriminatedUnion('mode', [
+  sourceDistributionSchema,
+  z.object({ mode: z.literal('uniform'), totalMassKg: positiveNumber }).passthrough(),
+])
+const chargeDistributionSchema = z.discriminatedUnion('mode', [
+  sourceDistributionSchema,
+  z.object({ mode: z.literal('uniform'), totalChargeC: finiteNumber }).passthrough(),
+])
+const scalarDistributionSchema = z.discriminatedUnion('mode', [
+  sourceDistributionSchema,
+  z.object({ mode: z.literal('uniform'), value: finiteNumber }).passthrough(),
+])
+const initialVelocitySchema = z.discriminatedUnion('mode', [
+  sourceDistributionSchema,
+  z.object({ mode: z.literal('override'), value: vec2Schema }).passthrough(),
+])
+const initialAngularVelocitySchema = z.discriminatedUnion('mode', [
+  sourceDistributionSchema,
+  z.object({ mode: z.literal('override'), valueRadPerSecond: finiteNumber }).passthrough(),
+])
+const sceneTreeItemSchema: z.ZodType<unknown> = z.lazy(() =>
+  z.discriminatedUnion('kind', [
+    z.object({ kind: z.literal('entity'), entityId }).passthrough(),
+    z
+      .object({
+        kind: z.literal('boolean'),
+        id: entityId,
+        resultId: entityId,
+        name: z.string().trim().min(1).max(120),
+        visible: z.boolean(),
+        locked: z.boolean(),
+        operation: z.enum(['union', 'difference']),
+        operands: z.array(sceneTreeItemSchema).max(MAX_BOOLEAN_OPERANDS),
+        simulationEnabled: z.boolean(),
+        rotationEnabled: z.boolean(),
+        continuousCollisionDetection: z.boolean(),
+        massDistribution: massDistributionSchema,
+        chargeDistribution: chargeDistributionSchema,
+        frictionDistribution: scalarDistributionSchema.refine(
+          (distribution) =>
+            distribution.mode === 'source' || (distribution.value >= 0 && distribution.value <= 5),
+          '摩擦系数必须在 0 到 5 之间。',
+        ),
+        restitutionDistribution: scalarDistributionSchema.refine(
+          (distribution) =>
+            distribution.mode === 'source' || (distribution.value >= 0 && distribution.value <= 1),
+          '弹性系数必须在 0 到 1 之间。',
+        ),
+        initialVelocity: initialVelocitySchema,
+        initialAngularVelocity: initialAngularVelocitySchema,
+      })
+      .passthrough(),
+  ]),
+)
 
 const chartMetricIdSchema = z.enum([
   'time',
@@ -340,23 +465,62 @@ export const sceneDocumentSchema = z
         recordingDurationSeconds: finiteNumber.int().min(1).max(3600),
       })
       .passthrough(),
-    layers: z
-      .array(
-        z
-          .object({
-            id: entityId,
-            name: z.string().trim().min(1).max(120),
-            visible: z.boolean(),
-            locked: z.boolean(),
-          })
-          .passthrough(),
-      )
-      .min(1),
+    rootItems: z.array(sceneTreeItemSchema),
     entities: z.array(sceneEntitySchema),
     charts: z.array(chartDefinitionSchema).max(MAX_CHARTS),
   })
   .passthrough()
   .superRefine((scene, context) => {
+    for (const issue of validateBooleanLayerGraph(scene as SceneDocument)) {
+      context.addIssue({ code: 'custom', path: issue.path, message: issue.message })
+    }
+    scene.entities.forEach((entity, index) => {
+      if (entity.kind === 'body' && entity.shape.type === 'bezierPath') {
+        for (const diagnostic of analyzeBezierBodyPath(entity.shape.nodes as BezierPathNode[])
+          .diagnostics) {
+          context.addIssue({
+            code: 'custom',
+            path: ['entities', index, 'shape', 'nodes'],
+            message: diagnostic,
+          })
+        }
+      }
+      if (entity.kind !== 'connector') return
+      const hasFreeEndpoint = entity.a.type === 'free' || entity.b.type === 'free'
+      if (hasFreeEndpoint && entity.connector.type !== 'spring') {
+        context.addIssue({
+          code: 'custom',
+          path: ['entities', index],
+          message: '只有弹簧可以使用自由端点。',
+        })
+      }
+      if (entity.connector.type === 'rope') {
+        const validMass = entity.collisionEnabled ? entity.massKg >= 0.001 : entity.massKg === 0
+        if (!validMass) {
+          context.addIssue({
+            code: 'custom',
+            path: ['entities', index, 'massKg'],
+            message: entity.collisionEnabled
+              ? '开启碰撞的绳质量不得低于 0.001 kg。'
+              : '关闭碰撞的绳质量必须为 0 kg。',
+          })
+        }
+      }
+      if (entity.connector.type === 'spring' && entity.massKg !== 0) {
+        context.addIssue({
+          code: 'custom',
+          path: ['entities', index, 'massKg'],
+          message: '弹簧质量固定为 0 kg。',
+        })
+      }
+      if (entity.connector.type === 'spring' && entity.collisionEnabled) {
+        context.addIssue({
+          code: 'custom',
+          path: ['entities', index, 'collisionEnabled'],
+          message: '弹簧的普通碰撞必须关闭。',
+        })
+      }
+    })
     const totalSeries = scene.charts.reduce((total, chart) => total + chart.series.length, 0)
     if (totalSeries > MAX_CHART_SERIES) {
       context.addIssue({

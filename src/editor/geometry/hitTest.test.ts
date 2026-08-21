@@ -1,14 +1,73 @@
 import { describe, expect, it } from 'vitest'
 
-import { createGroundJoint, createLineGround } from '../../scene/model/entityFactories'
+import {
+  createBall,
+  createGroundJoint,
+  createLineGround,
+  createRope,
+} from '../../scene/model/entityFactories'
 import { buildGroundPathNetwork } from '../../scene/model/groundPath'
 import {
   findNearestGroundEndpoint,
   findNearestUnoccupiedGroundEndpoint,
   findTopEntity,
+  snappedGroundPathRatio,
 } from './hitTest'
 
 const layerId = '00000000-0000-4000-8000-000000000001'
+
+describe('连接器地面端点网格吸附', () => {
+  it('开启网格吸附时把地面端点吸附到最近的网格点', () => {
+    const ground = createLineGround(layerId, { x: 0, y: 0 }, { x: 2, y: 0 }, 1)
+    const path = buildGroundPathNetwork([ground]).groundPaths.get(ground.id)?.path
+    if (!path) throw new Error('缺少地面路径')
+
+    const ratio = snappedGroundPathRatio(path, { x: 0.35, y: 0.2 }, { step: 0.5 })
+
+    expect(ratio).toBeCloseTo(0.5 / path.length, 6)
+  })
+
+  it('关闭吸附时地面端点保持点击位置的最近点', () => {
+    const ground = createLineGround(layerId, { x: 0, y: 0 }, { x: 2, y: 0 }, 1)
+    const path = buildGroundPathNetwork([ground]).groundPaths.get(ground.id)?.path
+    if (!path) throw new Error('缺少地面路径')
+
+    const ratio = snappedGroundPathRatio(path, { x: 0.35, y: 0.2 }, null)
+
+    expect(ratio).toBeCloseTo(0.35 / path.length, 6)
+  })
+
+  it('网格吸附点超出地面范围时夹紧到地面端点', () => {
+    const ground = createLineGround(layerId, { x: 0, y: 0 }, { x: 2, y: 0 }, 1)
+    const path = buildGroundPathNetwork([ground]).groundPaths.get(ground.id)?.path
+    if (!path) throw new Error('缺少地面路径')
+
+    const endRatio = snappedGroundPathRatio(path, { x: 1.9, y: 0.2 }, { step: 0.5 })
+    const startRatio = snappedGroundPathRatio(path, { x: 0.1, y: 0.2 }, { step: 0.5 })
+
+    expect(endRatio).toBe(1)
+    expect(startRatio).toBe(0)
+  })
+
+  it('地面连接段端点同样支持网格吸附', () => {
+    const first = createLineGround(layerId, { x: -4, y: 0 }, { x: 0, y: 0 }, 1)
+    const second = createLineGround(layerId, { x: 0, y: 0 }, { x: 0, y: 4 }, 2)
+    const joint = createGroundJoint(
+      layerId,
+      { groundId: first.id, endpoint: 'end' },
+      { groundId: second.id, endpoint: 'start' },
+      1,
+    )
+    const path = buildGroundPathNetwork([first, second, joint]).jointPaths.get(joint.id)?.path
+    if (!path) throw new Error('缺少连接段路径')
+
+    const ratio = snappedGroundPathRatio(path, { x: -0.1, y: 0.1 }, { step: 0.5 })
+
+    expect(ratio).toBeGreaterThanOrEqual(0)
+    expect(ratio).toBeLessThanOrEqual(1)
+    expect(Number.isFinite(ratio)).toBe(true)
+  })
+})
 
 describe('地面连接点命中', () => {
   it('重合端点第二次查找时可排除第一块地面', () => {
@@ -78,5 +137,24 @@ describe('地面连接点命中', () => {
 
     expect(hit?.ground.id).toBe(available.id)
     expect(hit?.reference.endpoint).toBe('start')
+  })
+
+  it('模拟运行时按连接器节点折线命中，而不是按初始直线命中', () => {
+    const first = createBall(layerId, { x: -1, y: 0 }, 0.2, 1)
+    const second = createBall(layerId, { x: 1, y: 0 }, 0.2, 2)
+    const rope = createRope(layerId, first.id, second.id, 3, 1)
+    const runtime = {
+      [rope.id]: {
+        entityId: rope.id,
+        points: [
+          { x: -1, y: 0 },
+          { x: 0, y: -1 },
+          { x: 1, y: 0 },
+        ],
+      },
+    }
+
+    expect(findTopEntity([first, second, rope], { x: 0, y: -1 }, 0.05, runtime)?.id).toBe(rope.id)
+    expect(findTopEntity([first, second, rope], { x: 0, y: 0 }, 0.05, runtime)).toBeNull()
   })
 })

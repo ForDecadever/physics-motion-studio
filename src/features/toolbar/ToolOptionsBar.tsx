@@ -1,19 +1,14 @@
-import {
-  Boxes,
-  BoxSelect,
-  Check,
-  Focus,
-  GitMerge,
-  Grid2X2,
-  Magnet,
-  MousePointer2,
-} from 'lucide-react'
+import { Boxes, BoxSelect, Check, Focus, GitMerge, Grid2X2, Magnet } from 'lucide-react'
 
 import { defaultCamera, getVisibleSnapStep } from '../../editor/camera/viewport'
-import { getScalableSelectionBounds } from '../../editor/geometry/entityGeometry'
+import {
+  listEditingSelectionTargets,
+  selectionTargetBounds,
+} from '../../editor/geometry/selectionTargets'
 import { useDocumentStore } from '../../stores/documentStore'
 import {
   useEditorStore,
+  type BlockToolShape,
   type BodyToolPreset,
   type ConnectorToolPreset,
   type EditorTool,
@@ -21,6 +16,7 @@ import {
   type FieldRegionToolShape,
 } from '../../stores/editorStore'
 import styles from './Toolbar.module.css'
+import { getToolDefinition } from './toolDefinitions'
 
 const toolNames: Record<EditorTool, string> = {
   select: '选择与移动',
@@ -33,6 +29,7 @@ const toolNames: Record<EditorTool, string> = {
   body: '物体工具',
   field: '场工具',
   connector: '连接工具',
+  particleSource: '粒子源工具',
 }
 
 export function ToolOptionsBar() {
@@ -51,31 +48,28 @@ export function ToolOptionsBar() {
   const scene = useDocumentStore((state) => state.scene)
   const gridStep = scene.settings.gridStep
   const selectedIds = useEditorStore((state) => state.selectedIds)
-  const connectorStartBodyId = useEditorStore((state) => state.connectorStartBodyId)
+  const connectorStartEndpoint = useEditorStore((state) => state.connectorStartEndpoint)
   const groundJointStart = useEditorStore((state) => state.groundJointStart)
   const groundJointMessage = useEditorStore((state) => state.groundJointMessage)
   const setCamera = useEditorStore((state) => state.setCamera)
   const groundToolShape = useEditorStore((state) => state.groundToolShape)
   const bodyToolPreset = useEditorStore((state) => state.bodyToolPreset)
+  const blockToolShape = useEditorStore((state) => state.blockToolShape)
+  const triangleAngleDeg = useEditorStore((state) => state.triangleAngleDeg)
   const fieldToolPreset = useEditorStore((state) => state.fieldToolPreset)
   const fieldRegionToolShape = useEditorStore((state) => state.fieldRegionToolShape)
   const connectorToolPreset = useEditorStore((state) => state.connectorToolPreset)
   const setGroundToolShape = useEditorStore((state) => state.setGroundToolShape)
   const setBodyToolPreset = useEditorStore((state) => state.setBodyToolPreset)
+  const setBlockToolShape = useEditorStore((state) => state.setBlockToolShape)
+  const setTriangleAngleDeg = useEditorStore((state) => state.setTriangleAngleDeg)
   const setFieldToolPreset = useEditorStore((state) => state.setFieldToolPreset)
   const setFieldRegionToolShape = useEditorStore((state) => state.setFieldRegionToolShape)
   const setConnectorToolPreset = useEditorStore((state) => state.setConnectorToolPreset)
-  const visibleLayerIds = new Set(
-    scene.layers.filter((layer) => layer.visible).map((layer) => layer.id),
-  )
-  const lockedLayerIds = new Set(
-    scene.layers.filter((layer) => layer.locked).map((layer) => layer.id),
-  )
-  const scalableSelectionBounds = getScalableSelectionBounds(
-    scene.entities
-      .filter((entity) => visibleLayerIds.has(entity.layerId))
-      .map((entity) => (lockedLayerIds.has(entity.layerId) ? { ...entity, locked: true } : entity)),
+  const scalableSelectionBounds = selectionTargetBounds(
+    listEditingSelectionTargets(scene, scene.entities, {}, new Set(), new Set(selectedIds)),
     selectedIds,
+    true,
   )
 
   const toolDetail: Record<EditorTool, string> = {
@@ -89,20 +83,27 @@ export function ToolOptionsBar() {
     groundJoint:
       groundJointMessage ??
       (groundJointStart ? '请选择另一块地面的端点' : '依次点击两块地面的端点'),
-    body: '拖动设置物体尺寸',
+    body:
+      bodyToolPreset === 'block' && blockToolShape === 'freeform'
+        ? '逐点绘制；点首节点、双击或 Enter 完成，Alt 独立控制单侧控制棒'
+        : '拖动设置物体尺寸',
     field:
       fieldRegionToolShape === 'infinite'
         ? '点击创建覆盖整个空间的场'
         : fieldRegionToolShape === 'freeform'
           ? '逐点绘制；点首节点、双击或 Enter 完成'
           : `拖动绘制${fieldRegionToolShape === 'circle' ? '圆形' : '矩形'}作用范围`,
-    connector: connectorStartBodyId ? '请选择第二个物体' : '依次选择两个物体',
+    connector: connectorStartEndpoint ? '请选择第二个端点' : '依次选择两个端点',
+    particleSource: '点击放置点源；拖动绘制线源（垂直于线发射）',
   }
 
   return (
     <section className={styles.optionsBar} aria-label="当前工具选项">
       <div className={styles.activeToolLabel}>
-        <MousePointer2 size={15} />
+        {(() => {
+          const ActiveToolIcon = getToolDefinition(activeTool).icon
+          return <ActiveToolIcon size={15} />
+        })()}
         <span>{toolNames[activeTool]}</span>
       </div>
       <div className={styles.optionsDivider} />
@@ -123,16 +124,51 @@ export function ToolOptionsBar() {
         </label>
       ) : null}
       {activeTool === 'body' ? (
-        <label className={styles.toolSelect}>
-          <span>物体</span>
-          <select
-            value={bodyToolPreset}
-            onChange={(event) => setBodyToolPreset(event.target.value as BodyToolPreset)}
-          >
-            <option value="ball">小球</option>
-            <option value="block">物块</option>
-          </select>
-        </label>
+        <>
+          <label className={styles.toolSelect}>
+            <span>物体</span>
+            <select
+              aria-label="物体"
+              value={bodyToolPreset}
+              onChange={(event) => setBodyToolPreset(event.target.value as BodyToolPreset)}
+            >
+              <option value="ball">小球</option>
+              <option value="block">物块</option>
+            </select>
+          </label>
+          {bodyToolPreset === 'block' ? (
+            <label className={styles.toolSelect}>
+              <span>形状</span>
+              <select
+                aria-label="物块形状"
+                value={blockToolShape}
+                onChange={(event) => setBlockToolShape(event.target.value as BlockToolShape)}
+              >
+                <option value="rectangle">矩形</option>
+                <option value="freeform">钢笔</option>
+                <option value="quarterRamp">四分之一圆滑道</option>
+                <option value="semicircleCutout">半圆槽</option>
+                <option value="quarterCircleCutout">四分之一圆槽</option>
+                <option value="triangle">三角斜面</option>
+              </select>
+            </label>
+          ) : null}
+          {bodyToolPreset === 'block' && blockToolShape === 'triangle' ? (
+            <label className={styles.toolSelect}>
+              <span>底角</span>
+              <input
+                aria-label="三角斜面底角"
+                type="number"
+                min={5}
+                max={85}
+                step={1}
+                value={triangleAngleDeg}
+                onChange={(event) => setTriangleAngleDeg(Number(event.target.value))}
+              />
+              <span>°</span>
+            </label>
+          ) : null}
+        </>
       ) : null}
       {activeTool === 'field' ? (
         <>

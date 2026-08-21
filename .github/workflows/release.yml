@@ -3,7 +3,7 @@ name: Windows Release
 on:
   push:
     tags:
-      - v1.0.0
+      - v1.5.4
 
 permissions:
   contents: write
@@ -43,10 +43,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: v1.0.0
-          releaseName: Motion Studio v1.0.0
+          tagName: v1.5.4
+          releaseName: Motion Studio v1.5.4
           releaseBody: |
-            Motion Studio 首个 Windows x64 桌面版本。
+            Motion Studio Windows x64 桌面版本 v1.5.4。
 
             安装包尚未进行代码签名，Windows 可能显示 SmartScreen 或“未知发布者”信誉提示。请核对随附 SHA-256 文件。
           releaseDraft: true
@@ -62,8 +62,8 @@ jobs:
         run: |
           $installer = Get-ChildItem -Path "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis" -Filter "*-setup.exe" | Select-Object -First 1
           if (-not $installer) { throw "NSIS installer was not generated." }
-          $assetName = "physics-motion-studio_1.0.0_x64-setup.exe"
+          $assetName = "physics-motion-studio_1.5.4_x64-setup.exe"
           $checksumName = "$assetName.sha256"
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer.FullName).Hash.ToLowerInvariant()
           "$hash  $assetName" | Set-Content -Encoding ascii -NoNewline -LiteralPath $checksumName
-          gh release upload v1.0.0 $checksumName --clobber
+          gh release upload v1.5.4 $checksumName --clobber

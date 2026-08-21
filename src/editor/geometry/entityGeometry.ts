@@ -1,13 +1,28 @@
+import * as polygonClipping from 'polygon-clipping'
+
 import type {
   BodyEntity,
   ConnectorEndpoint,
   EntityId,
   FieldEntity,
   GroundEntity,
+  ParticleSourceEntity,
   SceneEntity,
   Vec2,
 } from '../../scene/model/types'
+import {
+  entityToBooleanGeometry,
+  pointInBooleanGeometry,
+  polygonMetrics,
+  type BooleanMultiPolygon,
+  type ResolvedBooleanBody,
+} from '../../scene/model/booleanGeometry'
+import { buildGroundPathNetwork, type GroundPathNetwork } from '../../scene/model/groundPath'
 import { sampleClosedBezierPath } from '../../scene/model/bezierPath'
+import {
+  sampleAdaptiveClosedBezierPath,
+  sampleBezierBodyWorldPoints,
+} from '../../scene/model/bodyPath'
 
 export interface EditableTransform {
   position: Vec2
@@ -115,6 +130,17 @@ export function getEntityTransform(entity: SceneEntity): EditableTransform | nul
     }
   }
 
+  if (entity.kind === 'particleSource') {
+    if (entity.shape.type === 'point') {
+      return { position: entity.shape.position, angleRad: entity.directionRad }
+    }
+    const { start, end } = entity.shape
+    return {
+      position: { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 },
+      angleRad: Math.atan2(end.y - start.y, end.x - start.x),
+    }
+  }
+
   return null
 }
 
@@ -216,6 +242,29 @@ function transformField(
   }
 }
 
+function transformParticleSource(
+  entity: ParticleSourceEntity,
+  before: EditableTransform,
+  after: EditableTransform,
+): ParticleSourceEntity {
+  const angleDelta = after.angleRad - before.angleRad
+  if (entity.shape.type === 'point') {
+    return {
+      ...entity,
+      shape: { type: 'point', position: after.position },
+      directionRad: entity.directionRad + angleDelta,
+    }
+  }
+  return {
+    ...entity,
+    shape: {
+      type: 'line',
+      start: moveAndRotatePoint(entity.shape.start, before, after),
+      end: moveAndRotatePoint(entity.shape.end, before, after),
+    },
+  }
+}
+
 export function withEntityTransform(
   entity: SceneEntity,
   transform: EditableTransform,
@@ -232,6 +281,9 @@ export function withEntityTransform(
   if (entity.kind === 'field') {
     return transformField(entity, before, transform)
   }
+  if (entity.kind === 'particleSource') {
+    return transformParticleSource(entity, before, transform)
+  }
   return entity
 }
 
@@ -247,6 +299,8 @@ function bodyCorners(entity: BodyEntity): Vec2[] {
       { x: -halfWidth, y: halfHeight },
     ].map((corner) => add(position, rotateVector(corner, angleRad)))
   }
+
+  if (entity.shape.type === 'bezierPath') return sampleBezierBodyWorldPoints(entity)
 
   const radius = entity.shape.radius
   return [
@@ -310,6 +364,11 @@ function pointsForBounds(entity: SceneEntity): Vec2[] {
       { x: halfWidth, y: halfHeight },
       { x: -halfWidth, y: halfHeight },
     ].map((corner) => add(region.center, rotateVector(corner, region.angleRad)))
+  }
+  if (entity.kind === 'particleSource') {
+    return entity.shape.type === 'point'
+      ? [entity.shape.position]
+      : [entity.shape.start, entity.shape.end]
   }
   return []
 }
@@ -416,11 +475,34 @@ function scaledEntity(entity: SceneEntity, pivot: Vec2, factor: number): SceneEn
       shape:
         entity.shape.type === 'circle'
           ? { ...entity.shape, radius: entity.shape.radius * factor }
-          : {
-              ...entity.shape,
-              width: entity.shape.width * factor,
-              height: entity.shape.height * factor,
-            },
+          : entity.shape.type === 'box'
+            ? {
+                ...entity.shape,
+                width: entity.shape.width * factor,
+                height: entity.shape.height * factor,
+              }
+            : {
+                ...entity.shape,
+                nodes: entity.shape.nodes.map((node) => ({
+                  anchor: { x: node.anchor.x * factor, y: node.anchor.y * factor },
+                  inHandle: { x: node.inHandle.x * factor, y: node.inHandle.y * factor },
+                  outHandle: { x: node.outHandle.x * factor, y: node.outHandle.y * factor },
+                  ...(node.collapsedHandles
+                    ? {
+                        collapsedHandles: {
+                          inOffset: {
+                            x: node.collapsedHandles.inOffset.x * factor,
+                            y: node.collapsedHandles.inOffset.y * factor,
+                          },
+                          outOffset: {
+                            x: node.collapsedHandles.outOffset.x * factor,
+                            y: node.collapsedHandles.outOffset.y * factor,
+                          },
+                        },
+                      }
+                    : {}),
+                })),
+              },
     }
   }
 
@@ -498,6 +580,20 @@ function scaledEntity(entity: SceneEntity, pivot: Vec2, factor: number): SceneEn
           anchor: scalePointAroundPivot(node.anchor, pivot, factor),
           inHandle: scalePointAroundPivot(node.inHandle, pivot, factor),
           outHandle: scalePointAroundPivot(node.outHandle, pivot, factor),
+          ...(node.collapsedHandles
+            ? {
+                collapsedHandles: {
+                  inOffset: {
+                    x: node.collapsedHandles.inOffset.x * factor,
+                    y: node.collapsedHandles.inOffset.y * factor,
+                  },
+                  outOffset: {
+                    x: node.collapsedHandles.outOffset.x * factor,
+                    y: node.collapsedHandles.outOffset.y * factor,
+                  },
+                },
+              }
+            : {}),
         })),
       },
     }
@@ -520,9 +616,12 @@ function polylineLength(points: Vec2[]): number {
 
 function minimumScalableMeasure(entity: SceneEntity): number | null {
   if (entity.kind === 'body') {
-    return entity.shape.type === 'circle'
-      ? entity.shape.radius
-      : positiveMinimum([entity.shape.width, entity.shape.height])
+    if (entity.shape.type === 'circle') return entity.shape.radius
+    if (entity.shape.type === 'box') {
+      return positiveMinimum([entity.shape.width, entity.shape.height])
+    }
+    const bounds = getEntityBounds(entity)
+    return bounds ? positiveMinimum([bounds.maxX - bounds.minX, bounds.maxY - bounds.minY]) : null
   }
   if (entity.kind === 'ground') {
     if (entity.geometry.type === 'line') {
@@ -565,12 +664,11 @@ export function scaleEntitiesAroundPivot(
 
   for (const entity of entities) {
     if (entity.kind !== 'connector') continue
-    const scaleA = scaledBodyIds.has(entity.a.bodyId)
-    const scaleB = scaledBodyIds.has(entity.b.bodyId)
+    const scaleA = entity.a.type === 'body' && scaledBodyIds.has(entity.a.bodyId)
+    const scaleB = entity.b.type === 'body' && scaledBodyIds.has(entity.b.bodyId)
     if (!scaleA && !scaleB) continue
-    replacements.push({
-      ...entity,
-      a: scaleA
+    const scaledA =
+      entity.a.type === 'body' && scaledBodyIds.has(entity.a.bodyId)
         ? {
             ...entity.a,
             localAnchor: {
@@ -578,8 +676,9 @@ export function scaleEntitiesAroundPivot(
               y: entity.a.localAnchor.y * factor,
             },
           }
-        : entity.a,
-      b: scaleB
+        : entity.a
+    const scaledB =
+      entity.b.type === 'body' && scaledBodyIds.has(entity.b.bodyId)
         ? {
             ...entity.b,
             localAnchor: {
@@ -587,7 +686,11 @@ export function scaleEntitiesAroundPivot(
               y: entity.b.localAnchor.y * factor,
             },
           }
-        : entity.b,
+        : entity.b
+    replacements.push({
+      ...entity,
+      a: scaledA,
+      b: scaledB,
     })
   }
 
@@ -595,18 +698,115 @@ export function scaleEntitiesAroundPivot(
 }
 
 export function resolveConnectorEndpoint(
-  entities: SceneEntity[],
+  entities: readonly SceneEntity[],
   endpoint: ConnectorEndpoint,
+  groundPathNetwork?: GroundPathNetwork,
+  bodyTransforms?: ReadonlyMap<EntityId, EditableTransform>,
 ): Vec2 | null {
+  if (endpoint.type === 'world' || endpoint.type === 'free') return endpoint.position
+  if (endpoint.type === 'ground') {
+    const network = groundPathNetwork ?? buildGroundPathNetwork(entities)
+    const path = network.groundPaths.get(endpoint.groundId)?.path
+    return path ? path.pointAt(path.length * Math.min(1, Math.max(0, endpoint.pathRatio))) : null
+  }
+  if (endpoint.type === 'groundJoint') {
+    const network = groundPathNetwork ?? buildGroundPathNetwork(entities)
+    const path = network.jointPaths.get(endpoint.groundJointId)?.path
+    return path ? path.pointAt(path.length * Math.min(1, Math.max(0, endpoint.pathRatio))) : null
+  }
   const body = entities.find(
     (entity): entity is BodyEntity => entity.id === endpoint.bodyId && entity.kind === 'body',
   )
-  if (!body) return null
-  return add(body.transform.position, rotateVector(endpoint.localAnchor, body.transform.angleRad))
+  const transform = body?.transform ?? bodyTransforms?.get(endpoint.bodyId)
+  if (!transform) return null
+  return add(transform.position, rotateVector(endpoint.localAnchor, transform.angleRad))
+}
+
+export function connectorEndpointTargetId(endpoint: ConnectorEndpoint): EntityId | null {
+  if (endpoint.type === 'body') return endpoint.bodyId
+  if (endpoint.type === 'ground') return endpoint.groundId
+  if (endpoint.type === 'groundJoint') return endpoint.groundJointId
+  return null
+}
+
+export function createBodyCenterConnectorEndpoint(body: BodyEntity): ConnectorEndpoint {
+  return { type: 'body', bodyId: body.id, localAnchor: { x: 0, y: 0 } }
 }
 
 export function worldToLocalAnchor(body: BodyEntity, worldPoint: Vec2): Vec2 {
   return rotateVector(subtract(worldPoint, body.transform.position), -body.transform.angleRad)
+}
+
+export function bodyLocalAnchorIsInside(body: BodyEntity, localAnchor: Vec2): boolean {
+  if (body.shape.type === 'circle') {
+    return Math.hypot(localAnchor.x, localAnchor.y) <= body.shape.radius + 1e-9
+  }
+  if (body.shape.type === 'box') {
+    return (
+      Math.abs(localAnchor.x) <= body.shape.width / 2 + 1e-9 &&
+      Math.abs(localAnchor.y) <= body.shape.height / 2 + 1e-9
+    )
+  }
+  const points = sampleAdaptiveClosedBezierPath(body.shape.nodes)
+  if (pointInPolygon(localAnchor, points)) return true
+  return points.some(
+    (point, index) =>
+      distance(
+        localAnchor,
+        closestPointOnSegment(localAnchor, point, points[(index + 1) % points.length]!),
+      ) <= 1e-9,
+  )
+}
+
+export function clampBodyLocalAnchor(body: BodyEntity, localAnchor: Vec2): Vec2 {
+  if (body.shape.type === 'circle') {
+    const length = Math.hypot(localAnchor.x, localAnchor.y)
+    if (length <= body.shape.radius || length <= Number.EPSILON) return localAnchor
+    const scale = body.shape.radius / length
+    return { x: localAnchor.x * scale, y: localAnchor.y * scale }
+  }
+  if (body.shape.type === 'box') {
+    return {
+      x: Math.min(body.shape.width / 2, Math.max(-body.shape.width / 2, localAnchor.x)),
+      y: Math.min(body.shape.height / 2, Math.max(-body.shape.height / 2, localAnchor.y)),
+    }
+  }
+  const points = sampleAdaptiveClosedBezierPath(body.shape.nodes)
+  let closest = localAnchor
+  let closestDistance = Number.POSITIVE_INFINITY
+  for (let index = 0; index < points.length; index += 1) {
+    const candidate = closestPointOnSegment(
+      localAnchor,
+      points[index]!,
+      points[(index + 1) % points.length]!,
+    )
+    const candidateDistance = distance(localAnchor, candidate)
+    if (candidateDistance < closestDistance) {
+      closest = candidate
+      closestDistance = candidateDistance
+    }
+  }
+  return closest
+}
+
+function pointInPolygon(point: Vec2, polygon: Vec2[]): boolean {
+  let inside = false
+  for (
+    let current = 0, previous = polygon.length - 1;
+    current < polygon.length;
+    previous = current++
+  ) {
+    const first = polygon[current]
+    const second = polygon[previous]
+    if (!first || !second) continue
+    if (
+      first.y > point.y !== second.y > point.y &&
+      point.x < ((second.x - first.x) * (point.y - first.y)) / (second.y - first.y) + first.x
+    ) {
+      inside = !inside
+    }
+  }
+  return inside
 }
 
 export function closestPointOnSegment(point: Vec2, start: Vec2, end: Vec2): Vec2 {
@@ -632,6 +832,17 @@ export function sampleGroundPoints(ground: GroundEntity, segments = 48): Vec2[] 
 
 export function bodySupportRadius(body: BodyEntity, normal: Vec2): number {
   if (body.shape.type === 'circle') return body.shape.radius
+  if (body.shape.type === 'bezierPath') {
+    const points = sampleBezierBodyWorldPoints(body)
+    return Math.max(
+      0,
+      ...points.map(
+        (point) =>
+          (point.x - body.transform.position.x) * normal.x +
+          (point.y - body.transform.position.y) * normal.y,
+      ),
+    )
+  }
   const localNormal = rotateVector(normal, -body.transform.angleRad)
   return (
     Math.abs(localNormal.x) * (body.shape.width / 2) +
@@ -639,14 +850,52 @@ export function bodySupportRadius(body: BodyEntity, normal: Vec2): number {
   )
 }
 
-export type BodySnapSurfaceTarget = GroundEntity | BodyEntity
+export interface BooleanBodySnapSurfaceTarget {
+  kind: 'booleanResult'
+  id: EntityId
+  visible: boolean
+  centerOfMass: Vec2
+  geometry: BooleanMultiPolygon
+}
+
+export type BodySnapSurfaceTarget = GroundEntity | BodyEntity | BooleanBodySnapSurfaceTarget
 
 interface SnapCandidate {
   position: Vec2
   correctionDistance: number
 }
 
-function groundSnapCandidates(body: BodyEntity, ground: GroundEntity): SnapCandidate[] {
+interface SurfaceSnapShape {
+  id: EntityId
+  center: Vec2
+  supportRadius: (normal: Vec2) => number
+  geometryAt?: (position: Vec2) => BooleanMultiPolygon
+}
+
+function targetSnapGeometry(target: BodySnapSurfaceTarget): BooleanMultiPolygon | null {
+  if (target.kind === 'ground') return null
+  return target.kind === 'booleanResult' ? target.geometry : entityToBooleanGeometry(target)
+}
+
+function candidateHasMaterialPenetration(
+  shape: SurfaceSnapShape,
+  candidate: SnapCandidate,
+  target: BodySnapSurfaceTarget,
+): boolean {
+  if (!shape.geometryAt) return false
+  const targetGeometry = targetSnapGeometry(target)
+  if (!targetGeometry || targetGeometry.length === 0) return false
+  const movingGeometry = shape.geometryAt(candidate.position)
+  if (movingGeometry.length === 0) return false
+  const intersection = polygonClipping.intersection(movingGeometry, targetGeometry)
+  if (intersection.length === 0) return false
+  const movingArea = polygonMetrics(movingGeometry).area
+  const targetArea = polygonMetrics(targetGeometry).area
+  const tolerance = Math.max(1e-10, Math.min(movingArea, targetArea) * 1e-8)
+  return polygonMetrics(intersection).area > tolerance
+}
+
+function groundSnapCandidates(shape: SurfaceSnapShape, ground: GroundEntity): SnapCandidate[] {
   const candidates: SnapCandidate[] = []
   const points = sampleGroundPoints(ground)
 
@@ -657,32 +906,32 @@ function groundSnapCandidates(body: BodyEntity, ground: GroundEntity): SnapCandi
     const tangent = subtract(end, start)
     const tangentLength = Math.hypot(tangent.x, tangent.y)
     if (tangentLength <= Number.EPSILON) continue
-    const closest = closestPointOnSegment(body.transform.position, start, end)
-    const separation = subtract(body.transform.position, closest)
+    const closest = closestPointOnSegment(shape.center, start, end)
+    const separation = subtract(shape.center, closest)
     const centerDistance = Math.hypot(separation.x, separation.y)
     const direction =
       centerDistance > Number.EPSILON
         ? { x: separation.x / centerDistance, y: separation.y / centerDistance }
         : { x: -tangent.y / tangentLength, y: tangent.x / tangentLength }
-    const support = bodySupportRadius(body, direction)
+    const support = shape.supportRadius(direction)
     const position = {
       x: closest.x + direction.x * support,
       y: closest.y + direction.y * support,
     }
     candidates.push({
       position,
-      correctionDistance: distance(body.transform.position, position),
+      correctionDistance: distance(shape.center, position),
     })
   }
 
   return candidates
 }
 
-function blockSnapCandidate(body: BodyEntity, target: BodyEntity): SnapCandidate | null {
+function blockSnapCandidate(shape: SurfaceSnapShape, target: BodyEntity): SnapCandidate | null {
   if (target.shape.type !== 'box') return null
 
   const localCenter = rotateVector(
-    subtract(body.transform.position, target.transform.position),
+    subtract(shape.center, target.transform.position),
     -target.transform.angleRad,
   )
   const halfWidth = target.shape.width / 2
@@ -724,32 +973,106 @@ function blockSnapCandidate(body: BodyEntity, target: BodyEntity): SnapCandidate
     target.transform.position,
     rotateVector(localBoundary, target.transform.angleRad),
   )
-  const support = bodySupportRadius(body, normal)
+  const support = shape.supportRadius(normal)
   const position = add(boundary, { x: normal.x * support, y: normal.y * support })
-  const correctionDistance = distance(body.transform.position, position)
+  const correctionDistance = distance(shape.center, position)
   return Number.isFinite(correctionDistance) ? { position, correctionDistance } : null
 }
 
-export function snapBodyToSurfaces(
-  body: BodyEntity,
+function booleanSnapCandidates(
+  shape: SurfaceSnapShape,
+  target: BooleanBodySnapSurfaceTarget,
+): SnapCandidate[] {
+  const candidates: SnapCandidate[] = []
+  const centerInsideSolid = pointInBooleanGeometry(shape.center, target.geometry)
+
+  for (const polygon of target.geometry) {
+    for (const ring of polygon) {
+      for (let index = 1; index < ring.length; index += 1) {
+        const startPair = ring[index - 1]
+        const endPair = ring[index]
+        if (!startPair || !endPair) continue
+        const start = { x: startPair[0], y: startPair[1] }
+        const end = { x: endPair[0], y: endPair[1] }
+        const tangent = subtract(end, start)
+        const tangentLength = Math.hypot(tangent.x, tangent.y)
+        if (tangentLength <= Number.EPSILON) continue
+        const boundary = closestPointOnSegment(shape.center, start, end)
+        const separation = subtract(shape.center, boundary)
+        const centerDistance = Math.hypot(separation.x, separation.y)
+        let directions: Vec2[]
+        if (centerDistance > Number.EPSILON) {
+          const towardCenter = {
+            x: separation.x / centerDistance,
+            y: separation.y / centerDistance,
+          }
+          directions = [
+            centerInsideSolid ? { x: -towardCenter.x, y: -towardCenter.y } : towardCenter,
+          ]
+        } else {
+          const normal = { x: -tangent.y / tangentLength, y: tangent.x / tangentLength }
+          const probeDistance = Math.max(1e-7, tangentLength * 1e-7)
+          directions = [normal, { x: -normal.x, y: -normal.y }].filter(
+            (direction) =>
+              !pointInBooleanGeometry(
+                {
+                  x: boundary.x + direction.x * probeDistance,
+                  y: boundary.y + direction.y * probeDistance,
+                },
+                target.geometry,
+              ),
+          )
+        }
+
+        for (const direction of directions) {
+          const support = shape.supportRadius(direction)
+          const position = {
+            x: boundary.x + direction.x * support,
+            y: boundary.y + direction.y * support,
+          }
+          const correctionDistance = distance(shape.center, position)
+          if (Number.isFinite(correctionDistance)) {
+            candidates.push({ position, correctionDistance })
+          }
+        }
+      }
+    }
+  }
+
+  return candidates
+}
+
+function snapShapeCenterToSurfaces(
+  shape: SurfaceSnapShape,
   targets: readonly BodySnapSurfaceTarget[],
   thresholdM: number,
-  excludedIds: ReadonlySet<EntityId> = new Set<EntityId>(),
-): BodyEntity {
-  if (!Number.isFinite(thresholdM) || thresholdM < 0) return body
+  excludedIds: ReadonlySet<EntityId>,
+): Vec2 {
+  if (!Number.isFinite(thresholdM) || thresholdM < 0) return shape.center
 
   let bestCandidate: SnapCandidate | null = null
   for (const target of targets) {
-    if (!target.visible || target.id === body.id || excludedIds.has(target.id)) continue
+    if (!target.visible || target.id === shape.id || excludedIds.has(target.id)) continue
     const candidates =
       target.kind === 'ground'
-        ? groundSnapCandidates(body, target)
-        : target.shape.type === 'box'
-          ? [blockSnapCandidate(body, target)]
-          : []
+        ? groundSnapCandidates(shape, target)
+        : target.kind === 'booleanResult'
+          ? booleanSnapCandidates(shape, target)
+          : target.shape.type === 'box'
+            ? [blockSnapCandidate(shape, target)]
+            : target.shape.type === 'bezierPath'
+              ? booleanSnapCandidates(shape, {
+                  kind: 'booleanResult',
+                  id: target.id,
+                  visible: target.visible,
+                  centerOfMass: target.transform.position,
+                  geometry: entityToBooleanGeometry(target),
+                })
+              : []
 
     for (const candidate of candidates) {
       if (!candidate || candidate.correctionDistance > thresholdM) continue
+      if (candidateHasMaterialPenetration(shape, candidate, target)) continue
       if (
         !bestCandidate ||
         candidate.correctionDistance < bestCandidate.correctionDistance - 1e-12
@@ -759,9 +1082,72 @@ export function snapBodyToSurfaces(
     }
   }
 
-  return bestCandidate
-    ? { ...body, transform: { ...body.transform, position: bestCandidate.position } }
-    : body
+  return bestCandidate?.position ?? shape.center
+}
+
+export function snapBodyToSurfaces(
+  body: BodyEntity,
+  targets: readonly BodySnapSurfaceTarget[],
+  thresholdM: number,
+  excludedIds: ReadonlySet<EntityId> = new Set<EntityId>(),
+): BodyEntity {
+  const position = snapShapeCenterToSurfaces(
+    {
+      id: body.id,
+      center: body.transform.position,
+      supportRadius: (normal) => bodySupportRadius(body, { x: -normal.x, y: -normal.y }),
+      geometryAt: (position) =>
+        entityToBooleanGeometry({
+          ...body,
+          transform: { ...body.transform, position },
+        }),
+    },
+    targets,
+    thresholdM,
+    excludedIds,
+  )
+  return position === body.transform.position
+    ? body
+    : { ...body, transform: { ...body.transform, position } }
+}
+
+export function snapBooleanBodyToSurfaces(
+  body: Pick<ResolvedBooleanBody, 'resultId' | 'centerOfMass' | 'geometry'>,
+  targets: readonly BodySnapSurfaceTarget[],
+  thresholdM: number,
+  excludedIds: ReadonlySet<EntityId> = new Set<EntityId>(),
+): Vec2 {
+  return snapShapeCenterToSurfaces(
+    {
+      id: body.resultId,
+      center: body.centerOfMass,
+      supportRadius: (normal) => {
+        let minimumProjection = Number.POSITIVE_INFINITY
+        for (const polygon of body.geometry) {
+          for (const point of polygon[0] ?? []) {
+            minimumProjection = Math.min(
+              minimumProjection,
+              point[0] * normal.x + point[1] * normal.y,
+            )
+          }
+        }
+        return Number.isFinite(minimumProjection)
+          ? Math.max(0, dot(body.centerOfMass, normal) - minimumProjection)
+          : 0
+      },
+      geometryAt: (position) => {
+        const delta = subtract(position, body.centerOfMass)
+        return body.geometry.map((polygon) =>
+          polygon.map((ring) =>
+            ring.map(([x, y]) => [x + delta.x, y + delta.y] as [number, number]),
+          ),
+        )
+      },
+    },
+    targets,
+    thresholdM,
+    excludedIds,
+  )
 }
 
 export function snapBodyToGround(

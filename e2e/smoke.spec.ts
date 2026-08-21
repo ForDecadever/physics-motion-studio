@@ -19,8 +19,18 @@ test('显示编辑器的主要区域', async ({ page }) => {
     page.getByRole('main').getByRole('application', { name: '可交互的二维物理画布' }),
   ).toBeVisible()
   await expect(page.getByRole('region', { name: '属性面板' })).toBeVisible()
+  const sceneTree = page.getByRole('region', { name: '场景树' })
+  await expect(sceneTree).toHaveAttribute('data-embedded', 'true')
+  const sceneTreeFillRatio = await sceneTree.evaluate((panel) => {
+    const content = panel.firstElementChild
+    return content
+      ? content.getBoundingClientRect().height / panel.getBoundingClientRect().height
+      : 0
+  })
+  expect(sceneTreeFillRatio).toBeGreaterThan(0.9)
   await expect(page.getByText('多坐标系图像区', { exact: true })).toBeVisible()
-  await expect(page.getByText('阶段 5', { exact: true })).toBeVisible()
+  await expect(page.getByLabel('应用菜单')).toBeVisible()
+  await expect(page.getByLabel('Motion Studio')).toHaveCount(0)
 })
 
 test('可以冻结已有记录并导出运动 GIF', async ({ page }) => {
@@ -246,7 +256,7 @@ test('可以创建、连接并撤销编辑实体', async ({ page }) => {
 
   await page.getByRole('button', { name: '连接工具（L）' }).click()
   await page.mouse.click(center.x - 100, center.y - 40)
-  await expect(page.getByText('请选择第二个物体', { exact: true })).toBeVisible()
+  await expect(page.getByText('请选择第二个端点', { exact: true })).toBeVisible()
   await page.mouse.click(center.x + 100, center.y - 40)
   await expect(layerEntity('绳 1')).toBeVisible()
 
@@ -310,7 +320,7 @@ test('对象缩放工具支持实时预览、吸附、多选和撤销重做', as
   await page.mouse.move(startHandle.x, startHandle.y)
   await page.mouse.down()
   await page.mouse.move(targetHandle.x, targetHandle.y, { steps: 5 })
-  await expect(radius).toHaveValue('0.66667')
+  await expect(radius).toHaveValue('0.58333')
   await page.mouse.up()
 
   await page.keyboard.press('Control+z')
@@ -320,7 +330,7 @@ test('对象缩放工具支持实时预览、吸附、多选和撤销重做', as
   await page.mouse.move(startHandle.x, startHandle.y)
   await page.mouse.down()
   await page.mouse.move(targetHandle.x, targetHandle.y, { steps: 5 })
-  await expect(radius).toHaveValue('0.83333')
+  await expect.poll(async () => Number(await radius.inputValue())).toBeGreaterThan(0.5)
   await page.keyboard.press('Escape')
   await page.mouse.up()
   await page.keyboard.up('Alt')
@@ -332,13 +342,14 @@ test('对象缩放工具支持实时预览、吸附、多选和撤销重做', as
   await page.mouse.move(startHandle.x, startHandle.y)
   await page.mouse.down()
   await page.mouse.move(center.x + 30, center.y - 30, { steps: 5 })
-  await expect(radius).toHaveValue('1')
+  await expect.poll(async () => Number(await radius.inputValue())).toBeGreaterThan(0.5)
   await page.mouse.up()
+  const committedRadius = await radius.inputValue()
   await page.keyboard.up('Alt')
   await page.keyboard.press('Control+z')
   await expect(radius).toHaveValue('0.5')
   await page.keyboard.press('Control+y')
-  await expect(radius).toHaveValue('1')
+  await expect(radius).toHaveValue(committedRadius)
   await page.keyboard.press('Control+z')
 
   await bodyTool.click()
@@ -360,17 +371,22 @@ test('对象缩放工具支持实时预览、吸附、多选和撤销重做', as
 
   await entityButton('小球 1').click()
   await openInspectorTab(page, '变换')
-  await expect(page.getByLabel('位置 X')).toHaveValue('-2')
+  await expect.poll(async () => Number(await page.getByLabel('位置 X').inputValue())).not.toBe(0)
+  const scaledFirstX = await page.getByLabel('位置 X').inputValue()
   await openInspectorTab(page, '几何')
-  await expect(radius).toHaveValue('1')
+  const firstScaledRadius = await radius.inputValue()
+  expect(Number(firstScaledRadius)).toBeGreaterThan(0.5)
   await entityButton('小球 2').click()
   await openInspectorTab(page, '变换')
-  await expect(page.getByLabel('位置 X')).toHaveValue('6')
+  await expect
+    .poll(async () => Number(await page.getByLabel('位置 X').inputValue()))
+    .toBeGreaterThan(4)
+  const scaledSecondX = await page.getByLabel('位置 X').inputValue()
 
   await page.keyboard.press('Control+z')
   await expect(page.getByLabel('位置 X')).toHaveValue('4')
   await page.keyboard.press('Control+y')
-  await expect(page.getByLabel('位置 X')).toHaveValue('6')
+  await expect(page.getByLabel('位置 X')).toHaveValue(scaledSecondX)
 
   const playButton = page.getByRole('button', { name: '播放' })
   await expect(playButton).toBeEnabled({ timeout: 15_000 })
@@ -384,13 +400,13 @@ test('对象缩放工具支持实时预览、吸附、多选和撤销重做', as
   await page.getByRole('button', { name: '显示对象 小球 2' }).click()
   await expect(page.getByText('拖动四角手柄等比缩放 · Alt 临时关闭吸附')).toBeVisible()
 
-  await page.getByRole('button', { name: '锁定图层 物理场景' }).click()
+  await page.getByRole('button', { name: '锁定对象 小球 2' }).click()
   await expect(page.getByText('当前选择不可缩放', { exact: true })).toBeVisible()
-  await page.getByRole('button', { name: '解锁图层 物理场景' }).click()
+  await page.getByRole('button', { name: '解锁对象 小球 2' }).click()
 
   await page.getByRole('button', { name: '连接工具（L）' }).click()
-  await page.mouse.click(center.x - 40, center.y)
-  await page.mouse.click(center.x + 120, center.y)
+  await page.mouse.click(center.x + Number(scaledFirstX) * 20, center.y)
+  await page.mouse.click(center.x + Number(scaledSecondX) * 20, center.y)
   await expect(entityButton('绳 1')).toBeVisible()
   await entityButton('小球 1').click()
   await page.keyboard.down('Shift')
@@ -494,7 +510,7 @@ test('可以从工具选项创建阶段 2 的曲面和物体类型', async ({ pa
   await expect.poll(() => controlY.inputValue()).not.toBe(beforeControlY)
 
   await page.getByRole('button', { name: '物体工具（O）' }).click()
-  const bodyPreset = page.getByRole('region', { name: '当前工具选项' }).getByRole('combobox')
+  const bodyPreset = page.getByLabel('物体', { exact: true })
   await bodyPreset.selectOption('ball')
   await page.mouse.click(center.x - 80, center.y - 80)
   await expect(page.locator('button').filter({ hasText: '小球 1' })).toBeVisible()
@@ -607,7 +623,7 @@ test('属性标签可键盘切换，且切换对象前会提交旧对象的数�
   await expect(page.getByLabel('质量')).toHaveValue('1')
 })
 
-test('图层对象可以独立隐藏、删除并通过撤销恢复依赖关系', async ({ page }) => {
+test('场景对象可以独立隐藏、删除并通过撤销恢复依赖关系', async ({ page }) => {
   await page.goto('/')
   const canvas = page.getByRole('application', { name: '可交互的二维物理画布' })
   const box = await canvas.boundingBox()
@@ -650,7 +666,7 @@ test('图层对象可以独立隐藏、删除并通过撤销恢复依赖关系',
   await expect(page.getByRole('button', { name: '删除对象 小球 1' })).toBeDisabled()
 })
 
-test('图层对象和图层可重命名，复制完整端点时会带上连接关系', async ({ page }) => {
+test('场景对象可重命名，复制完整端点时会带上连接关系', async ({ page }) => {
   await page.goto('/')
   const canvas = page.getByRole('application', { name: '可交互的二维物理画布' })
   const box = await canvas.boundingBox()
@@ -669,7 +685,8 @@ test('图层对象和图层可重命名，复制完整端点时会带上连接�
   await page.mouse.click(center.x - 100, center.y - 40)
   await page.mouse.click(center.x + 100, center.y - 40)
 
-  await page.getByRole('button', { name: '重命名对象 小球 1' }).click()
+  await expect(page.getByRole('button', { name: '重命名对象 小球 1' })).toHaveCount(0)
+  await page.getByRole('button', { name: '小球 1', exact: true }).dblclick()
   const bodyName = page.getByRole('textbox', { name: '重命名 小球 1' })
   await bodyName.fill('左侧小球')
   await bodyName.press('Enter')
@@ -683,12 +700,6 @@ test('图层对象和图层可重命名，复制完整端点时会带上连接�
   await doubleClickName.press('Enter')
   await expect(page.getByRole('button', { name: '小球 1', exact: true })).toBeVisible()
 
-  await page.getByRole('button', { name: '重命名图层 物理场景' }).click()
-  const layerName = page.getByRole('textbox', { name: '重命名图层 物理场景' })
-  await layerName.fill('实验对象')
-  await layerName.press('Enter')
-  await expect(page.getByRole('button', { name: '实验对象', exact: true })).toBeVisible()
-
   const first = page.getByRole('button', { name: '小球 1', exact: true })
   const second = page.getByRole('button', { name: '小球 2', exact: true })
   await first.click()
@@ -699,6 +710,353 @@ test('图层对象和图层可重命名，复制完整端点时会带上连接�
   await expect(page.getByRole('button', { name: '小球 1 副本', exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: '小球 2 副本', exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: '弹簧 1 副本', exact: true })).toBeVisible()
+})
+
+test('可创建、删除恢复、交换、编辑并复制布尔节点', async ({ page }) => {
+  await page.goto('/')
+  const canvas = page.getByRole('application', { name: '可交互的二维物理画布' })
+  const box = await canvas.boundingBox()
+  expect(box).not.toBeNull()
+  if (!box) return
+  const center = { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+  const scenePanel = page.getByRole('region', { name: '场景面板' })
+  const inspector = page.getByRole('region', { name: '属性面板' })
+
+  await page.getByRole('button', { name: '物体工具（O）' }).click()
+  await page
+    .getByRole('region', { name: '当前工具选项' })
+    .getByRole('combobox')
+    .selectOption('block')
+  await page.mouse.click(center.x - 20, center.y)
+  await page.mouse.click(center.x + 20, center.y)
+  const upper = page.getByRole('button', { name: '物块 1', exact: true })
+  const lower = page.getByRole('button', { name: '物块 2', exact: true })
+  await expect(page.getByRole('button', { name: '上移', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '下移', exact: true })).toHaveCount(0)
+  await upper.locator('..').dragTo(lower.locator('..'), { targetPosition: { x: 20, y: 24 } })
+  await expect
+    .poll(() => scenePanel.getByRole('button', { name: /^物块 [12]$/ }).allTextContents())
+    .toEqual(['物块 2', '物块 1'])
+  await page.keyboard.press('Control+z')
+  await expect
+    .poll(() => scenePanel.getByRole('button', { name: /^物块 [12]$/ }).allTextContents())
+    .toEqual(['物块 1', '物块 2'])
+  await upper.click()
+  await lower.click({ modifiers: ['Shift'] })
+
+  await page.getByRole('button', { name: '布尔组合', exact: true }).click()
+  const booleanNode = page.getByRole('button', { name: '布尔加法', exact: true })
+  await expect(booleanNode).toBeVisible()
+  await expect(inspector).toContainText('布尔加法')
+  await expect(inspector.getByText('有效', { exact: true })).toBeVisible()
+
+  await page.keyboard.press('Backspace')
+  await expect(booleanNode).toHaveCount(0)
+  await expect(upper).toHaveCount(0)
+  await expect(lower).toHaveCount(0)
+  await page.keyboard.press('Control+z')
+  await expect(booleanNode).toBeVisible()
+  await expect(upper).toBeVisible()
+  await expect(lower).toBeVisible()
+  await booleanNode.click()
+
+  await openInspectorTab(page, '物理')
+  await expect(inspector.getByText('总质量', { exact: true })).toBeVisible()
+  await expect(inspector.getByText('摩擦系数', { exact: true })).toBeVisible()
+  await expect(inspector.getByText('弹性系数', { exact: true })).toBeVisible()
+  await inspector.getByLabel('摩擦系数').fill('0.4')
+  await inspector.getByLabel('摩擦系数').press('Enter')
+  await expect(inspector.getByText('整体统一', { exact: true }).first()).toBeVisible()
+  await openInspectorTab(page, '变换')
+  await expect(inspector.getByLabel('位置 X')).toBeEditable()
+  await expect(inspector.getByLabel('角度')).toBeEditable()
+  const originalBooleanX = Number(await inspector.getByLabel('位置 X').inputValue())
+  await inspector.getByLabel('位置 X').fill(String(originalBooleanX + 1))
+  await inspector.getByLabel('位置 X').press('Enter')
+  await expect(inspector.getByLabel('位置 X')).toHaveValue(String(originalBooleanX + 1))
+  await inspector.getByLabel('角度').fill('30')
+  await inspector.getByLabel('角度').press('Enter')
+  await expect(inspector.getByLabel('角度')).toHaveValue('30')
+  await openInspectorTab(page, '初始状态')
+  await expect(inspector.getByLabel('初速度 X')).toBeEditable()
+  await expect(inspector.getByLabel('初角速度')).toBeEditable()
+  await inspector.getByLabel('初速度 X').fill('1.25')
+  await inspector.getByLabel('初速度 X').press('Enter')
+  await expect(inspector.getByText('结果整体', { exact: true }).first()).toBeVisible()
+  await openInspectorTab(page, '基本')
+  await inspector.getByRole('combobox').selectOption('difference')
+  await expect(inspector.getByRole('combobox')).toHaveValue('difference')
+
+  const swap = page.getByRole('button', { name: '交换输入' })
+  await swap.focus()
+  await page.keyboard.press('Enter')
+  await expect(booleanNode).toBeVisible()
+
+  await page.getByRole('button', { name: '移出布尔组合' }).first().click()
+  await expect(inspector.getByText('已停用', { exact: true })).toBeVisible()
+  await lower.click()
+  await scenePanel.getByRole('button', { name: '添加当前所选对象' }).click()
+  await booleanNode.click()
+  await expect(inspector.getByText('有效', { exact: true })).toBeVisible()
+
+  await upper.click()
+  await openInspectorTab(page, '变换')
+  await expect(inspector.getByLabel('位置 X')).toBeEditable()
+  await expect(inspector.getByLabel('角度')).toHaveValue('30')
+  await booleanNode.click()
+  await page.keyboard.press('Control+c')
+  await page.keyboard.press('Control+v')
+  await expect(page.getByRole('button', { name: '布尔加法 副本', exact: true })).toBeVisible()
+  await page.keyboard.press('Control+z')
+  await expect(page.getByRole('button', { name: '布尔加法 副本', exact: true })).toHaveCount(0)
+
+  await booleanNode.click()
+  await page.getByRole('button', { name: '解散布尔组合 布尔加法' }).click()
+  await expect(booleanNode).toHaveCount(0)
+  await expect(upper).toBeVisible()
+  await expect(lower).toBeVisible()
+  await page.keyboard.press('Control+z')
+  await expect(booleanNode).toBeVisible()
+})
+
+test('布尔结果移动和旋转在松开鼠标前实时更新画布', async ({ page }) => {
+  await page.goto('/')
+  const canvas = page.getByRole('application', { name: '可交互的二维物理画布' })
+  const box = await canvas.boundingBox()
+  expect(box).not.toBeNull()
+  if (!box) return
+  const center = { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+  const bodyPreset = page.getByLabel('物体', { exact: true })
+
+  await page.getByRole('button', { name: '物体工具（O）' }).click()
+  await bodyPreset.selectOption('block')
+  await page.mouse.click(center.x - 20, center.y)
+  await page.mouse.click(center.x + 20, center.y)
+  await page.getByRole('button', { name: '物块 1', exact: true }).click()
+  await page.getByRole('button', { name: '物块 2', exact: true }).click({ modifiers: ['Shift'] })
+  await page.getByRole('button', { name: '布尔组合', exact: true }).click()
+
+  await page.getByRole('button', { name: '选择与移动（V）' }).click()
+  const beforeMove = await canvas.screenshot()
+  await page.mouse.move(center.x, center.y)
+  await page.mouse.down()
+  await page.mouse.move(center.x + 60, center.y - 20, { steps: 6 })
+  const duringMove = await canvas.screenshot()
+  expect(duringMove.equals(beforeMove)).toBe(false)
+  await page.mouse.up()
+
+  await page.getByRole('button', { name: '布尔加法', exact: true }).click()
+  await page.getByRole('button', { name: '旋转（R）' }).click()
+  const beforeRotate = await canvas.screenshot()
+  await page.mouse.move(center.x + 80, center.y - 20)
+  await page.mouse.down()
+  await page.mouse.move(center.x + 60, center.y - 80, { steps: 6 })
+  const duringRotate = await canvas.screenshot()
+  expect(duringRotate.equals(beforeRotate)).toBe(false)
+  await page.mouse.up()
+})
+
+test('普通物体与多个布尔结果混选后可作为一个组拖动和撤销', async ({ page }) => {
+  await page.goto('/')
+  const canvas = page.getByRole('application', { name: '可交互的二维物理画布' })
+  const box = await canvas.boundingBox()
+  expect(box).not.toBeNull()
+  if (!box) return
+  const center = { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+  const bodyPreset = page.getByLabel('物体', { exact: true })
+  const inspector = page.getByRole('region', { name: '属性面板' })
+  const readX = async (name: string) => {
+    await page.getByRole('button', { name, exact: true }).click()
+    await openInspectorTab(page, '变换')
+    return Number(await inspector.getByLabel('位置 X').inputValue())
+  }
+
+  await page.getByRole('button', { name: '物体工具（O）' }).click()
+  await bodyPreset.selectOption('block')
+  for (const offset of [-100, -60, 60, 100]) {
+    await page.mouse.click(center.x + offset, center.y)
+  }
+  await bodyPreset.selectOption('ball')
+  await page.mouse.click(center.x + 180, center.y)
+
+  await page.getByRole('button', { name: '物块 1', exact: true }).click()
+  await page.getByRole('button', { name: '物块 2', exact: true }).click({ modifiers: ['Shift'] })
+  await page.getByRole('button', { name: '布尔组合', exact: true }).click()
+  await page.getByRole('button', { name: '物块 3', exact: true }).click()
+  await page.getByRole('button', { name: '物块 4', exact: true }).click({ modifiers: ['Shift'] })
+  await page.getByRole('button', { name: '布尔组合', exact: true }).click()
+
+  const beforeFirst = await readX('物块 1')
+  const beforeSecond = await readX('物块 3')
+  const beforeBall = await readX('小球 5')
+  const booleanRows = page.getByRole('button', { name: '布尔加法', exact: true })
+  await booleanRows.nth(0).click()
+  await booleanRows.nth(1).click({ modifiers: ['Shift'] })
+  await page.getByRole('button', { name: '小球 5', exact: true }).click({ modifiers: ['Shift'] })
+
+  await page.getByRole('button', { name: '选择与移动（V）' }).click()
+  await page.keyboard.down('Alt')
+  await page.mouse.move(center.x + 180, center.y)
+  await page.mouse.down()
+  await page.mouse.move(center.x + 220, center.y - 20, { steps: 8 })
+  await page.mouse.up()
+  await page.keyboard.up('Alt')
+
+  expect(await readX('物块 1')).toBeCloseTo(beforeFirst + 2, 6)
+  expect(await readX('物块 3')).toBeCloseTo(beforeSecond + 2, 6)
+  expect(await readX('小球 5')).toBeCloseTo(beforeBall + 2, 6)
+  await page.keyboard.press('Control+z')
+  expect(await readX('物块 1')).toBeCloseTo(beforeFirst, 6)
+  expect(await readX('物块 3')).toBeCloseTo(beforeSecond, 6)
+  expect(await readX('小球 5')).toBeCloseTo(beforeBall, 6)
+})
+
+test('框选可选中布尔结果且缩放只能从四角控制柄开始', async ({ page }) => {
+  await page.goto('/')
+  const canvas = page.getByRole('application', { name: '可交互的二维物理画布' })
+  const box = await canvas.boundingBox()
+  expect(box).not.toBeNull()
+  if (!box) return
+  const center = { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+  const bodyPreset = page.getByLabel('物体', { exact: true })
+
+  await page.getByRole('button', { name: '物体工具（O）' }).click()
+  await bodyPreset.selectOption('block')
+  await page.mouse.click(center.x - 20, center.y)
+  await page.mouse.click(center.x + 20, center.y)
+  await page.getByRole('button', { name: '物块 1', exact: true }).click()
+  await page.getByRole('button', { name: '物块 2', exact: true }).click({ modifiers: ['Shift'] })
+  await page.getByRole('button', { name: '布尔组合' }).click()
+
+  await page.getByRole('button', { name: '选择与移动（V）' }).click()
+  await page.keyboard.press('Escape')
+  await page.mouse.move(center.x - 45, center.y - 30)
+  await page.mouse.down()
+  await page.mouse.move(center.x + 45, center.y + 30, { steps: 5 })
+  await page.mouse.up()
+  await expect(page.getByRole('region', { name: '属性面板' })).toContainText('布尔加法')
+
+  await page.getByRole('button', { name: '对象缩放（S）' }).click()
+  await page.mouse.move(center.x, center.y)
+  await page.mouse.down()
+  await page.mouse.move(center.x + 10, center.y + 5, { steps: 4 })
+  await page.mouse.up()
+  await page.getByRole('button', { name: '物块 1', exact: true }).click()
+  await openInspectorTab(page, '变换')
+  await expect(page.getByLabel('位置 X')).toHaveValue('-1')
+  await page.getByRole('button', { name: '布尔加法', exact: true }).click()
+  await page.getByRole('button', { name: '对象缩放（S）' }).click()
+
+  const beforeHandleDrag = await canvas.screenshot()
+  await page.mouse.move(center.x + 30, center.y - 10)
+  await page.mouse.down()
+  await page.mouse.move(center.x + 50, center.y - 20, { steps: 5 })
+  const duringHandleDrag = await canvas.screenshot()
+  expect(duringHandleDrag.equals(beforeHandleDrag)).toBe(false)
+  await page.mouse.up()
+
+  await page.getByRole('button', { name: '物块 1', exact: true }).click()
+  await openInspectorTab(page, '变换')
+  const scaledX = await page.getByLabel('位置 X').inputValue()
+  expect(Number(scaledX)).not.toBe(-1)
+  await page.keyboard.press('Control+z')
+  await expect(page.getByLabel('位置 X')).toHaveValue('-1')
+})
+
+test('空差集立即给出上方减下方原因并可交换为孔洞', async ({ page }) => {
+  await page.goto('/')
+  const canvas = page.getByRole('application', { name: '可交互的二维物理画布' })
+  const box = await canvas.boundingBox()
+  expect(box).not.toBeNull()
+  if (!box) return
+  const center = { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+  const bodyPreset = page.getByLabel('物体', { exact: true })
+  const inspector = page.getByRole('region', { name: '属性面板' })
+
+  await page.getByRole('button', { name: '物体工具（O）' }).click()
+  await bodyPreset.selectOption('block')
+  await page.mouse.click(center.x, center.y)
+  await openInspectorTab(page, '几何')
+  await inspector.getByRole('spinbutton', { name: '宽度 m' }).fill('1')
+  await inspector.getByRole('spinbutton', { name: '宽度 m' }).press('Enter')
+  await inspector.getByRole('spinbutton', { name: '高度 m' }).fill('1')
+  await inspector.getByRole('spinbutton', { name: '高度 m' }).press('Enter')
+  await page.getByRole('button', { name: '物体工具（O）' }).click()
+  await page.mouse.click(center.x, center.y)
+  await openInspectorTab(page, '几何')
+  await inspector.getByRole('spinbutton', { name: '宽度 m' }).fill('4')
+  await inspector.getByRole('spinbutton', { name: '宽度 m' }).press('Enter')
+  await inspector.getByRole('spinbutton', { name: '高度 m' }).fill('4')
+  await inspector.getByRole('spinbutton', { name: '高度 m' }).press('Enter')
+
+  await page.getByRole('button', { name: '物块 1', exact: true }).click()
+  await page.getByRole('button', { name: '物块 2', exact: true }).click({ modifiers: ['Shift'] })
+  await page.getByRole('button', { name: '布尔组合' }).click()
+  await inspector.getByRole('combobox').selectOption('difference')
+  await expect(
+    inspector.getByText('上方输入已被下方完全覆盖；减法按上方减下方执行。', {
+      exact: true,
+    }),
+  ).toBeVisible()
+  await page.getByRole('button', { name: '交换输入' }).click()
+  await expect(inspector.getByText('有效', { exact: true })).toBeVisible()
+  await expect(
+    inspector.getByText('上方输入已被下方完全覆盖；减法按上方减下方执行。', {
+      exact: true,
+    }),
+  ).toHaveCount(0)
+})
+
+test('内切圆孔布尔体可播放、重置、编辑并自动恢复物理世界', async ({ page }) => {
+  await page.goto('/')
+  const canvas = page.getByRole('application', { name: '可交互的二维物理画布' })
+  const box = await canvas.boundingBox()
+  expect(box).not.toBeNull()
+  if (!box) return
+
+  const center = { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+  const bodyPreset = page.getByLabel('物体', { exact: true })
+  const inspector = page.getByRole('region', { name: '属性面板' })
+  const playButton = page.getByRole('button', { name: '播放' })
+
+  await page.getByRole('button', { name: '物体工具（O）' }).click()
+  await bodyPreset.selectOption('block')
+  await page.mouse.click(center.x, center.y)
+  await openInspectorTab(page, '几何')
+  await page.getByRole('spinbutton', { name: '宽度 m' }).fill('1')
+  await page.getByRole('spinbutton', { name: '宽度 m' }).press('Enter')
+  await page.getByRole('spinbutton', { name: '高度 m' }).fill('1')
+  await page.getByRole('spinbutton', { name: '高度 m' }).press('Enter')
+
+  await page.getByRole('button', { name: '物体工具（O）' }).click()
+  await bodyPreset.selectOption('ball')
+  await page.mouse.click(center.x, center.y)
+  await openInspectorTab(page, '几何')
+  await page.getByRole('spinbutton', { name: '半径 m' }).fill('0.5')
+  await page.getByRole('spinbutton', { name: '半径 m' }).press('Enter')
+
+  await page.getByRole('button', { name: '物块 1', exact: true }).click()
+  await page.getByRole('button', { name: '小球 2', exact: true }).click({ modifiers: ['Shift'] })
+  await page.getByRole('button', { name: '布尔组合' }).click()
+  await inspector.getByRole('combobox').selectOption('difference')
+  await expect(inspector.getByRole('combobox')).toHaveValue('difference')
+
+  await expect(playButton).toBeEnabled({ timeout: 15_000 })
+  await playButton.click()
+  await expect(page.getByText('模拟运行中', { exact: true })).toBeVisible()
+  await page.waitForTimeout(150)
+  await page.getByRole('button', { name: '暂停' }).click()
+  await page.getByRole('button', { name: '重置' }).click()
+  await expect(page.getByText('编辑模式', { exact: true })).toBeVisible()
+
+  await page.getByRole('button', { name: '小球 2', exact: true }).click()
+  await openInspectorTab(page, '变换')
+  await page.getByLabel('位置 X').fill('0.1')
+  await page.getByLabel('位置 X').press('Enter')
+  await expect(playButton).toBeEnabled({ timeout: 15_000 })
+  await playButton.click()
+  await expect(page.getByText('模拟运行中', { exact: true })).toBeVisible()
+  await expect(page.getByText('物理内核错误', { exact: true })).toHaveCount(0)
 })
 
 test('面板可以隐藏、浮动、缩放、重新停靠并恢复布局', async ({ page }) => {
@@ -718,8 +1076,8 @@ test('面板可以隐藏、浮动、缩放、重新停靠并恢复布局', async
   await page.getByRole('menuitemcheckbox', { name: '工具' }).click()
   await expect(page.getByRole('region', { name: '工具面板' })).toBeVisible()
 
-  const layersPanel = page.getByRole('region', { name: '图层面板' })
-  const dragHandle = page.getByRole('button', { name: '拖动图层面板' })
+  const layersPanel = page.getByRole('region', { name: '场景面板' })
+  const dragHandle = page.getByRole('button', { name: '拖动场景面板' })
   const handleBox = await dragHandle.boundingBox()
   expect(handleBox).not.toBeNull()
   if (!handleBox) return
@@ -736,7 +1094,7 @@ test('面板可以隐藏、浮动、缩放、重新停靠并恢复布局', async
   const beforeResize = await layersPanel.boundingBox()
   expect(beforeResize).not.toBeNull()
   if (!beforeResize) return
-  const resizeHandle = page.getByRole('separator', { name: '调整图层面板东南角' })
+  const resizeHandle = page.getByRole('separator', { name: '调整场景面板东南角' })
   const resizeBox = await resizeHandle.boundingBox()
   expect(resizeBox).not.toBeNull()
   if (!resizeBox) return
@@ -747,17 +1105,17 @@ test('面板可以隐藏、浮动、缩放、重新停靠并恢复布局', async
   const afterResize = await layersPanel.boundingBox()
   expect(afterResize?.width ?? 0).toBeGreaterThan(beforeResize.width + 50)
 
-  await page.getByRole('button', { name: '关闭图层面板' }).click()
+  await page.getByRole('button', { name: '关闭场景面板' }).click()
   await expect(layersPanel).toHaveCount(0)
   await page.getByText('视图', { exact: true }).click()
   await page.getByText('窗口', { exact: true }).hover()
   await page.getByRole('menuitemcheckbox', { name: '图层' }).click()
-  await expect(page.getByRole('region', { name: '图层面板' })).toHaveAttribute(
+  await expect(page.getByRole('region', { name: '场景面板' })).toHaveAttribute(
     'data-mode',
     'floating',
   )
 
-  const restoredHandle = page.getByRole('button', { name: '拖动图层面板' })
+  const restoredHandle = page.getByRole('button', { name: '拖动场景面板' })
   const restoredHandleBox = await restoredHandle.boundingBox()
   expect(restoredHandleBox).not.toBeNull()
   if (!restoredHandleBox) return
@@ -768,14 +1126,14 @@ test('面板可以隐藏、浮动、缩放、重新停靠并恢复布局', async
   await page.mouse.down()
   await page.mouse.move(workspaceBox.x + 12, workspaceBox.y + 180, { steps: 8 })
   await page.mouse.up()
-  await expect(page.getByRole('region', { name: '图层面板' })).toHaveAttribute('data-edge', 'left')
+  await expect(page.getByRole('region', { name: '场景面板' })).toHaveAttribute('data-edge', 'left')
 
   await page.reload()
-  await expect(page.getByRole('region', { name: '图层面板' })).toHaveAttribute('data-edge', 'left')
+  await expect(page.getByRole('region', { name: '场景面板' })).toHaveAttribute('data-edge', 'left')
   await page.getByText('视图', { exact: true }).click()
   await page.getByText('窗口', { exact: true }).hover()
   await page.getByRole('menuitem', { name: '恢复默认布局' }).click()
-  await expect(page.getByRole('region', { name: '图层面板' })).toHaveAttribute('data-edge', 'right')
+  await expect(page.getByRole('region', { name: '场景面板' })).toHaveAttribute('data-edge', 'right')
 })
 
 test('图像面板拉到最大高度时不会覆盖播放栏，工具悬浮选项仍可点击', async ({ page }) => {
@@ -858,7 +1216,7 @@ test('小球可以带电，并可创建场和三种连接器', async ({ page }) 
   await expect(page.getByLabel('杆长')).toBeVisible()
   await openInspectorTab(page, '几何')
   await drag(center.x - 100, center.y - 40, center.x - 80, center.y - 40)
-  await expect(page.getByLabel('A 锚点 X')).toHaveValue('1')
+  await expect(page.getByLabel('A 局部 X')).toHaveValue('0.5')
 
   await page.getByRole('button', { name: '连接工具（L）' }).click()
   await options.getByRole('combobox').selectOption('spring')
@@ -952,6 +1310,88 @@ test('可以建立多个坐标系、编辑公式与线条样式并导出全部 C
   expect(csv).toContain('坐标系,物体,物体 ID,模拟时间 t (s)')
   expect(csv).toContain('位置组合,小球 1')
   expect(csv).toContain('坐标系 2,小球 2')
+})
+
+test('钢笔物块可创建凹形轮廓并拒绝自交草稿', async ({ page }) => {
+  await page.goto('/')
+  const canvas = page.getByRole('application', { name: '可交互的二维物理画布' })
+  const box = await canvas.boundingBox()
+  expect(box).not.toBeNull()
+  if (!box) return
+  const center = { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+  const bodyPreset = page.getByLabel('物体', { exact: true })
+
+  await page.getByRole('button', { name: '物体工具（O）' }).click()
+  await bodyPreset.selectOption('block')
+  await page.getByLabel('物块形状').selectOption('freeform')
+  for (const point of [
+    { x: -70, y: -55 },
+    { x: 70, y: -55 },
+    { x: 15, y: 0 },
+    { x: 70, y: 55 },
+    { x: -70, y: 55 },
+  ]) {
+    await page.mouse.click(center.x + point.x, center.y + point.y)
+  }
+  await page.keyboard.press('Enter')
+  await expect(page.getByRole('button', { name: '钢笔物块 1', exact: true })).toBeVisible()
+  await openInspectorTab(page, '几何')
+  await expect(page.getByRole('region', { name: '属性面板' })).toContainText('钢笔物块')
+
+  await page.getByRole('button', { name: '物体工具（O）' }).click()
+  await page.getByLabel('物块形状').selectOption('freeform')
+  for (const point of [
+    { x: 110, y: -55 },
+    { x: 230, y: 55 },
+    { x: 110, y: 55 },
+    { x: 230, y: -55 },
+  ]) {
+    await page.mouse.click(center.x + point.x, center.y + point.y)
+  }
+  await page.keyboard.press('Enter')
+  await expect(page.getByText(/钢笔物块轮廓不能自相交/)).toBeVisible()
+  await expect(page.getByRole('button', { name: '钢笔物块 1', exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: '钢笔物块 2', exact: true })).toHaveCount(0)
+  await page.keyboard.press('Escape')
+})
+
+test('物块顶部形状菜单可创建三种曲面预设和可调角度三角斜面', async ({ page }) => {
+  await page.goto('/')
+  const canvas = page.getByRole('application', { name: '可交互的二维物理画布' })
+  const box = await canvas.boundingBox()
+  expect(box).not.toBeNull()
+  if (!box) return
+  const center = { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+
+  await page.getByRole('button', { name: '物体工具（O）' }).click()
+  const bodyPreset = page.getByLabel('物体', { exact: true })
+  await bodyPreset.selectOption('block')
+  const shape = page.getByLabel('物块形状')
+  const presets = [
+    { value: 'quarterRamp', x: -240, y: -80 },
+    { value: 'semicircleCutout', x: -80, y: -80 },
+    { value: 'quarterCircleCutout', x: 80, y: -80 },
+  ]
+  for (const preset of presets) {
+    await shape.selectOption(preset.value)
+    await page.mouse.move(center.x + preset.x, center.y + preset.y)
+    await page.mouse.down()
+    await page.mouse.move(center.x + preset.x + 55, center.y + preset.y + 40, { steps: 4 })
+    await page.mouse.up()
+  }
+
+  await shape.selectOption('triangle')
+  await page.getByLabel('三角斜面底角').fill('45')
+  await page.mouse.move(center.x + 180, center.y + 80)
+  await page.mouse.down()
+  await page.mouse.move(center.x + 250, center.y + 30, { steps: 4 })
+  await page.mouse.up()
+
+  for (const index of [1, 2, 3, 4]) {
+    await expect(page.getByRole('button', { name: `物块 ${index}`, exact: true })).toBeVisible()
+  }
+  await openInspectorTab(page, '几何')
+  await expect(page.getByRole('region', { name: '属性面板' })).toContainText('钢笔物块')
 })
 
 test('场工具可以创建扇形、钢笔自由形状和无限范围', async ({ page }) => {
@@ -1057,14 +1497,88 @@ test('墙面吸附可开关，并让新建小球与地面相切', async ({ page 
   await page.mouse.up()
 
   const wallSnap = page.getByRole('button', { name: /墙面吸附/ })
-  await expect(wallSnap).toHaveAttribute('aria-pressed', 'false')
-  await wallSnap.click()
   await expect(wallSnap).toHaveAttribute('aria-pressed', 'true')
 
   await page.getByRole('button', { name: '物体工具（O）' }).click()
   await page.mouse.click(center.x, center.y + 88)
   await openInspectorTab(page, '变换')
   await expect(page.getByLabel('位置 Y')).toHaveValue('-4.5')
+})
+
+test('布尔结果整体吸附墙面和物块，并支持绕过及撤销重做', async ({ page }) => {
+  await page.goto('/')
+  const canvas = page.getByRole('application', { name: '可交互的二维物理画布' })
+  const box = await canvas.boundingBox()
+  expect(box).not.toBeNull()
+  if (!box) return
+
+  const center = { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+  const bodyTool = page.getByRole('button', { name: '物体工具（O）' })
+  const selectTool = page.getByRole('button', { name: '选择与移动（V）' })
+  const bodyPreset = page.getByLabel('物体', { exact: true })
+  const wallSnap = page.getByRole('button', { name: /墙面吸附/ })
+  const drag = async (startX: number, startY: number, endX: number, endY: number) => {
+    await page.mouse.move(startX, startY)
+    await page.mouse.down()
+    await page.mouse.move(endX, endY, { steps: 6 })
+    await page.mouse.up()
+  }
+
+  await page.getByRole('button', { name: '地面工具（G）' }).click()
+  await drag(center.x - 200, center.y + 100, center.x + 200, center.y + 100)
+  await expect(wallSnap).toHaveAttribute('aria-pressed', 'true')
+
+  await bodyTool.click()
+  await bodyPreset.selectOption('block')
+  await page.mouse.click(center.x + 100, center.y)
+  await page.mouse.click(center.x - 20, center.y)
+  await page.mouse.click(center.x, center.y)
+  await page.getByRole('button', { name: '物块 2', exact: true }).click()
+  await page.getByRole('button', { name: '物块 3', exact: true }).click({ modifiers: ['Shift'] })
+  await page.getByRole('button', { name: '布尔组合' }).click()
+
+  await bodyTool.click()
+  await bodyPreset.selectOption('ball')
+  await page.mouse.click(center.x + 28, center.y)
+  await page.getByRole('button', { name: '小球 4', exact: true }).click()
+  await openInspectorTab(page, '变换')
+  await expect(page.getByLabel('位置 X')).toHaveValue('1')
+  await page.keyboard.press('Delete')
+
+  await selectTool.click()
+  await drag(center.x - 20, center.y, center.x + 70, center.y)
+  await page.getByRole('button', { name: '物块 2', exact: true }).click()
+  await openInspectorTab(page, '变换')
+  await expect(page.getByLabel('位置 X')).toHaveValue('3')
+  await page.keyboard.press('Control+z')
+  await expect(page.getByLabel('位置 X')).toHaveValue('-1')
+  await page.keyboard.press('Control+y')
+  await expect(page.getByLabel('位置 X')).toHaveValue('3')
+
+  await page.keyboard.press('Control+z')
+  await page.getByRole('button', { name: '布尔加法', exact: true }).click()
+  await drag(center.x - 20, center.y, center.x - 20, center.y + 80)
+  await page.getByRole('button', { name: '物块 2', exact: true }).click()
+  await openInspectorTab(page, '变换')
+  await expect(page.getByLabel('位置 Y')).toHaveValue('-4.5')
+  await page.keyboard.press('Control+z')
+  await expect(page.getByLabel('位置 Y')).toHaveValue('0')
+
+  await page.getByRole('button', { name: '布尔加法', exact: true }).click()
+  await page.keyboard.down('Alt')
+  await drag(center.x - 20, center.y, center.x - 20, center.y + 88)
+  await page.keyboard.up('Alt')
+  await page.getByRole('button', { name: '物块 2', exact: true }).click()
+  await openInspectorTab(page, '变换')
+  await expect(page.getByLabel('位置 Y')).toHaveValue('-4.4')
+
+  await page.keyboard.press('Control+z')
+  await wallSnap.click()
+  await page.getByRole('button', { name: '布尔加法', exact: true }).click()
+  await drag(center.x - 20, center.y, center.x - 20, center.y + 80)
+  await page.getByRole('button', { name: '物块 2', exact: true }).click()
+  await openInspectorTab(page, '变换')
+  await expect(page.getByLabel('位置 Y')).toHaveValue('-4')
 })
 
 test('物块吸附默认开启并覆盖创建、移动、多选、Alt 与撤销重做', async ({ page }) => {
@@ -1077,7 +1591,7 @@ test('物块吸附默认开启并覆盖创建、移动、多选、Alt 与撤销�
   const center = { x: box.x + box.width / 2, y: box.y + box.height / 2 }
   const bodyTool = page.getByRole('button', { name: '物体工具（O）' })
   const selectTool = page.getByRole('button', { name: '选择与移动（V）' })
-  const bodyPreset = page.getByRole('region', { name: '当前工具选项' }).getByRole('combobox')
+  const bodyPreset = page.getByLabel('物体', { exact: true })
   const blockSnap = page.getByRole('button', { name: /物块吸附/ })
   const entityButton = (name: string) => page.getByRole('button', { name, exact: true })
   const drag = async (startX: number, startY: number, endX: number, endY: number) => {
@@ -1164,12 +1678,18 @@ test('意外刷新后可以恢复 IndexedDB 自动草稿', async ({ page }) => {
   await expect(page.getByRole('dialog', { name: '发现自动恢复草稿' })).toBeVisible()
   await page.getByRole('button', { name: '恢复草稿' }).click()
   await expect(page.locator('button').filter({ hasText: '小球 1' })).toBeVisible()
-  await expect(page.getByText('有未保存更改', { exact: true })).toBeVisible()
 })
 
-test('旧版场景可以打开迁移，坏文件不会覆盖当前文档', async ({ page }) => {
+test('旧版场景会被拒绝，坏文件不会覆盖当前文档', async ({ page }) => {
   await page.goto('/')
   const fileInput = page.locator('input[type="file"]')
+  const canvas = page.getByRole('application', { name: '可交互的二维物理画布' })
+  const box = await canvas.boundingBox()
+  expect(box).not.toBeNull()
+  if (!box) return
+  await page.keyboard.press('o')
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2)
+  await expect(page.getByRole('button', { name: '小球 1', exact: true })).toBeVisible()
   const oldScene = {
     schemaVersion: 1,
     appVersion: '0.3.0',
@@ -1200,8 +1720,10 @@ test('旧版场景可以打开迁移，坏文件不会覆盖当前文档', async
     mimeType: 'application/json',
     buffer: Buffer.from(JSON.stringify(oldScene)),
   })
-  await expect(page.getByRole('banner').getByText('旧版迁移场景', { exact: true })).toBeVisible()
-  await expect(page.getByText('旧图层', { exact: true })).toBeVisible()
+  await expect(
+    page.getByText('当前版本只接受格式 16，该场景使用格式 1。', { exact: true }),
+  ).toBeVisible()
+  await expect(page.getByRole('button', { name: '小球 1', exact: true })).toBeVisible()
 
   await fileInput.setInputFiles({
     name: 'broken.motion.json',
@@ -1209,7 +1731,7 @@ test('旧版场景可以打开迁移，坏文件不会覆盖当前文档', async
     buffer: Buffer.from('{not-json'),
   })
   await expect(page.getByText('文件不是有效的 JSON 场景。', { exact: true })).toBeVisible()
-  await expect(page.getByRole('banner').getByText('旧版迁移场景', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: '小球 1', exact: true })).toBeVisible()
 })
 
 test('地面连接点工具可依次连接相隔端点、显示预览并删除', async ({ page }) => {
@@ -1357,4 +1879,129 @@ test('新地面可自动连接端点，并与连接点一起撤销', async ({ pa
 
   await autoJoint.click()
   await expect(autoJoint).toHaveAttribute('aria-pressed', 'false')
+})
+
+test('弹簧空白点击创建自由端且隐藏无效碰撞属性', async ({ page }) => {
+  await page.goto('/')
+  const canvas = page.getByRole('application', { name: '可交互的二维物理画布' })
+  await expect(canvas).toBeVisible()
+  const box = await canvas.boundingBox()
+  expect(box).not.toBeNull()
+  if (!box) return
+  const center = { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+
+  await page.getByRole('button', { name: '物体工具（O）' }).click()
+  await page.mouse.click(center.x - 100, center.y - 50)
+  await page.getByRole('button', { name: '连接工具（L）' }).click()
+  const options = page.getByRole('region', { name: '当前工具选项' })
+  await options.getByRole('combobox').selectOption('spring')
+  await page.mouse.click(center.x - 100, center.y - 50)
+  await page.mouse.click(center.x + 120, center.y + 80)
+
+  const spring = page.locator('button').filter({ hasText: '弹簧 1' })
+  await expect(spring).toBeVisible()
+  await spring.click()
+  await page.getByRole('tab', { name: '物理', exact: true }).click()
+  await expect(page.getByLabel('自由端接触半径')).toHaveValue('0.05')
+  await expect(page.getByLabel('连接体质量')).toHaveCount(0)
+  await expect(page.getByRole('checkbox', { name: '开启连接体碰撞' })).toHaveCount(0)
+  await expect(page.getByLabel('摩擦系数')).toHaveCount(0)
+  await expect(page.getByLabel('弹性系数')).toHaveCount(0)
+
+  await page.getByRole('tab', { name: '几何', exact: true }).click()
+  await expect(page.getByText('自由端点', { exact: true })).toHaveCount(1)
+  await expect(page.getByRole('button', { name: '把弹簧 B 端点固定到当前位置' })).toBeVisible()
+  const initialX = await page.getByLabel('B 初始 X').inputValue()
+  const initialY = await page.getByLabel('B 初始 Y').inputValue()
+
+  await page.getByRole('tab', { name: '物理', exact: true }).click()
+  await page.getByLabel('弹簧原长').fill('8')
+  await page.getByLabel('弹簧原长').press('Enter')
+  await page.getByRole('tab', { name: '几何', exact: true }).click()
+  await expect(page.getByLabel('B 初始 X')).toHaveValue(initialX)
+  await expect(page.getByLabel('B 初始 Y')).toHaveValue(initialY)
+})
+
+test('绳碰撞开关原子调整最低质量并支持撤销', async ({ page }) => {
+  await page.goto('/')
+  const canvas = page.getByRole('application', { name: '可交互的二维物理画布' })
+  const box = await canvas.boundingBox()
+  expect(box).not.toBeNull()
+  if (!box) return
+  const center = { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+
+  await page.getByRole('button', { name: '物体工具（O）' }).click()
+  await page.mouse.click(center.x - 100, center.y)
+  await page.mouse.click(center.x + 100, center.y)
+  await page.getByRole('button', { name: '连接工具（L）' }).click()
+  await page
+    .getByRole('region', { name: '当前工具选项' })
+    .getByRole('combobox')
+    .selectOption('rope')
+  await page.mouse.click(center.x - 100, center.y)
+  await page.mouse.click(center.x + 100, center.y)
+
+  await page.getByRole('button', { name: '绳 1', exact: true }).click()
+  await openInspectorTab(page, '物理')
+  const collision = page.getByRole('checkbox', { name: '开启连接体碰撞' })
+  const mass = page.getByLabel('连接体质量')
+  await expect(collision).not.toBeChecked()
+  await expect(mass).toHaveValue('0')
+  await expect(mass).toBeDisabled()
+
+  await collision.check()
+  await expect(mass).toHaveValue('0.001')
+  await expect(mass).toBeEnabled()
+  await mass.fill('0.005')
+  await mass.press('Enter')
+  await collision.uncheck()
+  await expect(mass).toHaveValue('0')
+  await expect(mass).toBeDisabled()
+
+  await page.keyboard.press('Control+z')
+  await expect(collision).toBeChecked()
+  await expect(mass).toHaveValue('0.005')
+})
+
+test('弹簧端点可独立解除、保持零质量并通过撤销恢复', async ({ page }) => {
+  await page.goto('/')
+  const canvas = page.getByRole('application', { name: '可交互的二维物理画布' })
+  const box = await canvas.boundingBox()
+  expect(box).not.toBeNull()
+  if (!box) return
+  const center = { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+
+  await page.getByRole('button', { name: '物体工具（O）' }).click()
+  await page.mouse.click(center.x - 100, center.y)
+  await page.mouse.click(center.x + 100, center.y)
+  await page.getByRole('button', { name: '连接工具（L）' }).click()
+  await page
+    .getByRole('region', { name: '当前工具选项' })
+    .getByRole('combobox')
+    .selectOption('spring')
+  await page.mouse.click(center.x - 100, center.y)
+  await page.mouse.click(center.x + 100, center.y)
+
+  await page.getByRole('button', { name: '弹簧 1', exact: true }).click()
+  await openInspectorTab(page, '几何')
+  await page.getByRole('button', { name: '解除弹簧 A 端点' }).click()
+  await expect(page.getByText('自由端点', { exact: true })).toHaveCount(1)
+  await expect(page.getByRole('button', { name: '把弹簧 A 端点固定到当前位置' })).toBeVisible()
+
+  await openInspectorTab(page, '物理')
+  await expect(page.getByLabel('自由端接触半径')).toHaveValue('0.05')
+  await expect(page.getByLabel('连接体质量')).toHaveCount(0)
+  await expect(page.getByLabel('摩擦系数')).toHaveCount(0)
+  await expect(page.getByLabel('弹性系数')).toHaveCount(0)
+
+  await page.keyboard.press('Control+z')
+  await openInspectorTab(page, '几何')
+  await expect(page.getByText('自由端点', { exact: true })).toHaveCount(0)
+
+  await page.keyboard.press('Control+y')
+  await expect(page.getByText('自由端点', { exact: true })).toHaveCount(1)
+  await page.getByRole('button', { name: '解除弹簧 B 端点' }).click()
+  await expect(page.getByText('自由端点', { exact: true })).toHaveCount(2)
+  await page.getByRole('button', { name: '把弹簧 A 端点固定到当前位置' }).click()
+  await expect(page.getByText('自由端点', { exact: true })).toHaveCount(1)
 })

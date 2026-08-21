@@ -157,6 +157,14 @@
   height: 100%;
 }
 
+.panelLoading {
+  display: grid;
+  min-height: 100%;
+  place-items: center;
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
 .panelFrame[data-panel='tools'][data-mode='docked'] .panelTitle {
   display: none;
 }

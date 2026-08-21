@@ -77,6 +77,11 @@ export const GifPreview = forwardRef<GifPreviewHandle, GifPreviewProps>(function
           gifGuideColor(entityId, reader.snapshot.bodyIds),
         ]),
       )
+      const particleTrajectories = reader.particleTrajectories(
+        current.settings.startTime,
+        time,
+        current.camera.pixelsPerMeter,
+      )
 
       renderer.render({
         scene: current.scene,
@@ -87,13 +92,15 @@ export const GifPreview = forwardRef<GifPreviewHandle, GifPreviewProps>(function
         previewEntities: {},
         draftEntity: null,
         marquee: null,
-        connectorStartBodyId: null,
+        connectorStartEndpoint: null,
         activeTool: 'select',
         groundJointStart: null,
         groundJointHover: null,
         pendingGroundEndpoint: null,
         runtimeBodies: frame.bodies,
+        runtimeConnectors: frame.connectors,
         runtimeTrajectories,
+        particleTrajectories,
         runtimeLocked: true,
         motionGuides: {
           ...current.settings.guides,

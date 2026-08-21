@@ -13,8 +13,7 @@ import { createGroundWithAutoJoint, resolveGroundCreationStart } from './autoGro
 describe('自动地面连接', () => {
   it('把新地面和连接点作为同一次命令创建与撤销', () => {
     const empty = createEmptyScene()
-    const layerId = empty.layers[0]?.id
-    if (!layerId) return
+    const layerId = ''
     const existing = createLineGround(layerId, { x: -2, y: 0 }, { x: 0, y: 0 }, 1)
     const scene = { ...empty, entities: [existing] }
     const created = createLineGround(layerId, { x: 0, y: 0 }, { x: 2, y: 1 }, 2)
@@ -39,8 +38,7 @@ describe('自动地面连接', () => {
 
   it('近同向的新地面不会自动创建无意义连接点', () => {
     const empty = createEmptyScene()
-    const layerId = empty.layers[0]?.id
-    if (!layerId) return
+    const layerId = ''
     const existing = createLineGround(layerId, { x: -2, y: 0 }, { x: 0, y: 0 }, 1)
     const scene = { ...empty, entities: [existing] }
     const collinear = createLineGround(layerId, { x: 0, y: 0 }, { x: 2, y: 0 }, 2)
@@ -53,10 +51,30 @@ describe('自动地面连接', () => {
     ).toEqual([collinear])
   })
 
+  it('为重合且反向的端点保留无形直接接缝', () => {
+    const empty = createEmptyScene()
+    const layerId = ''
+    const existing = createLineGround(layerId, { x: -2, y: 0 }, { x: 0, y: 0 }, 1)
+    const scene = { ...empty, entities: [existing] }
+    const reverse = createLineGround(layerId, { x: 0, y: 0 }, { x: -2, y: 0 }, 2)
+
+    const additions = createGroundWithAutoJoint(scene, reverse, {
+      groundId: existing.id,
+      endpoint: 'end',
+    })
+
+    expect(additions).toHaveLength(2)
+    expect(additions[0]).toBe(reverse)
+    expect(additions[1]).toMatchObject({
+      kind: 'groundJoint',
+      a: { groundId: existing.id, endpoint: 'end' },
+      b: { groundId: reverse.id, endpoint: 'start' },
+    })
+  })
+
   it('端点在提交前被占用时只创建地面', () => {
     const empty = createEmptyScene()
-    const layerId = empty.layers[0]?.id
-    if (!layerId) return
+    const layerId = ''
     const existing = createLineGround(layerId, { x: -2, y: 0 }, { x: 0, y: 0 }, 1)
     const partner = createLineGround(layerId, { x: 0, y: 0 }, { x: 1, y: 0 }, 2)
     const occupied = createGroundJoint(
@@ -77,9 +95,7 @@ describe('自动地面连接', () => {
   })
 
   it('使用 10 屏幕像素阈值，并让端点吸附优先于网格吸附', () => {
-    const empty = createEmptyScene()
-    const layerId = empty.layers[0]?.id
-    if (!layerId) return
+    const layerId = ''
     const existing = createLineGround(layerId, { x: -2, y: 0 }, { x: 0, y: 0 }, 1)
 
     const nearAtLowZoom = resolveGroundCreationStart({
@@ -107,9 +123,7 @@ describe('自动地面连接', () => {
   })
 
   it('Alt 与关闭开关都会绕过自动端点连接', () => {
-    const empty = createEmptyScene()
-    const layerId = empty.layers[0]?.id
-    if (!layerId) return
+    const layerId = ''
     const existing = createLineGround(layerId, { x: -2, y: 0 }, { x: 0, y: 0 }, 1)
     const base = {
       entities: [existing],
@@ -130,8 +144,7 @@ describe('自动地面连接', () => {
 
   it('贝塞尔地面也与自动连接点原子创建', () => {
     const empty = createEmptyScene()
-    const layerId = empty.layers[0]?.id
-    if (!layerId) return
+    const layerId = ''
     const existing = createLineGround(layerId, { x: -2, y: 0 }, { x: 0, y: 0 }, 1)
     const scene = { ...empty, entities: [existing] }
     const bezier = createBezierGround(
@@ -155,8 +168,7 @@ describe('自动地面连接', () => {
 
   it('圆弧地面也可从捕获的端点自动连接', () => {
     const empty = createEmptyScene()
-    const layerId = empty.layers[0]?.id
-    if (!layerId) return
+    const layerId = ''
     const existing = createLineGround(layerId, { x: -10, y: 0 }, { x: 0, y: 0 }, 1)
     const scene = { ...empty, entities: [existing] }
     const arc = createArcGround(layerId, { x: 5, y: 0 }, 5, Math.PI, Math.PI * 2, 2)
@@ -172,9 +184,7 @@ describe('自动地面连接', () => {
   })
 
   it('隐藏或锁定地面不会成为自动连接候选', () => {
-    const empty = createEmptyScene()
-    const layerId = empty.layers[0]?.id
-    if (!layerId) return
+    const layerId = ''
     const visible = createLineGround(layerId, { x: -2, y: 0 }, { x: 0, y: 0 }, 1)
     const request = {
       rawWorld: { x: 0.01, y: 0 },

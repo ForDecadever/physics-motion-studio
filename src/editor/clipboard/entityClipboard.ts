@@ -1,4 +1,27 @@
-import type { EntityId, SceneEntity, Vec2 } from '../../scene/model/types'
+import {
+  collectSceneTreeEntityIds,
+  findSceneTreeLocation,
+  sceneTreeItemTargetId,
+} from '../../scene/model/booleanLayerGraph'
+import type {
+  ConnectorEndpoint,
+  EntityId,
+  SceneDocument,
+  SceneEntity,
+  SceneTreeItem,
+  Vec2,
+} from '../../scene/model/types'
+
+export interface SceneClipboardPayload {
+  entities: SceneEntity[]
+  rootItems: SceneTreeItem[]
+}
+
+export interface DuplicatedSceneClipboard {
+  entities: SceneEntity[]
+  rootItems: SceneTreeItem[]
+  selectedIds: EntityId[]
+}
 
 function offsetPoint(point: Vec2, offset: Vec2): Vec2 {
   return { x: point.x + offset.x, y: point.y + offset.y }
@@ -9,15 +32,55 @@ export function collectClipboardEntities(
   selectedIds: readonly EntityId[],
 ): SceneEntity[] {
   const selected = new Set(selectedIds)
+  const endpointEntityId = (endpoint: ConnectorEndpoint): EntityId | null => {
+    if (endpoint.type === 'body') return endpoint.bodyId
+    if (endpoint.type === 'ground') return endpoint.groundId
+    if (endpoint.type === 'groundJoint') return endpoint.groundJointId
+    return null
+  }
   return entities.filter((entity) => {
     if (entity.kind === 'connector') {
-      return selected.has(entity.a.bodyId) && selected.has(entity.b.bodyId)
+      const targetIds = [endpointEntityId(entity.a), endpointEntityId(entity.b)].filter(
+        (id): id is EntityId => id !== null,
+      )
+      return (
+        targetIds.every((id) => selected.has(id)) &&
+        (targetIds.length > 0 || selected.has(entity.id))
+      )
     }
     if (entity.kind === 'groundJoint') {
       return selected.has(entity.a.groundId) && selected.has(entity.b.groundId)
     }
     return selected.has(entity.id)
   })
+}
+
+export function collectSceneClipboard(
+  scene: SceneDocument,
+  selectedIds: readonly EntityId[],
+): SceneClipboardPayload {
+  const selectedItems: SceneTreeItem[] = selectedIds.flatMap((id) => {
+    const location = findSceneTreeLocation(scene.rootItems, id)
+    if (!location) return []
+    if (!location.parent) return [location.item]
+    return location.item.kind === 'entity' ? [{ kind: 'entity', entityId: id }] : []
+  })
+  const ordinary = collectClipboardEntities(scene.entities, selectedIds)
+  const copiedTargetIds = new Set(selectedItems.map(sceneTreeItemTargetId))
+  for (const entity of ordinary) {
+    if (copiedTargetIds.has(entity.id)) continue
+    const location = findSceneTreeLocation(scene.rootItems, entity.id)
+    if (!location?.parent) {
+      selectedItems.push(location?.item ?? { kind: 'entity', entityId: entity.id })
+      copiedTargetIds.add(entity.id)
+    }
+  }
+  const sourceIds = new Set(selectedItems.flatMap(collectSceneTreeEntityIds))
+  for (const entity of ordinary) sourceIds.add(entity.id)
+  return {
+    entities: scene.entities.filter((entity) => sourceIds.has(entity.id)),
+    rootItems: selectedItems,
+  }
 }
 
 function offsetEntity(entity: SceneEntity, offset: Vec2): SceneEntity {
@@ -39,9 +102,8 @@ function offsetEntity(entity: SceneEntity, offset: Vec2): SceneEntity {
         },
       }
     }
-    if (geometry.type === 'arc') {
+    if (geometry.type === 'arc')
       return { ...entity, geometry: { ...geometry, center: offsetPoint(geometry.center, offset) } }
-    }
     return {
       ...entity,
       geometry: {
@@ -56,12 +118,11 @@ function offsetEntity(entity: SceneEntity, offset: Vec2): SceneEntity {
   if (entity.kind === 'field') {
     const region = entity.region
     if (region.type === 'infinite') return entity
-    if (region.type === 'polygon') {
+    if (region.type === 'polygon')
       return {
         ...entity,
         region: { ...region, points: region.points.map((point) => offsetPoint(point, offset)) },
       }
-    }
     if (region.type === 'bezierPath') {
       return {
         ...entity,
@@ -85,17 +146,56 @@ export function duplicateEntities(
   createId: () => EntityId = () => crypto.randomUUID(),
   offset: Vec2 = { x: 0.2, y: -0.2 },
 ): SceneEntity[] {
-  const idMap = new Map(source.map((entity) => [entity.id, createId()]))
-  const duplicated: SceneEntity[] = []
+  return duplicateSceneClipboard(
+    {
+      entities: [...source],
+      rootItems: source.map((entity) => ({ kind: 'entity', entityId: entity.id })),
+    },
+    createId,
+    offset,
+  ).entities
+}
 
-  for (const original of source) {
-    const id = idMap.get(original.id)
-    if (!id) continue
+export function duplicateSceneClipboard(
+  source: SceneClipboardPayload,
+  createId: () => EntityId = () => crypto.randomUUID(),
+  offset: Vec2 = { x: 0.2, y: -0.2 },
+): DuplicatedSceneClipboard {
+  const entityIdMap = new Map(source.entities.map((entity) => [entity.id, createId()]))
+  const nodeIdMap = new Map<string, string>()
+  const resultIdMap = new Map<string, string>()
+  const collectNodeIds = (item: SceneTreeItem): void => {
+    if (item.kind !== 'boolean') return
+    nodeIdMap.set(item.id, createId())
+    resultIdMap.set(item.resultId, createId())
+    item.operands.forEach(collectNodeIds)
+  }
+  source.rootItems.forEach(collectNodeIds)
+  const targetIdMap = new Map<EntityId, EntityId>([...entityIdMap, ...resultIdMap])
+
+  const remapEndpoint = (endpoint: ConnectorEndpoint): ConnectorEndpoint | null => {
+    if (endpoint.type === 'world' || endpoint.type === 'free')
+      return { ...endpoint, position: offsetPoint(endpoint.position, offset) }
+    if (endpoint.type === 'body') {
+      const bodyId = targetIdMap.get(endpoint.bodyId)
+      return bodyId ? { ...endpoint, bodyId } : null
+    }
+    if (endpoint.type === 'ground') {
+      const groundId = entityIdMap.get(endpoint.groundId)
+      return groundId ? { ...endpoint, groundId } : null
+    }
+    const groundJointId = entityIdMap.get(endpoint.groundJointId)
+    return groundJointId ? { ...endpoint, groundJointId } : null
+  }
+
+  const entities: SceneEntity[] = []
+  for (const original of source.entities) {
+    const id = entityIdMap.get(original.id)!
     if (original.kind === 'groundJoint') {
-      const firstGroundId = idMap.get(original.a.groundId)
-      const secondGroundId = idMap.get(original.b.groundId)
+      const firstGroundId = entityIdMap.get(original.a.groundId)
+      const secondGroundId = entityIdMap.get(original.b.groundId)
       if (!firstGroundId || !secondGroundId) continue
-      duplicated.push({
+      entities.push({
         ...structuredClone(original),
         id,
         name: `${original.name} 副本`,
@@ -105,24 +205,34 @@ export function duplicateEntities(
       continue
     }
     if (original.kind === 'connector') {
-      const firstBodyId = idMap.get(original.a.bodyId)
-      const secondBodyId = idMap.get(original.b.bodyId)
-      if (!firstBodyId || !secondBodyId) continue
-      duplicated.push({
-        ...structuredClone(original),
-        id,
-        name: `${original.name} 副本`,
-        a: { ...original.a, bodyId: firstBodyId },
-        b: { ...original.b, bodyId: secondBodyId },
-      })
+      const a = remapEndpoint(original.a)
+      const b = remapEndpoint(original.b)
+      if (!a || !b) continue
+      entities.push({ ...structuredClone(original), id, name: `${original.name} 副本`, a, b })
       continue
     }
-    duplicated.push(
+    entities.push(
       offsetEntity(
         { ...structuredClone(original), id, name: `${original.name} 副本` } as SceneEntity,
         offset,
       ),
     )
   }
-  return duplicated
+
+  const remapItem = (item: SceneTreeItem): SceneTreeItem =>
+    item.kind === 'entity'
+      ? { kind: 'entity', entityId: entityIdMap.get(item.entityId)! }
+      : {
+          ...structuredClone(item),
+          id: nodeIdMap.get(item.id)!,
+          resultId: resultIdMap.get(item.resultId)!,
+          name: `${item.name} 副本`,
+          operands: item.operands.map(remapItem),
+        }
+  const rootItems = source.rootItems.map(remapItem)
+  return {
+    entities,
+    rootItems,
+    selectedIds: rootItems.map(sceneTreeItemTargetId),
+  }
 }

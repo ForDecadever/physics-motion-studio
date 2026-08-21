@@ -20,14 +20,7 @@ export function createEmptyScene(name = '未命名场景', now = new Date()): Sc
       recordingSampleRate: 60,
       recordingDurationSeconds: 300,
     },
-    layers: [
-      {
-        id: crypto.randomUUID(),
-        name: '物理场景',
-        visible: true,
-        locked: false,
-      },
-    ],
+    rootItems: [],
     entities: [],
     charts: [createDefaultChart()],
   }

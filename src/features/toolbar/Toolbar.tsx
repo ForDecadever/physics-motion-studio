@@ -1,44 +1,14 @@
-import {
-  Box,
-  CircleDot,
-  GitMerge,
-  Hand,
-  Link2,
-  Magnet,
-  MousePointer2,
-  RotateCw,
-  Scaling,
-  Spline,
-  ZoomIn,
-  type LucideIcon,
-} from 'lucide-react'
+import { CircleDot, Combine } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 
+import { createBooleanLayerCommand } from '../../editor/commands/booleanLayerCommands'
+import { commitPendingEditorEdit } from '../../editor/editing/pendingEditorEdit'
+import { useDocumentStore } from '../../stores/documentStore'
 import { useEditorStore, type EditorTool } from '../../stores/editorStore'
 import { isSimulationRuntimeLocked, useSimulationStore } from '../../stores/simulationStore'
 import styles from './Toolbar.module.css'
-
-interface ToolDefinition {
-  id: EditorTool
-  label: string
-  shortcut: string
-  icon: LucideIcon
-  startsGroup?: boolean
-}
-
-const tools: ToolDefinition[] = [
-  { id: 'select', label: '选择与移动', shortcut: 'V', icon: MousePointer2 },
-  { id: 'rotate', label: '旋转', shortcut: 'R', icon: RotateCw },
-  { id: 'scale', label: '对象缩放', shortcut: 'S', icon: Scaling },
-  { id: 'hand', label: '抓手', shortcut: 'H', icon: Hand, startsGroup: true },
-  { id: 'zoom', label: '画布缩放', shortcut: 'Z', icon: ZoomIn },
-  { id: 'ground', label: '地面工具', shortcut: 'G', icon: Spline, startsGroup: true },
-  { id: 'groundJoint', label: '地面连接点工具', shortcut: 'J', icon: GitMerge },
-  { id: 'body', label: '物体工具', shortcut: 'O', icon: Box },
-  { id: 'field', label: '场工具', shortcut: 'F', icon: Magnet },
-  { id: 'connector', label: '连接工具', shortcut: 'L', icon: Link2 },
-]
+import { toolDefinitions } from './toolDefinitions'
 
 export function Toolbar({ orientation = 'vertical' }: { orientation?: 'vertical' | 'horizontal' }) {
   const activeTool = useEditorStore((state) => state.activeTool)
@@ -47,10 +17,12 @@ export function Toolbar({ orientation = 'vertical' }: { orientation?: 'vertical'
   const bodyToolPreset = useEditorStore((state) => state.bodyToolPreset)
   const fieldToolPreset = useEditorStore((state) => state.fieldToolPreset)
   const connectorToolPreset = useEditorStore((state) => state.connectorToolPreset)
+  const particleSourceToolShape = useEditorStore((state) => state.particleSourceToolShape)
   const setGroundToolShape = useEditorStore((state) => state.setGroundToolShape)
   const setBodyToolPreset = useEditorStore((state) => state.setBodyToolPreset)
   const setFieldToolPreset = useEditorStore((state) => state.setFieldToolPreset)
   const setConnectorToolPreset = useEditorStore((state) => state.setConnectorToolPreset)
+  const setParticleSourceToolShape = useEditorStore((state) => state.setParticleSourceToolShape)
   const runtimeLocked = useSimulationStore(isSimulationRuntimeLocked)
   const [openFlyout, setOpenFlyout] = useState<EditorTool | null>(null)
   const [flyoutAnchor, setFlyoutAnchor] = useState<DOMRect | null>(null)
@@ -127,6 +99,18 @@ export function Toolbar({ orientation = 'vertical' }: { orientation?: 'vertical'
         select: () => setConnectorToolPreset('spring'),
       },
     ],
+    particleSource: [
+      {
+        label: '点粒子源',
+        active: particleSourceToolShape === 'point',
+        select: () => setParticleSourceToolShape('point'),
+      },
+      {
+        label: '线粒子源',
+        active: particleSourceToolShape === 'line',
+        select: () => setParticleSourceToolShape('line'),
+      },
+    ],
   }
 
   const cancelClose = () => {
@@ -153,7 +137,7 @@ export function Toolbar({ orientation = 'vertical' }: { orientation?: 'vertical'
     }, 120)
   }
 
-  const activeDefinition = tools.find(({ id }) => id === openFlyout)
+  const activeDefinition = toolDefinitions.find(({ id }) => id === openFlyout)
   const activeOptions = openFlyout ? flyoutOptions[openFlyout] : undefined
   const flyoutHeight = 48 + (activeOptions?.length ?? 0) * 30
   const flyoutPosition = (() => {
@@ -179,7 +163,7 @@ export function Toolbar({ orientation = 'vertical' }: { orientation?: 'vertical'
     <>
       <aside className={styles.toolbar} data-orientation={orientation} aria-label="工具栏">
         <div className={styles.toolbarTop}>
-          {tools.map(({ id, label, shortcut, icon: Icon, startsGroup }) => (
+          {toolDefinitions.map(({ id, label, shortcut, icon: Icon, startsGroup }) => (
             <div
               className={`${styles.toolItem} ${startsGroup ? styles.toolGroup : ''}`}
               key={id}
@@ -206,6 +190,28 @@ export function Toolbar({ orientation = 'vertical' }: { orientation?: 'vertical'
               </button>
             </div>
           ))}
+          <div className={`${styles.toolItem} ${styles.toolGroup}`}>
+            <button
+              type="button"
+              className={styles.toolButton}
+              aria-label="布尔组合"
+              title="布尔组合"
+              disabled={runtimeLocked}
+              onClick={() => {
+                commitPendingEditorEdit()
+                const document = useDocumentStore.getState()
+                const result = createBooleanLayerCommand(
+                  document.scene,
+                  'union',
+                  useEditorStore.getState().selectedIds,
+                )
+                document.executeCommand(result.command)
+                useEditorStore.getState().setSelectedIds([result.resultId])
+              }}
+            >
+              <Combine size={20} strokeWidth={1.8} />
+            </button>
+          </div>
         </div>
 
         <div className={styles.axisBadge} title="二维世界坐标：X 向右，Y 向上">

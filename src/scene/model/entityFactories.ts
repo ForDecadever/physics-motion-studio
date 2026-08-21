@@ -1,19 +1,39 @@
 import type {
+  BezierPathNode,
   BodyEntity,
+  ConnectorEndpoint,
   ConnectorEntity,
   FieldEntity,
   GroundEndpointRef,
   GroundEntity,
   GroundJointEntity,
-  LayerId,
+  ParticleSourceEntity,
+  ParticleSourceShape,
   Vec2,
 } from './types'
+import { centerBezierPathNodes } from './bodyPath'
 
-function baseEntity(layerId: LayerId, name: string) {
+type ConnectorEndpointInput = string | ConnectorEndpoint
+
+function connectorEndpoint(input: ConnectorEndpointInput): ConnectorEndpoint {
+  return typeof input === 'string'
+    ? { type: 'body', bodyId: input, localAnchor: { x: 0, y: 0 } }
+    : input
+}
+
+function connectorPhysics(collisionEnabled = false) {
+  return {
+    collisionEnabled,
+    radiusM: 0.05,
+    massKg: 0,
+    material: { friction: 0, restitution: 0 },
+  }
+}
+
+function baseEntity(_legacyLayerId: string, name: string) {
   return {
     id: crypto.randomUUID(),
     name,
-    layerId,
     visible: true,
     locked: false,
     simulationEnabled: true,
@@ -21,7 +41,7 @@ function baseEntity(layerId: LayerId, name: string) {
 }
 
 export function createLineGround(
-  layerId: LayerId,
+  layerId: string,
   start: Vec2,
   end: Vec2,
   index: number,
@@ -37,7 +57,7 @@ export function createLineGround(
 }
 
 export function createArcGround(
-  layerId: LayerId,
+  layerId: string,
   center: Vec2,
   radius: number,
   startRad: number,
@@ -55,7 +75,7 @@ export function createArcGround(
 }
 
 export function createBezierGround(
-  layerId: LayerId,
+  layerId: string,
   p0: Vec2,
   p1: Vec2,
   p2: Vec2,
@@ -73,7 +93,7 @@ export function createBezierGround(
 }
 
 export function createGroundJoint(
-  layerId: LayerId,
+  layerId: string,
   a: GroundEndpointRef,
   b: GroundEndpointRef,
   index: number,
@@ -88,7 +108,7 @@ export function createGroundJoint(
 }
 
 export function createBall(
-  layerId: LayerId,
+  layerId: string,
   position: Vec2,
   radius: number,
   index: number,
@@ -110,7 +130,7 @@ export function createBall(
 }
 
 export function createBlock(
-  layerId: LayerId,
+  layerId: string,
   position: Vec2,
   width: number,
   height: number,
@@ -132,8 +152,31 @@ export function createBlock(
   }
 }
 
+export function createBezierBlock(
+  layerId: string,
+  worldNodes: BezierPathNode[],
+  index: number,
+): BodyEntity | null {
+  const centered = centerBezierPathNodes(worldNodes)
+  if (!centered.analysis.valid) return null
+  return {
+    ...baseEntity(layerId, `钢笔物块 ${index}`),
+    kind: 'body',
+    preset: 'block',
+    shape: { type: 'bezierPath', nodes: centered.nodes },
+    transform: { position: centered.center, angleRad: 0 },
+    massKg: 1,
+    chargeC: 0,
+    material: { friction: 0, restitution: 0 },
+    initialVelocity: { x: 0, y: 0 },
+    initialAngularVelocityRad: 0,
+    rotationEnabled: true,
+    continuousCollisionDetection: false,
+  }
+}
+
 export function createGravityField(
-  layerId: LayerId,
+  layerId: string,
   center: Vec2,
   width: number,
   height: number,
@@ -148,7 +191,7 @@ export function createGravityField(
 }
 
 export function createElectricField(
-  layerId: LayerId,
+  layerId: string,
   center: Vec2,
   width: number,
   height: number,
@@ -163,7 +206,7 @@ export function createElectricField(
 }
 
 export function createMagneticField(
-  layerId: LayerId,
+  layerId: string,
   center: Vec2,
   width: number,
   height: number,
@@ -177,50 +220,71 @@ export function createMagneticField(
   }
 }
 
+export function createParticleSource(
+  layerId: string,
+  shape: ParticleSourceShape,
+  index: number,
+): ParticleSourceEntity {
+  return {
+    ...baseEntity(layerId, `粒子源 ${index}`),
+    kind: 'particleSource',
+    shape,
+    directionRad: 0,
+    flipEmission: false,
+    speedMps: 1,
+    chargeC: 0,
+    massKg: 1,
+    coulombEnabled: true,
+  }
+}
+
 export function createRope(
-  layerId: LayerId,
-  firstBodyId: string,
-  secondBodyId: string,
+  layerId: string,
+  firstEndpoint: ConnectorEndpointInput,
+  secondEndpoint: ConnectorEndpointInput,
   length: number,
   index: number,
 ): ConnectorEntity {
   return {
     ...baseEntity(layerId, `绳 ${index}`),
     kind: 'connector',
-    a: { bodyId: firstBodyId, localAnchor: { x: 0, y: 0 } },
-    b: { bodyId: secondBodyId, localAnchor: { x: 0, y: 0 } },
+    a: connectorEndpoint(firstEndpoint),
+    b: connectorEndpoint(secondEndpoint),
     connector: { type: 'rope', maxLength: length },
+    ...connectorPhysics(),
   }
 }
 
 export function createRod(
-  layerId: LayerId,
-  firstBodyId: string,
-  secondBodyId: string,
+  layerId: string,
+  firstEndpoint: ConnectorEndpointInput,
+  secondEndpoint: ConnectorEndpointInput,
   length: number,
   index: number,
 ): ConnectorEntity {
   return {
     ...baseEntity(layerId, `杆 ${index}`),
     kind: 'connector',
-    a: { bodyId: firstBodyId, localAnchor: { x: 0, y: 0 } },
-    b: { bodyId: secondBodyId, localAnchor: { x: 0, y: 0 } },
-    connector: { type: 'rod', length, freeRotation: true },
+    a: connectorEndpoint(firstEndpoint),
+    b: connectorEndpoint(secondEndpoint),
+    connector: { type: 'rod', length, endpointRotation: { a: 'free', b: 'free' } },
+    ...connectorPhysics(),
   }
 }
 
 export function createSpring(
-  layerId: LayerId,
-  firstBodyId: string,
-  secondBodyId: string,
+  layerId: string,
+  firstEndpoint: ConnectorEndpointInput,
+  secondEndpoint: ConnectorEndpointInput,
   restLength: number,
   index: number,
 ): ConnectorEntity {
   return {
     ...baseEntity(layerId, `弹簧 ${index}`),
     kind: 'connector',
-    a: { bodyId: firstBodyId, localAnchor: { x: 0, y: 0 } },
-    b: { bodyId: secondBodyId, localAnchor: { x: 0, y: 0 } },
+    a: connectorEndpoint(firstEndpoint),
+    b: connectorEndpoint(secondEndpoint),
     connector: { type: 'spring', restLength, stiffness: 20, damping: 0 },
+    ...connectorPhysics(false),
   }
 }

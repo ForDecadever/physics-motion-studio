@@ -37,11 +37,12 @@ import type {
   ChartLineStyle,
   ChartSeriesDefinition,
 } from '../../scene/model/types'
+import { listRuntimeBodyTargets } from '../../scene/model/runtimeBodyTargets'
 import { useChartStore, getChartTelemetryBuffer } from '../../stores/chartStore'
 import { useDocumentStore } from '../../stores/documentStore'
 import { useEditorStore } from '../../stores/editorStore'
 import { axisLabel, axisSource, chartAxisMetricDefinitions } from './chartAxis'
-import { formatChartNumber } from './chartNumberFormat'
+import { formatChartNumber, resolveConstantChartAxisRange } from './chartNumberFormat'
 import { downloadAllChartsCsv, downloadSingleChartCsv } from './chartCsv'
 import {
   ChartExpressionError,
@@ -130,6 +131,21 @@ function ChartCanvas({
     if (!instance) return
     const evaluatedById = new Map(evaluated.series.map((series) => [series.id, series]))
     const visible = chart.series.filter((series) => series.visible)
+    let xMin = Number.POSITIVE_INFINITY
+    let xMax = Number.NEGATIVE_INFINITY
+    let yMin = Number.POSITIVE_INFINITY
+    let yMax = Number.NEGATIVE_INFINITY
+    for (const series of visible) {
+      for (const point of evaluatedById.get(series.id)?.points ?? []) {
+        if (point.x === null || point.y === null) continue
+        xMin = Math.min(xMin, point.x)
+        xMax = Math.max(xMax, point.x)
+        yMin = Math.min(yMin, point.y)
+        yMax = Math.max(yMax, point.y)
+      }
+    }
+    const constantXRange = resolveConstantChartAxisRange(xMin, xMax)
+    const constantYRange = resolveConstantChartAxisRange(yMin, yMax)
     instance.setOption(
       {
         animation: false,
@@ -167,8 +183,9 @@ function ChartCanvas({
           },
           axisLine: { lineStyle: { color: '#4b535f' } },
           splitLine: { lineStyle: { color: 'rgba(255,255,255,0.05)' } },
-          min: 'dataMin',
-          max: 'dataMax',
+          min: constantXRange?.min ?? 'dataMin',
+          max: constantXRange?.max ?? 'dataMax',
+          splitNumber: 5,
           scale: true,
         },
         yAxis: {
@@ -184,6 +201,9 @@ function ChartCanvas({
           },
           axisLine: { show: true, lineStyle: { color: '#4b535f' } },
           splitLine: { lineStyle: { color: 'rgba(255,255,255,0.05)' } },
+          min: constantYRange?.min,
+          max: constantYRange?.max,
+          splitNumber: 5,
           scale: true,
         },
         dataZoom: [{ type: 'inside', xAxisIndex: 0, filterMode: 'none' }],
@@ -852,10 +872,7 @@ export function ChartPanel({ embedded = false }: { embedded?: boolean }) {
   const reachedRecordLimit = useChartStore((state) => state.reachedRecordLimit)
   const clearHistory = useChartStore((state) => state.clearHistory)
   const toggleCollapsed = useChartStore((state) => state.toggleCollapsed)
-  const bodies = useMemo(
-    () => scene.entities.filter((entity): entity is BodyEntity => entity.kind === 'body'),
-    [scene.entities],
-  )
+  const bodies = useMemo(() => listRuntimeBodyTargets(scene), [scene])
   const totalSeries = scene.charts.reduce((total, chart) => total + chart.series.length, 0)
   const hasData = revision >= 0 && getChartTelemetryBuffer().length > 0
   const recordedBodyIds = useMemo(

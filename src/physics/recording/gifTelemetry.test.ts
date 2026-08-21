@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
-import type { RuntimeBodyState } from '../worker/messages'
+import type { RuntimeBodyState, RuntimeConnectorState } from '../worker/messages'
 import {
   GIF_BODY_CHANNEL_COUNT,
   GIF_RECORDING_MAX_BODIES,
+  GIF_RECORDING_MAX_CONNECTOR_POINTS,
   GifTelemetryBuffer,
 } from './gifTelemetry'
 
@@ -19,6 +20,16 @@ function runtimeBody(entityId: string, value: number): RuntimeBodyState {
     translationalKineticEnergyJ: 0,
     rotationalKineticEnergyJ: 0,
     kineticEnergyJ: 0,
+  }
+}
+
+function runtimeConnector(entityId: string, value: number): RuntimeConnectorState {
+  return {
+    entityId,
+    points: [
+      { x: value, y: value + 1 },
+      { x: value + 2, y: value + 3 },
+    ],
   }
 }
 
@@ -45,6 +56,18 @@ describe('GifTelemetryBuffer', () => {
     expect(Number.isNaN(snapshot.values[GIF_BODY_CHANNEL_COUNT])).toBe(true)
   })
 
+  it('stores the fixed connector node layout with each chronological sample', () => {
+    const initial = runtimeConnector('spring', 0)
+    const buffer = new GifTelemetryBuffer([], [initial])
+    buffer.append(0, [], [runtimeConnector('spring', 1)])
+    buffer.append(1 / 30, [], [runtimeConnector('spring', 5)])
+
+    const snapshot = buffer.snapshot(8)
+    expect(snapshot.connectorIds).toEqual(['spring'])
+    expect([...snapshot.connectorPointOffsets]).toEqual([0, 2])
+    expect([...snapshot.connectorValues]).toEqual([1, 2, 3, 4, 5, 6, 7, 8])
+  })
+
   it('keeps only the newest 300 seconds in chronological order', () => {
     const buffer = new GifTelemetryBuffer([])
     for (let index = 0; index <= buffer.capacity; index += 1) {
@@ -66,6 +89,24 @@ describe('GifTelemetryBuffer', () => {
       reason: 'body-limit',
       bodyCount: GIF_RECORDING_MAX_BODIES + 1,
       maxBodies: GIF_RECORDING_MAX_BODIES,
+    })
+  })
+
+  it('blocks recording instead of allocating an unsafe connector history', () => {
+    const connector = {
+      entityId: 'rope',
+      points: Array.from({ length: GIF_RECORDING_MAX_CONNECTOR_POINTS + 1 }, () => ({
+        x: 0,
+        y: 0,
+      })),
+    }
+    const buffer = new GifTelemetryBuffer([], [connector])
+    expect(buffer.append(0, [], [connector])).toBe(false)
+    expect(buffer.getStatus()).toEqual({
+      kind: 'blocked',
+      reason: 'connector-point-limit',
+      pointCount: GIF_RECORDING_MAX_CONNECTOR_POINTS + 1,
+      maxPoints: GIF_RECORDING_MAX_CONNECTOR_POINTS,
     })
   })
 

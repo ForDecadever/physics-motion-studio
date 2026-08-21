@@ -10,33 +10,6 @@
   user-select: none;
 }
 
-.brand {
-  display: flex;
-  width: 176px;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 9px;
-  padding-left: 10px;
-  color: #f2f5f8;
-  font-size: 12px;
-  font-weight: 650;
-  letter-spacing: 0.01em;
-}
-
-.brandMark {
-  display: grid;
-  width: 20px;
-  height: 20px;
-  border: 1px solid rgb(255 255 255 / 16%);
-  border-radius: 5px;
-  place-items: center;
-  background: linear-gradient(145deg, #348fef, #1c64bd);
-  box-shadow: 0 2px 8px rgb(0 0 0 / 35%);
-  color: white;
-  font-size: 11px;
-  font-weight: 800;
-}
-
 .menuBar {
   display: flex;
   align-self: stretch;
@@ -148,50 +121,4 @@
 .submenu:hover > .submenuPopover,
 .submenu:focus-within > .submenuPopover {
   display: block;
-}
-
-.sceneStatus {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 7px;
-  margin-left: auto;
-  padding: 0 12px;
-  color: var(--color-text-muted);
-  font-size: 11px;
-}
-
-.statusDot {
-  width: 6px;
-  height: 6px;
-  flex: 0 0 auto;
-  border-radius: 50%;
-  background: var(--color-success);
-  box-shadow: 0 0 7px rgb(88 214 141 / 35%);
-}
-
-.statusDot[data-dirty='true'] {
-  background: var(--color-warning);
-}
-
-.sceneName {
-  overflow: hidden;
-  max-width: 170px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.saveState {
-  color: var(--color-text-dim);
-  font-size: 9px;
-  white-space: nowrap;
-}
-
-.stageBadge {
-  padding: 2px 6px;
-  border: 1px solid var(--color-border-strong);
-  border-radius: 999px;
-  color: var(--color-text-dim);
-  font-size: 9px;
-  letter-spacing: 0.05em;
 }

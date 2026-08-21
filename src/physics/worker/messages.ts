@@ -24,6 +24,21 @@ export interface RuntimeBodyState {
   kineticEnergyJ: number
 }
 
+export interface RuntimeConnectorState {
+  entityId: EntityId
+  points: Vec2[]
+}
+
+export interface RuntimeIonState {
+  t: number
+  position: Vec2
+}
+
+export interface RuntimeParticleSourceState {
+  entityId: EntityId
+  ions: RuntimeIonState[]
+}
+
 export interface RuntimeSample {
   simulationTime: number
   bodies: RuntimeBodyState[]
@@ -44,6 +59,18 @@ export type GifHistoryStatus =
       bodyCount: number
       maxBodies: number
     }
+  | {
+      kind: 'blocked'
+      reason: 'connector-point-limit'
+      pointCount: number
+      maxPoints: number
+    }
+  | {
+      kind: 'blocked'
+      reason: 'particle-ion-limit'
+      ionCount: number
+      maxIons: number
+    }
 
 export interface GifHistorySnapshot {
   requestId: number
@@ -52,6 +79,12 @@ export interface GifHistorySnapshot {
   bodyIds: EntityId[]
   times: Float32Array
   values: Float32Array
+  connectorIds: EntityId[]
+  connectorPointOffsets: Uint32Array
+  connectorValues: Float32Array
+  particleIonCount: number
+  particleIonTs: Float32Array
+  particleValues: Float32Array
 }
 
 export type SimulationStatus = 'initializing' | 'ready' | 'playing' | 'paused' | 'error'
@@ -68,6 +101,8 @@ export type PhysicsToMainMessage =
       type: 'frame'
       simulationTime: number
       bodies: RuntimeBodyState[]
+      connectors: RuntimeConnectorState[]
+      particleSources: RuntimeParticleSourceState[]
       samples: RuntimeSample[]
     }
   | { type: 'gifHistoryStatus'; status: GifHistoryStatus }

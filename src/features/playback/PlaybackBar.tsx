@@ -71,6 +71,12 @@ export function PlaybackBar() {
         <span title={errorMessage ?? warning}>{statusText}</span>
       </div>
 
+      {warning && !errorMessage ? (
+        <span className={styles.warningMessage} role="status" title={warning}>
+          {warning}
+        </span>
+      ) : null}
+
       <label className={styles.rateControl}>
         <span>倍速</span>
         <select

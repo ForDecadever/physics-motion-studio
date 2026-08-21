@@ -278,16 +278,36 @@ describe('受限夹角地面过渡', () => {
     expect(groundPathHasSelfIntersection(path!)).toBe(false)
   })
 
-  it('拒绝重合端点的 180° 零长度直线', () => {
-    const { first, second, joint } = makeAngledPair(180)
-    const transition = buildGroundPathNetwork([first, second, joint]).jointPaths.get(joint.id)
+  it.each([179, 179.5, 180])('把重合端点的 %d° 连接解析为无形直接接缝', (angleDeg) => {
+    const { first, second, joint } = makeAngledPair(angleDeg)
+    const network = buildGroundPathNetwork([first, second, joint])
+    const transition = network.jointPaths.get(joint.id)
 
     expect(transition).toMatchObject({
-      issue: 'linear-zero-length',
-      kind: 'invalid',
+      issue: null,
+      kind: 'direct',
       path: null,
+      segmentId: null,
       trimA: 0,
       trimB: 0,
+      pieces: [],
+    })
+    expect(network.groundPaths.get(first.id)?.path.length).toBeCloseTo(10)
+    expect(network.groundPaths.get(second.id)?.path.length).toBeCloseTo(10)
+    expect(network.segmentById.get(groundPathSegmentId(first.id))?.neighbors.end).toEqual({
+      segmentId: groundPathSegmentId(second.id),
+      endpoint: 'start',
+      jointId: joint.id,
+    })
+    const travelled = traverseGroundPath(
+      network,
+      { segmentId: groundPathSegmentId(first.id), s: 9.75, direction: 1 },
+      0.5,
+    )
+    expect(travelled).toMatchObject({
+      stoppedAtOpenEnd: false,
+      transitions: 1,
+      location: { segmentId: groundPathSegmentId(second.id), s: 0.25, direction: 1 },
     })
   })
 
@@ -303,7 +323,7 @@ describe('受限夹角地面过渡', () => {
     }
   })
 
-  it('按公式计算自动裁剪，并允许手动长度覆盖', () => {
+  it('按紧凑公式计算自动裁剪，并允许手动长度覆盖', () => {
     const automatic = makeAngledPair(90)
     const autoNetwork = buildGroundPathNetwork([automatic.first, automatic.second, automatic.joint])
     const expected = 0.4 * 10 * Math.sin(Math.PI / 4)

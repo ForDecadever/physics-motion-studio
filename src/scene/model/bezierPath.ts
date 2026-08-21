@@ -1,5 +1,7 @@
 import type { BezierPathNode, Vec2 } from './types'
 
+export type BezierPathPointKey = 'anchor' | 'inHandle' | 'outHandle'
+
 export function createSmoothBezierPathNodes(points: Vec2[]): BezierPathNode[] {
   if (points.length < 3) {
     return points.map((anchor) => ({ anchor, inHandle: anchor, outHandle: anchor }))
@@ -48,26 +50,69 @@ export function sampleClosedBezierPath(nodes: BezierPathNode[], segmentsPerCurve
 export function moveBezierPathPoint(
   nodes: BezierPathNode[],
   nodeIndex: number,
-  pointKey: keyof BezierPathNode,
+  pointKey: BezierPathPointKey,
   point: Vec2,
+  controlMode: 'mirrored' | 'independent' = 'mirrored',
 ): BezierPathNode[] {
   return nodes.map((node, index) => {
     if (index !== nodeIndex) return node
     if (pointKey === 'anchor') {
       const delta = { x: point.x - node.anchor.x, y: point.y - node.anchor.y }
       return {
+        ...node,
         anchor: point,
         inHandle: { x: node.inHandle.x + delta.x, y: node.inHandle.y + delta.y },
         outHandle: { x: node.outHandle.x + delta.x, y: node.outHandle.y + delta.y },
       }
     }
+    const expandedNode: BezierPathNode = { ...node }
+    delete expandedNode.collapsedHandles
+    if (controlMode === 'independent') return { ...expandedNode, [pointKey]: point }
     const oppositeKey = pointKey === 'inHandle' ? 'outHandle' : 'inHandle'
     return {
-      ...node,
+      ...expandedNode,
       [pointKey]: point,
       [oppositeKey]: {
         x: node.anchor.x * 2 - point.x,
         y: node.anchor.y * 2 - point.y,
+      },
+    }
+  })
+}
+
+export function toggleBezierPathNodeMode(
+  nodes: BezierPathNode[],
+  nodeIndex: number,
+): BezierPathNode[] {
+  return nodes.map((node, index) => {
+    if (index !== nodeIndex) return node
+    if (node.collapsedHandles) {
+      const { collapsedHandles, ...expandedNode } = node
+      return {
+        ...expandedNode,
+        inHandle: {
+          x: node.anchor.x + collapsedHandles.inOffset.x,
+          y: node.anchor.y + collapsedHandles.inOffset.y,
+        },
+        outHandle: {
+          x: node.anchor.x + collapsedHandles.outOffset.x,
+          y: node.anchor.y + collapsedHandles.outOffset.y,
+        },
+      }
+    }
+    return {
+      ...node,
+      inHandle: { ...node.anchor },
+      outHandle: { ...node.anchor },
+      collapsedHandles: {
+        inOffset: {
+          x: node.inHandle.x - node.anchor.x,
+          y: node.inHandle.y - node.anchor.y,
+        },
+        outOffset: {
+          x: node.outHandle.x - node.anchor.x,
+          y: node.outHandle.y - node.anchor.y,
+        },
       },
     }
   })

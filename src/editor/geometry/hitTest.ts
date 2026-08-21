@@ -3,13 +3,28 @@ import type {
   EntityId,
   GroundEndpointRef,
   GroundEntity,
+  SceneDocument,
   SceneEntity,
   Vec2,
 } from '../../scene/model/types'
+import {
+  pointInBooleanGeometry,
+  resolveBooleanScene,
+  transformBooleanBodyGeometry,
+  type ResolvedBooleanResult,
+} from '../../scene/model/booleanGeometry'
 import { angleWithinSweep } from '../../physics/core/fieldRegions'
+import type { RuntimeBodyState, RuntimeConnectorState } from '../../physics/worker/messages'
 import { sampleClosedBezierPath } from '../../scene/model/bezierPath'
+import { sampleAdaptiveClosedBezierPath } from '../../scene/model/bodyPath'
+import { findBooleanNode } from '../../scene/model/booleanLayerGraph'
 import { resolveGroundEndpoint, resolveGroundJoint } from '../../scene/model/groundEndpoints'
-import { buildGroundPathNetwork, type GroundPathNetwork } from '../../scene/model/groundPath'
+import {
+  buildGroundPathNetwork,
+  type GroundPath,
+  type GroundPathNetwork,
+} from '../../scene/model/groundPath'
+import { snapPoint } from '../camera/viewport'
 import {
   add,
   distance,
@@ -19,6 +34,19 @@ import {
   sampleBezier,
   subtract,
 } from './entityGeometry'
+
+export interface GridSnapStep {
+  step: number
+}
+
+export function snappedGroundPathRatio(
+  path: Pick<GroundPath, 'length' | 'closestPoint'>,
+  point: Vec2,
+  gridSnap: GridSnapStep | null,
+): number {
+  const snappedPoint = gridSnap ? snapPoint(point, gridSnap.step) : point
+  return path.length > 0 ? path.closestPoint(snappedPoint).s / path.length : 0
+}
 
 function distanceToSegment(point: Vec2, start: Vec2, end: Vec2): number {
   const segment = subtract(end, start)
@@ -61,6 +89,9 @@ function hitBody(entity: BodyEntity, point: Vec2): boolean {
     return (
       Math.abs(local.x) <= entity.shape.width / 2 && Math.abs(local.y) <= entity.shape.height / 2
     )
+  }
+  if (entity.shape.type === 'bezierPath') {
+    return pointInPolygon(local, sampleAdaptiveClosedBezierPath(entity.shape.nodes))
   }
   return Math.hypot(local.x, local.y) <= entity.shape.radius
 }
@@ -131,6 +162,7 @@ export function hitTestEntity(
   point: Vec2,
   tolerance: number,
   groundPathNetwork?: GroundPathNetwork,
+  runtimeConnectors: Record<EntityId, RuntimeConnectorState> = {},
 ): boolean {
   if (!entity.visible || entity.locked) return false
   if (entity.kind === 'body') return hitBody(entity, point)
@@ -173,6 +205,12 @@ export function hitTestEntity(
     const local = rotateVector(subtract(point, region.center), -region.angleRad)
     return Math.abs(local.x) <= region.width / 2 && Math.abs(local.y) <= region.height / 2
   }
+  if (entity.kind === 'particleSource') {
+    if (entity.shape.type === 'point') {
+      return distance(point, entity.shape.position) <= tolerance
+    }
+    return distanceToSegment(point, entity.shape.start, entity.shape.end) <= tolerance
+  }
 
   if (entity.kind === 'groundJoint') {
     const transitionPath = (
@@ -192,6 +230,13 @@ export function hitTestEntity(
     )
   }
 
+  const runtimePoints = runtimeConnectors[entity.id]?.points
+  if (runtimePoints && runtimePoints.length >= 2) {
+    return runtimePoints.some((next, index) => {
+      const previous = runtimePoints[index - 1]
+      return previous ? distanceToSegment(point, previous, next) <= tolerance : false
+    })
+  }
   const start = resolveConnectorEndpoint(allEntities, entity.a)
   const end = resolveConnectorEndpoint(allEntities, entity.b)
   return Boolean(start && end && distanceToSegment(point, start, end) <= tolerance)
@@ -201,8 +246,16 @@ export function findTopEntity(
   entities: SceneEntity[],
   point: Vec2,
   tolerance: number,
+  runtimeConnectors: Record<EntityId, RuntimeConnectorState> = {},
 ): SceneEntity | null {
-  const visualOrder: SceneEntity['kind'][] = ['body', 'groundJoint', 'connector', 'ground', 'field']
+  const visualOrder: SceneEntity['kind'][] = [
+    'body',
+    'particleSource',
+    'groundJoint',
+    'connector',
+    'ground',
+    'field',
+  ]
   const groundPathNetwork = entities.some((entity) => entity.kind === 'groundJoint')
     ? buildGroundPathNetwork(entities)
     : undefined
@@ -211,11 +264,40 @@ export function findTopEntity(
       const entity = entities[index]
       if (
         entity?.kind === kind &&
-        hitTestEntity(entity, entities, point, tolerance, groundPathNetwork)
+        hitTestEntity(entity, entities, point, tolerance, groundPathNetwork, runtimeConnectors)
       ) {
         return entity
       }
     }
+  }
+  return null
+}
+
+export function findTopBooleanResult(
+  scene: SceneDocument,
+  point: Vec2,
+  runtimeBodies: Record<EntityId, RuntimeBodyState> = {},
+): ResolvedBooleanResult | null {
+  const roots = resolveBooleanScene(scene).roots
+  for (let index = roots.length - 1; index >= 0; index -= 1) {
+    const result = roots[index]!
+    const node = findBooleanNode(scene.rootItems, result.nodeId)
+    if (!node?.visible || node.locked) continue
+    if (!result.valid) {
+      if (result.sourceOutlines.some((outline) => pointInBooleanGeometry(point, outline))) {
+        return result
+      }
+      continue
+    }
+    const geometry =
+      result.kind === 'body'
+        ? transformBooleanBodyGeometry(
+            result,
+            runtimeBodies[result.resultId]?.position,
+            runtimeBodies[result.resultId]?.angleRad,
+          )
+        : result.geometry
+    if (pointInBooleanGeometry(point, geometry)) return result
   }
   return null
 }

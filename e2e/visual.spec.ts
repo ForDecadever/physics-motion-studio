@@ -13,6 +13,47 @@ async function createDeterministicGifHistory(page: import('@playwright/test').Pa
   for (let step = 0; step < 12; step += 1) await stepButton.click()
 }
 
+async function createBooleanDifferenceScene(
+  page: import('@playwright/test').Page,
+  viewport: { width: number; height: number },
+) {
+  await page.setViewportSize(viewport)
+  await page.goto('/')
+  const box = await canvasBox(page)
+  const center = { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+  await page.getByRole('button', { name: '物体工具（O）' }).click()
+  await page
+    .getByRole('region', { name: '当前工具选项' })
+    .getByRole('combobox')
+    .selectOption('block')
+  await page.mouse.click(center.x, center.y)
+  await page.getByRole('tab', { name: '几何', exact: true }).click()
+  await page.getByRole('spinbutton', { name: '宽度 m' }).fill('4')
+  await page.getByRole('spinbutton', { name: '宽度 m' }).press('Enter')
+  await page.getByRole('spinbutton', { name: '高度 m' }).fill('3')
+  await page.getByRole('spinbutton', { name: '高度 m' }).press('Enter')
+  await page.getByRole('tab', { name: '变换', exact: true }).click()
+  await page.getByRole('spinbutton', { name: '位置 X m' }).fill('0')
+  await page.getByRole('spinbutton', { name: '位置 X m' }).press('Enter')
+  await page.mouse.click(center.x + 12, center.y)
+  await page.getByRole('tab', { name: '几何', exact: true }).click()
+  await page.getByRole('spinbutton', { name: '宽度 m' }).fill('2')
+  await page.getByRole('spinbutton', { name: '宽度 m' }).press('Enter')
+  await page.getByRole('spinbutton', { name: '高度 m' }).fill('2')
+  await page.getByRole('spinbutton', { name: '高度 m' }).press('Enter')
+  await page.getByRole('tab', { name: '变换', exact: true }).click()
+  await page.getByRole('spinbutton', { name: '位置 X m' }).fill('0.6')
+  await page.getByRole('spinbutton', { name: '位置 X m' }).press('Enter')
+  await page.getByRole('button', { name: '物块 1', exact: true }).click()
+  await page.getByRole('button', { name: '物块 2', exact: true }).click({ modifiers: ['Shift'] })
+  await page.getByRole('button', { name: '布尔组合' }).click()
+  const inspector = page.getByRole('region', { name: '属性面板' })
+  await inspector.getByRole('tab', { name: '基本', exact: true }).click()
+  await inspector.getByRole('combobox').selectOption('difference')
+  await expect(page.getByRole('button', { name: '布尔加法', exact: true })).toBeVisible()
+  await expect(inspector.getByRole('combobox')).toHaveValue('difference')
+}
+
 test('空白编辑器视觉基线', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto('/')
@@ -137,12 +178,44 @@ test('窄窗口视觉基线', async ({ page }) => {
   await expect(page).toHaveScreenshot('narrow-editor.png', { animations: 'disabled' })
 })
 
+test('布尔图层宽屏视觉基线', async ({ page }) => {
+  await createBooleanDifferenceScene(page, { width: 1440, height: 900 })
+  await expect(page).toHaveScreenshot('boolean-layer-wide.png', { animations: 'disabled' })
+})
+
+test('布尔结果缩放控制柄视觉基线', async ({ page }) => {
+  await createBooleanDifferenceScene(page, { width: 1440, height: 900 })
+  await page.getByRole('button', { name: '对象缩放（S）' }).click()
+  await expect(page).toHaveScreenshot('boolean-scale-handles-wide.png', {
+    animations: 'disabled',
+  })
+})
+
+test('未选中的布尔结果仍显示填充与轮廓', async ({ page }) => {
+  await createBooleanDifferenceScene(page, { width: 1440, height: 900 })
+  await page.keyboard.press('Escape')
+  await expect(page.getByText('当前未选择物体', { exact: true })).toBeVisible()
+  await expect(page).toHaveScreenshot('boolean-layer-unselected-wide.png', {
+    animations: 'disabled',
+  })
+})
+
+test('布尔图层 1024×720 视觉基线', async ({ page }) => {
+  await createBooleanDifferenceScene(page, { width: 1024, height: 720 })
+  await expect(page).toHaveScreenshot('boolean-layer-1024.png', { animations: 'disabled' })
+})
+
+test('布尔图层窄窗口视觉基线', async ({ page }) => {
+  await createBooleanDifferenceScene(page, { width: 760, height: 720 })
+  await expect(page).toHaveScreenshot('boolean-layer-narrow.png', { animations: 'disabled' })
+})
+
 test('浮动与重新停靠面板视觉基线', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto('/')
   const workspace = page.getByRole('main', { name: '编辑工作区' })
   const workspaceBox = await workspace.boundingBox()
-  const dragHandle = page.getByRole('button', { name: '拖动图层面板' })
+  const dragHandle = page.getByRole('button', { name: '拖动场景面板' })
   const handleBox = await dragHandle.boundingBox()
   if (!workspaceBox || !handleBox) throw new Error('工作区或面板标题栏没有可拖动尺寸')
 
@@ -154,7 +227,7 @@ test('浮动与重新停靠面板视觉基线', async ({ page }) => {
     { steps: 8 },
   )
   await page.mouse.up()
-  await expect(page.getByRole('region', { name: '图层面板' })).toHaveAttribute(
+  await expect(page.getByRole('region', { name: '场景面板' })).toHaveAttribute(
     'data-mode',
     'floating',
   )
@@ -169,6 +242,6 @@ test('浮动与重新停靠面板视觉基线', async ({ page }) => {
   await page.mouse.down()
   await page.mouse.move(workspaceBox.x + 12, workspaceBox.y + 180, { steps: 8 })
   await page.mouse.up()
-  await expect(page.getByRole('region', { name: '图层面板' })).toHaveAttribute('data-edge', 'left')
+  await expect(page.getByRole('region', { name: '场景面板' })).toHaveAttribute('data-edge', 'left')
   await expect(page).toHaveScreenshot('redocked-panels.png', { animations: 'disabled' })
 })

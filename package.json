@@ -1,7 +1,7 @@
 {
   "name": "motion-studio",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.5.4",
   "type": "module",
   "packageManager": "pnpm@11.9.0",
   "engines": {
@@ -28,10 +28,12 @@
   "dependencies": {
     "@dimforge/rapier2d-compat": "^0.19.3",
     "@tauri-apps/api": "^2.11.1",
+    "earcut": "3.2.3",
     "echarts": "^6.1.0",
     "gifenc": "^1.0.3",
     "lucide-react": "^1.25.0",
     "pixi.js": "^8.19.0",
+    "polygon-clipping": "0.15.7",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "zod": "^4.4.3",

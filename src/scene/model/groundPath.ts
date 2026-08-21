@@ -17,6 +17,7 @@ export const GROUND_PATH_REFERENCE_BODY_RADIUS_M = 0.5
 export const GROUND_PATH_MIN_OFFSET_SCALE = 0.08
 export const GROUND_JOINT_MIN_SMOOTH_ANGLE_RAD = Math.PI / 180
 export const GROUND_JOINT_LINEAR_ANGLE_RAD = (179 * Math.PI) / 180
+export const GROUND_JOINT_DIRECT_MAX_GAP_M = 1e-6
 
 const EPSILON = 1e-9
 const TAU = Math.PI * 2
@@ -90,7 +91,7 @@ export interface EffectiveGroundPath {
   segmentId: string
 }
 
-export type GroundJointPathKind = 'quintic' | 'linear' | 'invalid'
+export type GroundJointPathKind = 'quintic' | 'linear' | 'direct' | 'invalid'
 export type GroundJointPathIssue =
   | ReturnType<typeof resolveGroundJoint>['issue']
   | 'angle-too-small'
@@ -179,6 +180,7 @@ interface ValidGroundJointData {
   angleRad: number
   desiredA: number
   desiredB: number
+  direct: boolean
   directionSign: 1 | -1
 }
 
@@ -646,6 +648,13 @@ class WindowGroundPath extends BaseGroundPath {
       if (closest.distance < best.distance) best = closest
     }
     return best
+  }
+
+  override sample(overrides: Partial<GroundPathSamplingOptions> = {}): Vec2[] {
+    if (this.source instanceof LineGroundPath) {
+      return [this.pointAt(0), this.pointAt(this.length)]
+    }
+    return samplePath(this, overrides)
   }
 }
 
@@ -1199,7 +1208,9 @@ function buildOrdinaryTransition(
   const maximumAbsoluteCurvature = allowedTransitionCurvature(startCurvature, endCurvature)
   const angleRad = Math.acos(clamp(dot(normalize(startTangent), normalize(endTangent)), -1, 1))
   const preferredHandleFactor = clamp(2.5 - Math.max(0, angleRad - Math.PI / 2) * 1.308, 0.7, 2.5)
-  for (const handleFactor of [...new Set([preferredHandleFactor, 2.5, 1.6, 0.8])]) {
+  for (const handleFactor of [
+    ...new Set([preferredHandleFactor, 0.5, 0.8, 1, 1.25, 1.6, 2, 2.5, 3, 4, 5, 6]),
+  ]) {
     const path = createQuinticHermitePath(
       start,
       startTangent,
@@ -1211,11 +1222,11 @@ function buildOrdinaryTransition(
       Math.max(chord * 0.5, trimB * handleFactor),
     )
     if (
-      pathIsRegular(path, maximumAbsoluteCurvature) &&
-      pathStaysWithinTransitionEnvelope(path, start, end, trimA, trimB)
-    ) {
-      return path
-    }
+      !pathIsRegular(path, maximumAbsoluteCurvature) ||
+      !pathStaysWithinTransitionEnvelope(path, start, end, trimA, trimB)
+    )
+      continue
+    return path
   }
   return null
 }
@@ -1319,7 +1330,11 @@ function prepareGroundJointTransition(
   let path: GroundPath | null = null
   let trimA = requestedTrimA
   let trimB = requestedTrimB
-  if (data.angleRad >= GROUND_JOINT_LINEAR_ANGLE_RAD) {
+  if (data.direct) {
+    trimA = 0
+    trimB = 0
+    kind = 'direct'
+  } else if (data.angleRad >= GROUND_JOINT_LINEAR_ANGLE_RAD) {
     trimA = 0
     trimB = 0
     const start = pathA.pointAt(endpointPathS(pathA, data.joint.a.endpoint, trimA))
@@ -1397,13 +1412,19 @@ export function buildGroundPathNetwork(entities: readonly SceneEntity[]): Ground
         : 0
     const automaticSign: 1 | -1 = crossValue < -1e-9 ? -1 : 1
     const directionSign = automaticSign
+    const direct =
+      resolved.gapM <= GROUND_JOINT_DIRECT_MAX_GAP_M &&
+      (angleRad >= GROUND_JOINT_LINEAR_ANGLE_RAD - 1e-10 ||
+        (angleRad <= GROUND_JOINT_MIN_SMOOTH_ANGLE_RAD + 1e-10 &&
+          Boolean(
+            resolved.a &&
+            resolved.b &&
+            (resolved.a.ground.geometry.type !== 'line' ||
+              resolved.b.ground.geometry.type !== 'line'),
+          )))
     const geometryIssue: GroundJointPathIssue =
       resolved.issue ??
-      (angleRad <= GROUND_JOINT_MIN_SMOOTH_ANGLE_RAD + 1e-10
-        ? 'angle-too-small'
-        : angleRad >= GROUND_JOINT_LINEAR_ANGLE_RAD - 1e-10 && resolved.gapM <= EPSILON
-          ? 'linear-zero-length'
-          : null)
+      (!direct && angleRad <= GROUND_JOINT_MIN_SMOOTH_ANGLE_RAD + 1e-10 ? 'angle-too-small' : null)
     const initial: ResolvedGroundJointPath = {
       joint,
       issue: geometryIssue,
@@ -1423,7 +1444,7 @@ export function buildGroundPathNetwork(entities: readonly SceneEntity[]): Ground
     if (!pathA || !pathB) continue
     const setting = transitionSetting(joint)
     const desired =
-      angleRad >= GROUND_JOINT_LINEAR_ANGLE_RAD - 1e-10
+      direct || angleRad >= GROUND_JOINT_LINEAR_ANGLE_RAD - 1e-10
         ? 0
         : setting.mode === 'manual'
           ? finiteNonNegative(setting.lengthM)
@@ -1434,6 +1455,7 @@ export function buildGroundPathNetwork(entities: readonly SceneEntity[]): Ground
       angleRad,
       desiredA: desired,
       desiredB: desired,
+      direct,
       directionSign,
     })
   }
@@ -1446,7 +1468,7 @@ export function buildGroundPathNetwork(entities: readonly SceneEntity[]): Ground
     preparedTransitions = activeJointData.map((data) =>
       prepareGroundJointTransition(data, trimByEndpoint, originalPaths),
     )
-    const failed = preparedTransitions.filter((prepared) => !prepared.path)
+    const failed = preparedTransitions.filter((prepared) => prepared.kind === 'invalid')
     if (failed.length === 0) break
     const failedIds = new Set(failed.map((prepared) => prepared.data.joint.id))
     for (const prepared of failed) {
@@ -1528,6 +1550,29 @@ export function buildGroundPathNetwork(entities: readonly SceneEntity[]): Ground
     const segmentA = segmentById.get(groundPathSegmentId(resolved.a.ground.id))
     const segmentB = segmentById.get(groundPathSegmentId(resolved.b.ground.id))
     if (!segmentA || !segmentB) continue
+
+    if (kind === 'direct') {
+      connectSegments(
+        segmentA,
+        data.joint.a.endpoint,
+        segmentB,
+        data.joint.b.endpoint,
+        data.joint.id,
+      )
+      jointPaths.set(data.joint.id, {
+        joint: data.joint,
+        issue: null,
+        path: null,
+        segmentId: null,
+        kind,
+        angleRad: data.angleRad,
+        trimA,
+        trimB,
+        directionSign: data.directionSign,
+        pieces: [],
+      })
+      continue
+    }
 
     if (!path) continue
 

@@ -57,6 +57,14 @@ describe('物块地面碰撞链', () => {
     )
   })
 
+  it('连接裁剪后的直线仍只生成首尾两个碰撞采样点', () => {
+    const { first, second, joint } = connectedRightAngle()
+    const network = buildGroundPathNetwork([first, second, joint])
+
+    expect(network.groundPaths.get(first.id)?.path.sample()).toHaveLength(2)
+    expect(network.groundPaths.get(second.id)?.path.sample()).toHaveLength(2)
+  })
+
   it('材质发生变化时保留碰撞体边界，避免覆盖各地面的属性', () => {
     const { first, second, joint } = connectedRightAngle()
     second.material = { friction: 0.5, restitution: 0.25 }

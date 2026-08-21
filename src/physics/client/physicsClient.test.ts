@@ -98,6 +98,12 @@ describe('PhysicsClient Worker 初始化恢复', () => {
       bodyIds: [],
       times: new Float32Array([0, 1 / 30]),
       values: new Float32Array(),
+      connectorIds: [],
+      connectorPointOffsets: new Uint32Array([0]),
+      connectorValues: new Float32Array(),
+      particleIonCount: 0,
+      particleIonTs: new Float32Array(),
+      particleValues: new Float32Array(),
     }
     worker.emit({ type: 'gifHistorySnapshot', snapshot })
     await expect(pending).resolves.toBe(snapshot)

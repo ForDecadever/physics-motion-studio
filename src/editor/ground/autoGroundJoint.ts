@@ -47,7 +47,7 @@ export function createGroundWithAutoJoint(
   if (!pendingEndpoint) return [ground]
 
   const joint = createGroundJoint(
-    ground.layerId,
+    '',
     pendingEndpoint,
     { groundId: ground.id, endpoint: 'start' },
     scene.entities.filter((entity) => entity.kind === 'groundJoint').length + 1,

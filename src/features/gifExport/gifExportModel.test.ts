@@ -42,6 +42,12 @@ function snapshot(): GifHistorySnapshot {
       6,
       8,
     ]),
+    connectorIds: ['spring'],
+    connectorPointOffsets: new Uint32Array([0, 2]),
+    connectorValues: new Float32Array([0, 0, 1, 0, 2, 4, 5, 4]),
+    particleIonCount: 0,
+    particleIonTs: new Float32Array(),
+    particleValues: new Float32Array(),
   }
 }
 
@@ -65,11 +71,15 @@ describe('GIF export model', () => {
   })
 
   it('interpolates vectors and takes the shortest angle path', () => {
-    const frame = new GifHistoryReader(snapshot()).frameAt(0.5).bodies.body!
-    expect(frame.position).toEqual({ x: 5, y: 10 })
-    expect(frame.linearVelocity).toEqual({ x: 1, y: 2 })
-    expect(frame.netForce).toEqual({ x: 3, y: 4 })
-    expect(Math.abs(frame.angleRad)).toBeCloseTo(Math.PI)
+    const frame = new GifHistoryReader(snapshot()).frameAt(0.5)
+    expect(frame.bodies.body?.position).toEqual({ x: 5, y: 10 })
+    expect(frame.bodies.body?.linearVelocity).toEqual({ x: 1, y: 2 })
+    expect(frame.bodies.body?.netForce).toEqual({ x: 3, y: 4 })
+    expect(Math.abs(frame.bodies.body?.angleRad ?? 0)).toBeCloseTo(Math.PI)
+    expect(frame.connectors.spring?.points).toEqual([
+      { x: 1, y: 2 },
+      { x: 3, y: 2 },
+    ])
   })
 
   it('keeps an exact valid endpoint but never interpolates across a missing-body gap', () => {

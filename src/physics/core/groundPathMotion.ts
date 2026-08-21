@@ -7,6 +7,8 @@ import {
 import type { EntityId, Material2D, Vec2 } from '../../scene/model/types'
 
 const OFFSET_SCALE_EPSILON = 1e-6
+const CENTER_TRAVERSAL_MAX_SURFACE_STEP_M = 0.025
+const CENTER_TRAVERSAL_MAX_ITERATIONS = 4096
 
 export type GroundPathContactSide = 1 | -1
 
@@ -117,35 +119,74 @@ export function traverseGroundPathCenterDistance(
   const initialFrame = resolveGroundPathContactFrame(network, contact)
   if (!initialFrame || !Number.isFinite(centerDistanceM) || centerDistanceM < 0) return null
 
-  const firstGuess = traverseGroundPath(
-    network,
-    contact.location,
-    centerDistanceM / initialFrame.offsetScale,
-  )
-  const firstContact = { ...contact, location: firstGuess.location }
-  const firstFrame = resolveGroundPathContactFrame(network, firstContact)
-  if (!firstFrame) return null
+  let currentContact = contact
+  let currentFrame = initialFrame
+  let remainingCenterM = centerDistanceM
+  let traveledCenterM = 0
+  let transitions = 0
 
-  const averageScale = (initialFrame.offsetScale + firstFrame.offsetScale) / 2
-  if (!Number.isFinite(averageScale) || averageScale <= OFFSET_SCALE_EPSILON) return null
-  const requestedSurfaceDistanceM = centerDistanceM / averageScale
-  const resolved = traverseGroundPath(network, contact.location, requestedSurfaceDistanceM)
-  const nextContact = { ...contact, location: resolved.location }
-  const frame = resolveGroundPathContactFrame(network, nextContact)
-  if (!frame) return null
-  const distanceTraveledCenterM = clamped(
-    (requestedSurfaceDistanceM - resolved.distanceRemainingM) * averageScale,
-    0,
-    centerDistanceM,
-  )
+  for (let iteration = 0; iteration < CENTER_TRAVERSAL_MAX_ITERATIONS; iteration += 1) {
+    if (remainingCenterM <= 1e-10) break
+    const maximumSurfaceStep = Math.min(
+      CENTER_TRAVERSAL_MAX_SURFACE_STEP_M,
+      remainingCenterM / currentFrame.offsetScale,
+    )
+    if (!Number.isFinite(maximumSurfaceStep) || maximumSurfaceStep <= 0) return null
 
+    const evaluateStep = (surfaceDistanceM: number) => {
+      const traversal = traverseGroundPath(network, currentContact.location, surfaceDistanceM)
+      const nextContact = { ...currentContact, location: traversal.location }
+      const nextFrame = resolveGroundPathContactFrame(network, nextContact)
+      if (!nextFrame) return null
+      const traveledSurfaceM = surfaceDistanceM - traversal.distanceRemainingM
+      const centerStepM =
+        traveledSurfaceM * (currentFrame.offsetScale + nextFrame.offsetScale) * 0.5
+      return { traversal, nextContact, nextFrame, centerStepM }
+    }
+
+    let resolved = evaluateStep(maximumSurfaceStep)
+    if (!resolved) return null
+    if (resolved.centerStepM > remainingCenterM + 1e-10) {
+      let lower = 0
+      let upper = maximumSurfaceStep
+      for (let search = 0; search < 32; search += 1) {
+        const middle = (lower + upper) / 2
+        const candidate = evaluateStep(middle)
+        if (!candidate) return null
+        if (candidate.centerStepM < remainingCenterM) lower = middle
+        else upper = middle
+      }
+      resolved = evaluateStep((lower + upper) / 2)
+      if (!resolved) return null
+    }
+
+    currentContact = resolved.nextContact
+    currentFrame = resolved.nextFrame
+    transitions += resolved.traversal.transitions
+    const consumedCenterM = Math.min(remainingCenterM, resolved.centerStepM)
+    traveledCenterM += consumedCenterM
+    remainingCenterM -= consumedCenterM
+
+    if (resolved.traversal.stoppedAtOpenEnd) {
+      return {
+        contact: currentContact,
+        frame: currentFrame,
+        stoppedAtOpenEnd: true,
+        distanceTraveledCenterM: traveledCenterM,
+        distanceRemainingCenterM: Math.max(0, remainingCenterM),
+        transitions,
+      }
+    }
+  }
+
+  if (remainingCenterM > 1e-8) return null
   return {
-    contact: nextContact,
-    frame,
-    stoppedAtOpenEnd: resolved.stoppedAtOpenEnd,
-    distanceTraveledCenterM,
-    distanceRemainingCenterM: centerDistanceM - distanceTraveledCenterM,
-    transitions: resolved.transitions,
+    contact: currentContact,
+    frame: currentFrame,
+    stoppedAtOpenEnd: false,
+    distanceTraveledCenterM: clamped(traveledCenterM, 0, centerDistanceM),
+    distanceRemainingCenterM: Math.max(0, centerDistanceM - traveledCenterM),
+    transitions,
   }
 }
 

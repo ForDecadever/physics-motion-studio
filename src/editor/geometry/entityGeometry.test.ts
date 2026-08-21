@@ -4,16 +4,26 @@ import {
   createArcGround,
   createBall,
   createBezierGround,
+  createBezierBlock,
   createBlock,
   createGravityField,
+  createGroundJoint,
   createLineGround,
   createRope,
 } from '../../scene/model/entityFactories'
+import { createSmoothBezierPathNodes } from '../../scene/model/bezierPath'
+import { sampleBezierBodyWorldPoints } from '../../scene/model/bodyPath'
+import { createTriangleBlockNodes } from '../../scene/model/blockPresets'
 import { createEmptyScene } from '../../scene/model/createEmptyScene'
+import type { BooleanMultiPolygon } from '../../scene/model/booleanGeometry'
+import { buildGroundPathNetwork } from '../../scene/model/groundPath'
 import type { FieldEntity } from '../../scene/model/types'
 import { validateSceneDocument } from '../../scene/validation/sceneSchema'
 import {
   createScaleHandleGeometry,
+  bodyLocalAnchorIsInside,
+  clampBodyLocalAnchor,
+  createBodyCenterConnectorEndpoint,
   distance,
   dot,
   getEntityTransform,
@@ -22,6 +32,7 @@ import {
   scaleEntitiesAroundPivot,
   snapBodyToGround,
   snapBodyToSurfaces,
+  snapBooleanBodyToSurfaces,
   withEntityTransform,
   worldToLocalAnchor,
 } from './entityGeometry'
@@ -60,6 +71,30 @@ describe('实体几何变换', () => {
     const snapped = snapBodyToGround(ball, [ground], 0.2)
 
     expect(snapped.transform.position.y).toBeCloseTo(0.5)
+  })
+
+  it('非对称钢笔物块使用朝向墙面的真实支撑距离', () => {
+    const ground = createLineGround(layerId, { x: -5, y: 0 }, { x: 5, y: 0 }, 1)
+    const triangle = createBezierBlock(
+      layerId,
+      createTriangleBlockNodes({ x: -2, y: 0 }, 4, 36.869_897_645_844_02, 1),
+      1,
+    )
+    if (!triangle || triangle.shape.type !== 'bezierPath') {
+      throw new Error('三角钢笔物块创建失败')
+    }
+    const nearGround = {
+      ...triangle,
+      transform: {
+        ...triangle.transform,
+        position: { ...triangle.transform.position, y: triangle.transform.position.y + 0.12 },
+      },
+    }
+    const snapped = snapBodyToSurfaces(nearGround, [ground], 0.2)
+    const minimumY = Math.min(...sampleBezierBodyWorldPoints(snapped).map((point) => point.y))
+
+    expect(snapped).not.toBe(nearGround)
+    expect(minimumY).toBeCloseTo(0, 8)
   })
 
   it('物体沿切线方向远离地面端点时不会吸附', () => {
@@ -162,6 +197,195 @@ describe('实体几何变换', () => {
     expect(groundFirst.transform.position).toEqual({ x: 1.6, y: 0.5 })
   })
 
+  it('布尔结果使用真实外环分别吸附墙面和旋转物块', () => {
+    const ground = createLineGround(layerId, { x: -3, y: 0 }, { x: 3, y: 0 }, 1)
+    const wallGeometry: BooleanMultiPolygon = [
+      [
+        [
+          [-1, 0.18],
+          [1, 0.18],
+          [1, 1.18],
+          [-1, 1.18],
+          [-1, 0.18],
+        ],
+        [
+          [-0.2, 0.5],
+          [-0.2, 0.8],
+          [0.2, 0.8],
+          [0.2, 0.5],
+          [-0.2, 0.5],
+        ],
+      ],
+    ]
+    const wallPosition = snapBooleanBodyToSurfaces(
+      {
+        resultId: '00000000-0000-4000-8000-000000000099',
+        centerOfMass: { x: 0, y: 0.68 },
+        geometry: wallGeometry,
+      },
+      [ground],
+      0.2,
+    )
+    expect(wallPosition).toEqual({ x: 0, y: 0.5 })
+
+    const target = createBlock(layerId, { x: 0, y: 0 }, 2, 2, 2)
+    target.transform.angleRad = Math.PI / 2
+    const blockGeometry: BooleanMultiPolygon = [
+      [
+        [
+          [1.18, -0.5],
+          [2.18, -0.5],
+          [2.18, 0.5],
+          [1.18, 0.5],
+          [1.18, -0.5],
+        ],
+      ],
+    ]
+    const blockPosition = snapBooleanBodyToSurfaces(
+      {
+        resultId: '00000000-0000-4000-8000-000000000098',
+        centerOfMass: { x: 1.68, y: 0 },
+        geometry: blockGeometry,
+      },
+      [target],
+      0.2,
+    )
+    expect(blockPosition.x).toBeCloseTo(1.5)
+    expect(blockPosition.y).toBeCloseTo(0)
+  })
+
+  it('布尔结果复用圆弧和贝塞尔墙面的真实采样轮廓', () => {
+    const geometryAt = (centerY: number): BooleanMultiPolygon => [
+      [
+        [
+          [-0.5, centerY - 0.5],
+          [0.5, centerY - 0.5],
+          [0.5, centerY + 0.5],
+          [-0.5, centerY + 0.5],
+          [-0.5, centerY - 0.5],
+        ],
+      ],
+    ]
+    const arc = createArcGround(layerId, { x: 0, y: 0 }, 2, 0, Math.PI, 1)
+    const arcPosition = snapBooleanBodyToSurfaces(
+      {
+        resultId: '00000000-0000-4000-8000-000000000097',
+        centerOfMass: { x: 0, y: 2.68 },
+        geometry: geometryAt(2.68),
+      },
+      [arc],
+      0.2,
+    )
+    const arcReference = snapBodyToSurfaces(
+      createBlock(layerId, { x: 0, y: 2.68 }, 1, 1, 3),
+      [arc],
+      0.2,
+    )
+    expect(arcPosition.x).toBeCloseTo(arcReference.transform.position.x, 10)
+    expect(arcPosition.y).toBeCloseTo(arcReference.transform.position.y, 10)
+
+    const bezier = createBezierGround(
+      layerId,
+      { x: -2, y: 0 },
+      { x: -1, y: 2 },
+      { x: 1, y: 2 },
+      { x: 2, y: 0 },
+      2,
+    )
+    const bezierPosition = snapBooleanBodyToSurfaces(
+      {
+        resultId: '00000000-0000-4000-8000-000000000096',
+        centerOfMass: { x: 0, y: 2.18 },
+        geometry: geometryAt(2.18),
+      },
+      [bezier],
+      0.2,
+    )
+    const bezierReference = snapBodyToSurfaces(
+      createBlock(layerId, { x: 0, y: 2.18 }, 1, 1, 4),
+      [bezier],
+      0.2,
+    )
+    expect(bezierPosition.x).toBeCloseTo(bezierReference.transform.position.x, 10)
+    expect(bezierPosition.y).toBeCloseTo(bezierReference.transform.position.y, 10)
+  })
+
+  it('普通小球可吸附布尔外轮廓和孔洞的空白侧', () => {
+    const targetGeometry: BooleanMultiPolygon = [
+      [
+        [
+          [-2, -2],
+          [2, -2],
+          [2, 2],
+          [-2, 2],
+          [-2, -2],
+        ],
+        [
+          [-1, -1],
+          [-1, 1],
+          [1, 1],
+          [1, -1],
+          [-1, -1],
+        ],
+      ],
+    ]
+    const target = {
+      kind: 'booleanResult' as const,
+      id: '00000000-0000-4000-8000-000000000095',
+      layerId,
+      visible: true,
+      centerOfMass: { x: 0, y: 0 },
+      geometry: targetGeometry,
+    }
+    const outside = createBall(layerId, { x: 2.62, y: 0 }, 0.5, 1)
+    const inHole = createBall(layerId, { x: 0.38, y: 0 }, 0.5, 2)
+
+    expect(snapBodyToSurfaces(outside, [target], 0.2).transform.position).toEqual({ x: 2.5, y: 0 })
+    expect(snapBodyToSurfaces(inHole, [target], 0.2).transform.position).toEqual({ x: 0.5, y: 0 })
+  })
+
+  it('两个根布尔结果可以互相吸附并排除自身树', () => {
+    const target = {
+      kind: 'booleanResult' as const,
+      id: '00000000-0000-4000-8000-000000000094',
+      layerId,
+      visible: true,
+      centerOfMass: { x: 0, y: 0 },
+      geometry: [
+        [
+          [
+            [-1, -1],
+            [1, -1],
+            [1, 1],
+            [-1, 1],
+            [-1, -1],
+          ],
+        ],
+      ] as BooleanMultiPolygon,
+    }
+    const movingGeometry: BooleanMultiPolygon = [
+      [
+        [
+          [1.1, -0.5],
+          [2.1, -0.5],
+          [2.1, 0.5],
+          [1.1, 0.5],
+          [1.1, -0.5],
+        ],
+      ],
+    ]
+    const moving = {
+      resultId: '00000000-0000-4000-8000-000000000093',
+      centerOfMass: { x: 1.6, y: 0 },
+      geometry: movingGeometry,
+    }
+
+    expect(snapBooleanBodyToSurfaces(moving, [target], 0.2)).toEqual({ x: 1.5, y: 0 })
+    expect(snapBooleanBodyToSurfaces(moving, [target], 0.2, new Set([target.id]))).toEqual(
+      moving.centerOfMass,
+    )
+  })
+
   it('排除自身、同组或隐藏目标，锁定但可见的目标仍可吸附', () => {
     const moving = createBlock(layerId, { x: 1.6, y: 0 }, 1, 1, 1)
     const hidden = {
@@ -196,9 +420,22 @@ describe('实体几何变换', () => {
     expect(findTopEntity(entities, { x: 0, y: 0 }, 0.1)?.id).toBe(rope.id)
     const draggedWorld = { x: -1.5, y: 0.25 }
     const local = worldToLocalAnchor(first, draggedWorld)
-    expect(resolveConnectorEndpoint(entities, { bodyId: first.id, localAnchor: local })).toEqual(
-      draggedWorld,
-    )
+    expect(
+      resolveConnectorEndpoint(entities, { type: 'body', bodyId: first.id, localAnchor: local }),
+    ).toEqual(draggedWorld)
+  })
+
+  it.each(['circle', 'box'] as const)('新建连接器命中 %s 物体时使用中心锚点', (shape) => {
+    const body =
+      shape === 'circle'
+        ? createBall(layerId, { x: 3, y: -2 }, 0.75, 1)
+        : createBlock(layerId, { x: 3, y: -2 }, 2, 1, 1)
+    body.transform.angleRad = Math.PI / 3
+
+    const endpoint = createBodyCenterConnectorEndpoint(body)
+
+    expect(endpoint).toEqual({ type: 'body', bodyId: body.id, localAnchor: { x: 0, y: 0 } })
+    expect(resolveConnectorEndpoint([body], endpoint)).toEqual(body.transform.position)
   })
 
   it('旋转扇形场会同步改变它的起始方向', () => {
@@ -373,8 +610,8 @@ describe('实体几何变换', () => {
     const second = createBall(layerId, { x: 2, y: 0 }, 0.5, 2)
     const rope = {
       ...createRope(layerId, first.id, second.id, 4, 1),
-      a: { bodyId: first.id, localAnchor: { x: 0.5, y: 0.25 } },
-      b: { bodyId: second.id, localAnchor: { x: -0.5, y: -0.25 } },
+      a: { type: 'body' as const, bodyId: first.id, localAnchor: { x: 0.5, y: 0.25 } },
+      b: { type: 'body' as const, bodyId: second.id, localAnchor: { x: -0.5, y: -0.25 } },
     }
     const { replacements } = scaleEntitiesAroundPivot(
       [first, second, rope],
@@ -393,6 +630,9 @@ describe('实体几何变换', () => {
     }
     if (scaledSecond?.kind === 'body') expect(scaledSecond.transform.position.x).toBe(4)
     if (scaledRope?.kind === 'connector') {
+      if (scaledRope.a.type !== 'body' || scaledRope.b.type !== 'body') {
+        throw new Error('缩放后的绳端点类型错误')
+      }
       expect(scaledRope.a.localAnchor).toEqual({ x: 1, y: 0.5 })
       expect(scaledRope.b.localAnchor).toEqual({ x: -1, y: -0.5 })
       expect(scaledRope.connector).toEqual(rope.connector)
@@ -417,9 +657,8 @@ describe('实体几何变换', () => {
     expect(invalid.factor).toBe(1)
 
     const scene = createEmptyScene('缩放校验')
-    const sceneLayerId = scene.layers[0]?.id
-    if (!sceneLayerId) throw new Error('测试场景缺少图层')
-    scene.entities = zero.replacements.map((entity) => ({ ...entity, layerId: sceneLayerId }))
+    scene.entities = zero.replacements
+    scene.rootItems = scene.entities.map((entity) => ({ kind: 'entity', entityId: entity.id }))
     expect(() => validateSceneDocument(scene)).not.toThrow()
   })
 
@@ -447,5 +686,89 @@ describe('实体几何变换', () => {
       { x: 1.25, y: -1.25 },
       { x: 1.25, y: 1.25 },
     ])
+  })
+
+  it('把绳和杆的物体锚点夹紧在小球或物块碰撞轮廓内', () => {
+    const ball = createBall(layerId, { x: 0, y: 0 }, 0.5, 1)
+    const block = createBlock(layerId, { x: 0, y: 0 }, 2, 1, 2)
+    const ballAnchor = clampBodyLocalAnchor(ball, { x: 3, y: 4 })
+    const blockAnchor = clampBodyLocalAnchor(block, { x: -2, y: 3 })
+
+    expect(ballAnchor.x).toBeCloseTo(0.3)
+    expect(ballAnchor.y).toBeCloseTo(0.4)
+    expect(blockAnchor).toEqual({ x: -1, y: 0.5 })
+    expect(bodyLocalAnchorIsInside(ball, ballAnchor)).toBe(true)
+    expect(bodyLocalAnchorIsInside(block, blockAnchor)).toBe(true)
+    expect(bodyLocalAnchorIsInside(ball, { x: 0.6, y: 0 })).toBe(false)
+  })
+
+  it('钢笔物块参与命中、缩放、锚点投影和凹边界吸附', () => {
+    const freeform = createBezierBlock(
+      layerId,
+      createSmoothBezierPathNodes([
+        { x: -2, y: -1 },
+        { x: 2, y: -1 },
+        { x: 2, y: 1 },
+        { x: 0, y: 0 },
+        { x: -2, y: 1 },
+      ]),
+      1,
+    )
+    if (!freeform || freeform.shape.type !== 'bezierPath') throw new Error('钢笔物块创建失败')
+
+    expect(findTopEntity([freeform], freeform.transform.position, 0.01)?.id).toBe(freeform.id)
+    const scaled = scaleEntitiesAroundPivot(
+      [freeform],
+      [freeform.id],
+      freeform.transform.position,
+      2,
+    ).replacements[0]
+    expect(
+      scaled?.kind === 'body' && scaled.shape.type === 'bezierPath'
+        ? scaled.shape.nodes[0]!.anchor.x
+        : 0,
+    ).toBeCloseTo(freeform.shape.nodes[0]!.anchor.x * 2)
+    const projected = clampBodyLocalAnchor(freeform, { x: 20, y: 20 })
+    expect(bodyLocalAnchorIsInside(freeform, projected)).toBe(true)
+
+    const top = sampleBezierBodyWorldPoints(freeform).reduce((highest, point) =>
+      point.y > highest.y ? point : highest,
+    )
+    const ball = createBall(layerId, { x: top.x, y: top.y + 0.4 }, 0.25, 2)
+    const snapped = snapBodyToSurfaces(ball, [freeform], 0.5)
+    expect(distance(snapped.transform.position, ball.transform.position)).toBeGreaterThan(0)
+  })
+
+  it('解析普通地面、地面连接段和世界固定点端点', () => {
+    const first = createLineGround(layerId, { x: -10, y: 0 }, { x: 0, y: 0 }, 1)
+    const second = createLineGround(layerId, { x: 0, y: 0 }, { x: 0, y: 10 }, 2)
+    const joint = createGroundJoint(
+      layerId,
+      { groundId: first.id, endpoint: 'end' },
+      { groundId: second.id, endpoint: 'start' },
+      1,
+    )
+    const entities = [first, second, joint]
+    const network = buildGroundPathNetwork(entities)
+    const groundPoint = resolveConnectorEndpoint(
+      entities,
+      { type: 'ground', groundId: first.id, pathRatio: 0.25 },
+      network,
+    )
+    const transitionPoint = resolveConnectorEndpoint(
+      entities,
+      { type: 'groundJoint', groundJointId: joint.id, pathRatio: 0.5 },
+      network,
+    )
+    const worldPoint = resolveConnectorEndpoint(
+      entities,
+      { type: 'world', position: { x: 7, y: -3 } },
+      network,
+    )
+
+    expect(groundPoint).not.toBeNull()
+    expect(groundPoint?.y).toBeCloseTo(0)
+    expect(transitionPoint).not.toBeNull()
+    expect(worldPoint).toEqual({ x: 7, y: -3 })
   })
 })
