@@ -46,11 +46,6 @@
 
 ## 第一次运行
 
-打开 PowerShell，进入项目文件夹：
-
-```powershell
-cd "C:\Users\FD\Desktop\chengxu\题目可视化"
-```
 
 安装依赖：
 
