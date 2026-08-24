@@ -101,6 +101,8 @@ export const GifPreview = forwardRef<GifPreviewHandle, GifPreviewProps>(function
         runtimeConnectors: frame.connectors,
         runtimeTrajectories,
         particleTrajectories,
+        particleSources: frame.particleSources,
+        simulationTime: frame.simulationTime,
         runtimeLocked: true,
         motionGuides: {
           ...current.settings.guides,

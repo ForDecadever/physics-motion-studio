@@ -12,12 +12,15 @@ import {
 } from '../editor/commands/entityCommands'
 import { downloadAllChartsCsv } from '../features/charts/chartCsv'
 import { evaluateChart, type EvaluatedChart } from '../features/charts/chartSeries'
+import { SoftwareManualDialog } from '../features/help/SoftwareManualDialog'
 import { MenuBar } from '../features/menu/MenuBar'
 import { closeDesktopMenu, installDesktopMenu, type AppCommand } from '../features/menu/desktopMenu'
 import { GifExportDialog, GifExportPreparingDialog } from '../features/gifExport/GifExportDialog'
 import { PlaybackBar } from '../features/playback/PlaybackBar'
+import { SettingsDialog } from '../features/settings/SettingsDialog'
 import { ToolOptionsBar } from '../features/toolbar/ToolOptionsBar'
 import { DockableWorkspace } from '../features/workspace/DockableWorkspace'
+import { GlobalVariablesDialog } from '../features/variables/GlobalVariablesDialog'
 import {
   clearSceneDraft,
   loadSceneDraft,
@@ -35,6 +38,7 @@ import { readSceneFile } from '../persistence/sceneFile'
 import { isDesktopRuntime } from '../platform/runtime'
 import { physicsClient } from '../physics/client/physicsClient'
 import { collectSceneTreeTargetIds, sceneTreeItemTargetId } from '../scene/model/booleanLayerGraph'
+import { configureEntityCreationDefaults } from '../scene/model/creationDefaults'
 import type { SceneDocument } from '../scene/model/types'
 import { listRuntimeBodyTargets } from '../scene/model/runtimeBodyTargets'
 import type { GifHistorySnapshot } from '../physics/worker/messages'
@@ -43,6 +47,7 @@ import { useDocumentStore } from '../stores/documentStore'
 import { useEditorStore } from '../stores/editorStore'
 import { isSimulationRuntimeLocked, useSimulationStore } from '../stores/simulationStore'
 import { useWorkspaceLayoutStore } from '../stores/workspaceLayoutStore'
+import { loadAppPreferences, saveAppPreferences, type AppPreferences } from './preferences'
 import styles from './App.module.css'
 
 interface Notice {
@@ -60,6 +65,35 @@ function resetEditorForDocument() {
   useChartStore.getState().clearHistory()
 }
 
+function createPhysicsSceneSnapshot(scene: SceneDocument): SceneDocument {
+  const measurementIds = new Set(
+    scene.entities.flatMap((entity) => (entity.kind === 'measurement' ? [entity.id] : [])),
+  )
+  const withoutMeasurements = (items: SceneDocument['rootItems']): SceneDocument['rootItems'] => {
+    const result: SceneDocument['rootItems'] = []
+    for (const item of items) {
+      if (item.kind === 'entity') {
+        if (!measurementIds.has(item.entityId)) result.push(item)
+      } else {
+        result.push({ ...item, operands: withoutMeasurements(item.operands) })
+      }
+    }
+    return result
+  }
+  return {
+    ...scene,
+    metadata: {
+      name: '物理快照',
+      createdAt: '1970-01-01T00:00:00.000Z',
+      updatedAt: '1970-01-01T00:00:00.000Z',
+    },
+    propertyExpressions: [],
+    charts: [],
+    entities: scene.entities.filter((entity) => entity.kind !== 'measurement'),
+    rootItems: withoutMeasurements(scene.rootItems),
+  }
+}
+
 export function App() {
   const inputRef = useRef<HTMLInputElement>(null)
   const fileTokenRef = useRef<SceneFileToken | null>(null)
@@ -74,8 +108,11 @@ export function App() {
   } | null>(null)
   const [notice, setNotice] = useState<Notice | null>(null)
   const [draftPrompt, setDraftPrompt] = useState<SceneDraft | null>(null)
-  const [helpTopic, setHelpTopic] = useState<'shortcuts' | 'physics' | 'about' | null>(null)
+  const [helpTopic, setHelpTopic] = useState<'manual' | 'physics' | 'about' | null>(null)
   const [gifExportModal, setGifExportModal] = useState<GifExportModalState | null>(null)
+  const [globalVariablesOpen, setGlobalVariablesOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [preferences, setPreferences] = useState(loadAppPreferences)
   const [clipboardCount, setClipboardCount] = useState(0)
   const [recentFiles, setRecentFiles] = useState<RecentSceneEntry[]>([])
   const [pendingOpenRevision, setPendingOpenRevision] = useState(desktopRuntime ? 1 : 0)
@@ -88,28 +125,33 @@ export function App() {
   const markSaved = useDocumentStore((state) => state.markSaved)
   const undoStackLength = useDocumentStore((state) => state.undoStack.length)
   const redoStackLength = useDocumentStore((state) => state.redoStack.length)
+  const undoRuntimeSafe = useDocumentStore((state) => state.undoStack.at(-1)?.runtimeSafe === true)
+  const redoRuntimeSafe = useDocumentStore((state) => state.redoStack.at(-1)?.runtimeSafe === true)
   const undo = useDocumentStore((state) => state.undo)
   const redo = useDocumentStore((state) => state.redo)
   const chartRevision = useChartStore((state) => state.revision)
   const hasChartData = chartRevision >= 0 && getChartTelemetryBuffer().length > 0
+  const runtimeLocked = useSimulationStore(isSimulationRuntimeLocked)
   const selectedIds = useEditorStore((state) => state.selectedIds)
   const gridVisible = useEditorStore((state) => state.gridVisible)
   const snapEnabled = useEditorStore((state) => state.snapEnabled)
   const workspacePanels = useWorkspaceLayoutStore((state) => state.layout.panels)
-  const simulationLocked = useSimulationStore((state) => isSimulationRuntimeLocked(state))
+
+  useEffect(() => {
+    configureEntityCreationDefaults(preferences.creation)
+    useEditorStore.setState({ ...preferences.editor })
+  }, [preferences])
 
   useEffect(() => {
     physicsClient.start()
     return () => physicsClient.stop()
   }, [])
 
-  const physicsEntities = scene.entities
-  const physicsRootItems = scene.rootItems
-  const physicsSettings = scene.settings
+  const physicsSceneJson = JSON.stringify(createPhysicsSceneSnapshot(scene))
 
   useEffect(() => {
-    physicsClient.initialize(useDocumentStore.getState().scene)
-  }, [physicsEntities, physicsRootItems, physicsSettings])
+    physicsClient.initialize(JSON.parse(physicsSceneJson) as SceneDocument)
+  }, [physicsSceneJson])
 
   useEffect(() => {
     void loadSceneDraft()
@@ -366,23 +408,39 @@ export function App() {
   }
 
   const handleUndo = () => {
-    if (isSimulationRuntimeLocked(useSimulationStore.getState())) return
+    if (
+      isSimulationRuntimeLocked(useSimulationStore.getState()) &&
+      useDocumentStore.getState().undoStack.at(-1)?.runtimeSafe !== true
+    ) {
+      return
+    }
     undo()
     pruneSelection()
   }
 
   const handleRedo = () => {
-    if (isSimulationRuntimeLocked(useSimulationStore.getState())) return
+    if (
+      isSimulationRuntimeLocked(useSimulationStore.getState()) &&
+      useDocumentStore.getState().redoStack.at(-1)?.runtimeSafe !== true
+    ) {
+      return
+    }
     redo()
     pruneSelection()
   }
 
   const handleDelete = () => {
-    if (isSimulationRuntimeLocked(useSimulationStore.getState())) return
     const editor = useEditorStore.getState()
-    if (editor.selectedIds.length === 0) return
     const documentState = useDocumentStore.getState()
-    const command = createDeleteEntitiesCommand(documentState.scene, editor.selectedIds)
+    const runtimeLocked = isSimulationRuntimeLocked(useSimulationStore.getState())
+    const deletableIds = runtimeLocked
+      ? editor.selectedIds.filter(
+          (id) =>
+            documentState.scene.entities.find((entity) => entity.id === id)?.kind === 'measurement',
+        )
+      : editor.selectedIds
+    if (deletableIds.length === 0) return
+    const command = createDeleteEntitiesCommand(documentState.scene, deletableIds)
     if (!command) return
     documentState.executeCommand(command)
     editor.clearSelection()
@@ -445,6 +503,14 @@ export function App() {
       case 'edit:select-all':
         handleSelectAll()
         break
+      case 'edit:global-variables':
+        commitPendingEditorEdit()
+        setGlobalVariablesOpen(true)
+        break
+      case 'edit:settings':
+        commitPendingEditorEdit()
+        setSettingsOpen(true)
+        break
       case 'view:toggle-grid':
         useEditorStore.getState().toggleGrid()
         break
@@ -466,8 +532,8 @@ export function App() {
       case 'simulation:clear-records':
         handleClearRecords()
         break
-      case 'help:shortcuts':
-        setHelpTopic('shortcuts')
+      case 'help:manual':
+        setHelpTopic('manual')
         break
       case 'help:physics':
         setHelpTopic('physics')
@@ -583,8 +649,11 @@ export function App() {
         canPaste: clipboardCount > 0,
         hasSelection: selectedIds.length > 0,
         hasChartData,
-        simulationLocked,
-        modalLocked: Boolean(gifExportModal || draftPrompt || helpTopic),
+        simulationLocked: runtimeLocked,
+        modalLocked: Boolean(
+          gifExportModal || draftPrompt || helpTopic || globalVariablesOpen || settingsOpen,
+        ),
+        globalVariablesDisabled: runtimeLocked,
         gridVisible,
         snapEnabled,
         panelVisibility: {
@@ -612,11 +681,13 @@ export function App() {
     hasChartData,
     draftPrompt,
     gifExportModal,
+    globalVariablesOpen,
     helpTopic,
     recentFiles,
     redoStackLength,
+    runtimeLocked,
     selectedIds,
-    simulationLocked,
+    settingsOpen,
     showNotice,
     snapEnabled,
     undoStackLength,
@@ -632,7 +703,7 @@ export function App() {
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (gifExportModal || draftPrompt || helpTopic) return
+      if (gifExportModal || draftPrompt || helpTopic || globalVariablesOpen || settingsOpen) return
       const target = event.target
       if (
         (target instanceof HTMLInputElement && target.type !== 'checkbox') ||
@@ -726,9 +797,21 @@ export function App() {
         o: 'body',
         f: 'field',
         l: 'connector',
+        i: 'particleSource',
+        k: 'force',
+        m: 'marker',
+        u: 'ruler',
+        a: 'protractor',
+        d: 'forceMeter',
       } as const
       const tool = shortcuts[key as keyof typeof shortcuts]
-      if (tool === 'scale' && isSimulationRuntimeLocked(useSimulationStore.getState())) return
+      if (
+        tool &&
+        isSimulationRuntimeLocked(useSimulationStore.getState()) &&
+        !['select', 'hand', 'zoom', 'marker', 'ruler', 'protractor', 'forceMeter'].includes(tool)
+      ) {
+        return
+      }
       if (tool) useEditorStore.getState().setActiveTool(tool)
     }
 
@@ -756,18 +839,27 @@ export function App() {
           onPaste={handlePaste}
           onDelete={handleDelete}
           onSelectAll={handleSelectAll}
+          onShowGlobalVariables={() => {
+            commitPendingEditorEdit()
+            setGlobalVariablesOpen(true)
+          }}
+          onOpenSettings={() => {
+            commitPendingEditorEdit()
+            setSettingsOpen(true)
+          }}
           onToggleGrid={() => useEditorStore.getState().toggleGrid()}
           onToggleSnap={() => useEditorStore.getState().toggleSnap()}
           onPlayPause={handlePlayPause}
           onStepSimulation={handleStep}
           onResetSimulation={handleResetSimulation}
           onClearRecords={handleClearRecords}
-          onShowShortcuts={() => setHelpTopic('shortcuts')}
+          onShowManual={() => setHelpTopic('manual')}
           onShowPhysics={() => setHelpTopic('physics')}
-          canUndo={undoStackLength > 0}
-          canRedo={redoStackLength > 0}
+          canUndo={undoStackLength > 0 && (!runtimeLocked || undoRuntimeSafe)}
+          canRedo={redoStackLength > 0 && (!runtimeLocked || redoRuntimeSafe)}
           canPaste={clipboardCount > 0}
           hasSelection={selectedIds.length > 0}
+          globalVariablesDisabled={runtimeLocked}
           hasChartData={hasChartData}
           gridVisible={gridVisible}
           snapEnabled={snapEnabled}
@@ -789,6 +881,28 @@ export function App() {
       <PlaybackBar />
 
       {gifExportModal?.state === 'preparing' ? <GifExportPreparingDialog /> : null}
+      {globalVariablesOpen ? (
+        <GlobalVariablesDialog
+          scene={scene}
+          onClose={() => setGlobalVariablesOpen(false)}
+          onApplied={() => {
+            setGlobalVariablesOpen(false)
+            showNotice({ tone: 'success', message: '全局变量和属性表达式已更新' })
+          }}
+        />
+      ) : null}
+      {settingsOpen ? (
+        <SettingsDialog
+          preferences={preferences}
+          onApply={(next: AppPreferences) => {
+            saveAppPreferences(next)
+            setPreferences(next)
+            setSettingsOpen(false)
+            showNotice({ tone: 'success', message: '设置已应用；新默认值将在下次创建对象时使用。' })
+          }}
+          onClose={() => setSettingsOpen(false)}
+        />
+      ) : null}
       {gifExportModal?.state === 'ready' ? (
         <GifExportDialog
           scene={gifExportModal.scene}
@@ -862,7 +976,9 @@ export function App() {
         </div>
       ) : null}
 
-      {helpTopic ? (
+      {helpTopic === 'manual' ? <SoftwareManualDialog onClose={() => setHelpTopic(null)} /> : null}
+
+      {helpTopic === 'physics' ? (
         <div className={styles.modalBackdrop}>
           <section
             className={styles.modal}
@@ -870,35 +986,36 @@ export function App() {
             aria-modal="true"
             aria-labelledby="help-title"
           >
-            <h2 id="help-title">
-              {helpTopic === 'shortcuts'
-                ? '快捷键与入门'
-                : helpTopic === 'physics'
-                  ? '物理模型与近似'
-                  : '关于 Motion Studio'}
-            </h2>
-            {helpTopic === 'shortcuts' ? (
-              <ul>
-                <li>V / R / S：选择移动 / 旋转 / 对象缩放；Z：画布缩放。</li>
-                <li>G / O / F / L：地面、物体、场、连接。</li>
-                <li>P：播放或暂停；句点：单步；Shift+R：重置。</li>
-                <li>Ctrl+S / O / Z / Y / C / V：保存、打开、撤销、重做、复制、粘贴。</li>
-                <li>J 地面连接点；空格临时抓手；Alt 临时关闭吸附；Delete 删除选择。</li>
-              </ul>
-            ) : helpTopic === 'physics' ? (
-              <ul>
-                <li>模拟使用固定时间步长，结果存在可测量的离散误差。</li>
-                <li>圆弧与贝塞尔地面通常以误差受控的折线参与碰撞。</li>
-                <li>场边界按物体中心判断；小球关闭碰撞时不会创建碰撞体。</li>
-                <li>浮点数会产生极小误差。本工具适合教学和常规模拟，不替代科研验证。</li>
-              </ul>
-            ) : (
-              <div>
-                <p>Motion Studio 1.5.4</p>
-                <p>二维物理运动建模、仿真与可视化工具。</p>
-                <p>采用 Apache-2.0 许可证开源。</p>
-              </div>
-            )}
+            <h2 id="help-title">物理模型与近似</h2>
+            <ul>
+              <li>模拟使用固定时间步长，结果存在可测量的离散误差。</li>
+              <li>圆弧与贝塞尔地面通常以误差受控的折线参与碰撞。</li>
+              <li>场边界按物体中心判断；小球关闭碰撞时不会创建碰撞体。</li>
+              <li>浮点数会产生极小误差。本工具适合教学和常规模拟，不替代科研验证。</li>
+            </ul>
+            <div className={styles.modalActions}>
+              <button type="button" autoFocus onClick={() => setHelpTopic(null)}>
+                关闭
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {helpTopic === 'about' ? (
+        <div className={styles.modalBackdrop}>
+          <section
+            className={styles.modal}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="help-title"
+          >
+            <h2 id="help-title">关于 Motion Studio</h2>
+            <div>
+              <p>Motion Studio 1.6.2</p>
+              <p>二维物理运动建模、仿真与可视化工具。</p>
+              <p>采用 Apache-2.0 许可证开源。</p>
+            </div>
             <div className={styles.modalActions}>
               <button type="button" autoFocus onClick={() => setHelpTopic(null)}>
                 关闭

@@ -21,6 +21,7 @@ export function createBooleanLayer(
     continuousCollisionDetection: inheritedFrom?.continuousCollisionDetection ?? false,
     massDistribution: { mode: 'source' },
     chargeDistribution: { mode: 'source' },
+    fieldDistribution: { mode: 'source' },
     frictionDistribution: { mode: 'source' },
     restitutionDistribution: { mode: 'source' },
     initialVelocity: { mode: 'source' },

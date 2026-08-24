@@ -2,7 +2,12 @@ import { describe, expect, it } from 'vitest'
 
 import { createBooleanLayerCommand } from '../commands/booleanLayerCommands'
 import { createEmptyScene } from '../../scene/model/createEmptyScene'
-import { createBall, createSpring } from '../../scene/model/entityFactories'
+import {
+  createBall,
+  createForce,
+  createMarkerMeasurement,
+  createSpring,
+} from '../../scene/model/entityFactories'
 import { collectSceneClipboard, duplicateSceneClipboard } from './entityClipboard'
 
 describe('统一树剪贴板', () => {
@@ -63,5 +68,51 @@ describe('统一树剪贴板', () => {
     ])
     expect(copied.entities.find((entity) => entity.kind === 'connector')?.name).toBe('弹簧 1 副本')
     expect(copied.rootItems).toHaveLength(3)
+  })
+
+  it('复制刚体时会复制并重映射锚定在它上面的外加力', () => {
+    const scene = createEmptyScene()
+    const body = createBall('', { x: 2, y: 3 }, 1, 1)
+    const force = createForce('', body.id, { x: 0.25, y: -0.5 }, 1)
+    scene.entities = [body, force]
+    scene.rootItems = [body, force].map((entity) => ({
+      kind: 'entity' as const,
+      entityId: entity.id,
+    }))
+
+    const copied = duplicateSceneClipboard(collectSceneClipboard(scene, [body.id]))
+    const copiedBody = copied.entities.find((entity) => entity.kind === 'body')
+    const copiedForce = copied.entities.find((entity) => entity.kind === 'force')
+    expect(copiedForce).toMatchObject({
+      kind: 'force',
+      bodyId: copiedBody?.id,
+      localAnchor: force.localAnchor,
+    })
+  })
+
+  it('复制记号时整体平移路径且保持测量语义', () => {
+    const scene = createEmptyScene()
+    const marker = createMarkerMeasurement(
+      '',
+      [
+        { x: 0, y: 0 },
+        { x: 1, y: 2 },
+      ],
+      1,
+    )
+    scene.entities = [marker]
+    scene.rootItems = [{ kind: 'entity', entityId: marker.id }]
+
+    const copied = duplicateSceneClipboard(collectSceneClipboard(scene, [marker.id]), undefined, {
+      x: 0.5,
+      y: -0.25,
+    })
+    const duplicated = copied.entities[0]
+    expect(duplicated?.kind).toBe('measurement')
+    if (duplicated?.kind !== 'measurement' || duplicated.measurement.type !== 'marker') return
+    expect(duplicated.measurement.points).toEqual([
+      { x: 0.5, y: -0.25 },
+      { x: 1.5, y: 1.75 },
+    ])
   })
 })

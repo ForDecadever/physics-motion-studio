@@ -22,6 +22,9 @@ function snapshot(): GifHistorySnapshot {
       sampleCount: 2,
       startTime: 0,
       endTime: 1,
+      telemetryBudgetBytes: 512 * 1024 * 1024,
+      allocatedBytes: 0,
+      historyTruncated: false,
     },
     sampleRate: 30,
     bodyIds: ['body'],
@@ -45,9 +48,46 @@ function snapshot(): GifHistorySnapshot {
     connectorIds: ['spring'],
     connectorPointOffsets: new Uint32Array([0, 2]),
     connectorValues: new Float32Array([0, 0, 1, 0, 2, 4, 5, 4]),
-    particleIonCount: 0,
+    particleSourceIds: [],
+    particleFrameOffsets: new Uint32Array([0, 0, 0]),
+    particleSourceIndexes: new Uint32Array(),
+    particleIonIds: new Uint32Array(),
     particleIonTs: new Float32Array(),
+    particleIonBornTimes: new Float32Array(),
+    particleIonContinuous: new Uint8Array(),
     particleValues: new Float32Array(),
+  }
+}
+
+function dynamicParticleSnapshot(): GifHistorySnapshot {
+  return {
+    requestId: 2,
+    status: {
+      kind: 'ready',
+      bodyCount: 0,
+      maxBodies: 200,
+      sampleCount: 3,
+      startTime: 0,
+      endTime: 2,
+      telemetryBudgetBytes: 512 * 1024 * 1024,
+      allocatedBytes: 200,
+      historyTruncated: false,
+    },
+    sampleRate: 1,
+    bodyIds: [],
+    times: new Float32Array([0, 1, 2]),
+    values: new Float32Array(),
+    connectorIds: [],
+    connectorPointOffsets: new Uint32Array([0]),
+    connectorValues: new Float32Array(),
+    particleSourceIds: ['continuous', 'static'],
+    particleFrameOffsets: new Uint32Array([0, 2, 5, 7]),
+    particleSourceIndexes: new Uint32Array([0, 1, 0, 0, 1, 0, 1]),
+    particleIonIds: new Uint32Array([0, 0, 0, 1, 0, 1, 0]),
+    particleIonTs: new Float32Array([0.1, 0.8, 0.1, 0.2, 0.8, 0.2, 0.8]),
+    particleIonBornTimes: new Float32Array([0, 0, 0, 0.5, 0, 0.5, 0]),
+    particleIonContinuous: new Uint8Array([1, 0, 1, 1, 0, 1, 0]),
+    particleValues: new Float32Array([0, 0, 0, 5, 10, 0, 4, 2, 1, 5, 8, 2, 2, 5]),
   }
 }
 
@@ -89,6 +129,40 @@ describe('GIF export model', () => {
 
     expect(reader.frameAt(0).bodies.body?.position).toEqual({ x: 0, y: 0 })
     expect(reader.frameAt(0.5).bodies.body).toBeUndefined()
+  })
+
+  it('matches dynamic particles by stable id across births, interpolation and expiration', () => {
+    const reader = new GifHistoryReader(dynamicParticleSnapshot())
+
+    const beforeBirth = reader
+      .frameAt(0.25)
+      .particleSources.find((source) => source.entityId === 'continuous')
+    expect(beforeBirth?.ions.map((ion) => ion.id)).toEqual([0])
+    expect(beforeBirth?.ions[0]?.position).toEqual({ x: 2.5, y: 0 })
+
+    const afterBirth = reader
+      .frameAt(0.75)
+      .particleSources.find((source) => source.entityId === 'continuous')
+    expect(afterBirth?.ions.map((ion) => ion.id)).toEqual([0, 1])
+    expect(reader.frameAt(2).particleSources[0]?.ions.map((ion) => ion.id)).toEqual([1])
+  })
+
+  it('draws trails only for batch particles and keeps continuous particles position-only', () => {
+    const trajectories = new GifHistoryReader(dynamicParticleSnapshot()).particleTrajectories(
+      0,
+      2,
+      100,
+    )
+
+    expect(trajectories).toHaveLength(1)
+    expect(trajectories[0]).toEqual({
+      t: expect.closeTo(0.8),
+      points: [
+        { x: 0, y: 5 },
+        { x: 1, y: 5 },
+        { x: 2, y: 5 },
+      ],
+    })
   })
 
   it('rejects unsafe pixel-frame combinations without changing settings', () => {

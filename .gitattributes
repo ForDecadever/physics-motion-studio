@@ -4,4 +4,5 @@
 *.jpg binary
 *.jpeg binary
 *.gif binary
+*.pdf binary
 *.wasm binary

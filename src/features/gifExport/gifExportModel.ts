@@ -9,6 +9,8 @@ import type {
   GifHistorySnapshot,
   RuntimeBodyState,
   RuntimeConnectorState,
+  RuntimeIonState,
+  RuntimeParticleSourceState,
 } from '../../physics/worker/messages'
 import type { BodyEntity, EntityId, SceneDocument, Vec2 } from '../../scene/model/types'
 import { resolveBooleanScene } from '../../scene/model/booleanGeometry'
@@ -59,6 +61,11 @@ export interface GifInterpolatedFrame {
   simulationTime: number
   bodies: Record<EntityId, RuntimeBodyState>
   connectors: Record<EntityId, RuntimeConnectorState>
+  particleSources: RuntimeParticleSourceState[]
+}
+
+interface RecordedParticle extends RuntimeIonState {
+  sourceIndex: number
 }
 
 const BODY_CHANNELS = 7
@@ -228,7 +235,9 @@ export class GifHistoryReader {
 
   frameAt(time: number): GifInterpolatedFrame {
     const { times } = this.snapshot
-    if (times.length === 0) return { simulationTime: time, bodies: {}, connectors: {} }
+    if (times.length === 0) {
+      return { simulationTime: time, bodies: {}, connectors: {}, particleSources: [] }
+    }
     const firstIndex = lowerSampleIndex(times, time)
     const secondIndex = Math.min(firstIndex + 1, times.length - 1)
     const firstTime = times[firstIndex]!
@@ -239,6 +248,7 @@ export class GifHistoryReader {
         : 0
     const bodies: Record<EntityId, RuntimeBodyState> = {}
     const connectors: Record<EntityId, RuntimeConnectorState> = {}
+    const particleSources = new Map<number, RuntimeParticleSourceState>()
 
     for (const [bodyIndex, entityId] of this.snapshot.bodyIds.entries()) {
       const first = this.valueOffset(firstIndex, bodyIndex)
@@ -315,7 +325,58 @@ export class GifHistoryReader {
       if (valid && points.length > 0) connectors[entityId] = { entityId, points }
     }
 
-    return { simulationTime: time, bodies, connectors }
+    const firstParticles = this.particleFrame(firstIndex)
+    const secondParticles = this.particleFrame(secondIndex)
+    const particleKeys = new Set([...firstParticles.keys(), ...secondParticles.keys()])
+    for (const key of particleKeys) {
+      const first = firstParticles.get(key)
+      const second = secondParticles.get(key)
+      let particle: RecordedParticle | undefined
+      if (ratio <= 0) {
+        particle = first
+      } else if (ratio >= 1) {
+        particle = second
+      } else if (first && second) {
+        particle = {
+          ...second,
+          position: {
+            x: first.position.x + (second.position.x - first.position.x) * ratio,
+            y: first.position.y + (second.position.y - first.position.y) * ratio,
+          },
+        }
+      } else if (second && time + Number.EPSILON >= second.bornAt) {
+        particle = second
+      } else if (first) {
+        particle = first
+      }
+      if (!particle) continue
+      const entityId = this.snapshot.particleSourceIds[particle.sourceIndex]
+      if (!entityId) continue
+      let source = particleSources.get(particle.sourceIndex)
+      if (!source) {
+        source = {
+          entityId,
+          continuousEmission: particle.continuous,
+          ions: [],
+        }
+        particleSources.set(particle.sourceIndex, source)
+      }
+      source.continuousEmission ||= particle.continuous
+      source.ions.push({
+        id: particle.id,
+        t: particle.t,
+        bornAt: particle.bornAt,
+        continuous: particle.continuous,
+        position: particle.position,
+      })
+    }
+
+    return {
+      simulationTime: time,
+      bodies,
+      connectors,
+      particleSources: [...particleSources.values()],
+    }
   }
 
   trajectory(
@@ -361,45 +422,71 @@ export class GifHistoryReader {
     endTime: number,
     pixelsPerMeter: number,
   ): Array<{ t: number; points: Vec2[] }> {
-    const ionCount = this.snapshot.particleIonCount
     const result: Array<{ t: number; points: Vec2[] }> = []
-    if (ionCount === 0 || endTime < startTime || this.snapshot.particleValues.length === 0) {
+    if (endTime < startTime || this.snapshot.particleValues.length === 0) {
       return result
     }
-    const stride = ionCount * 2
     const minimumDistance = 0.75 / Math.max(pixelsPerMeter, MIN_PIXELS_PER_METER)
     const minimumDistanceSquared = minimumDistance * minimumDistance
     const firstIndex = lowerSampleIndex(this.snapshot.times, startTime)
+    const trajectories = new Map<string, { t: number; points: Vec2[] }>()
 
-    for (let ionIndex = 0; ionIndex < ionCount; ionIndex += 1) {
-      const points: Vec2[] = []
-      for (
-        let sampleIndex = firstIndex;
-        sampleIndex < this.snapshot.times.length;
-        sampleIndex += 1
-      ) {
-        const time = this.snapshot.times[sampleIndex]!
-        if (time < startTime) continue
-        if (time > endTime) break
-        const offset = sampleIndex * stride + ionIndex * 2
+    for (let sampleIndex = firstIndex; sampleIndex < this.snapshot.times.length; sampleIndex += 1) {
+      const time = this.snapshot.times[sampleIndex]!
+      if (time < startTime) continue
+      if (time > endTime) break
+      const start = this.snapshot.particleFrameOffsets[sampleIndex] ?? 0
+      const end = this.snapshot.particleFrameOffsets[sampleIndex + 1] ?? start
+      for (let particleIndex = start; particleIndex < end; particleIndex += 1) {
+        if (this.snapshot.particleIonContinuous[particleIndex]) continue
         const point = {
-          x: this.snapshot.particleValues[offset]!,
-          y: this.snapshot.particleValues[offset + 1]!,
+          x: this.snapshot.particleValues[particleIndex * 2]!,
+          y: this.snapshot.particleValues[particleIndex * 2 + 1]!,
         }
         if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) continue
-        const previous = points.at(-1)
+        const key = `${this.snapshot.particleSourceIndexes[particleIndex] ?? 0}:${
+          this.snapshot.particleIonIds[particleIndex] ?? 0
+        }`
+        let trajectory = trajectories.get(key)
+        if (!trajectory) {
+          trajectory = { t: this.snapshot.particleIonTs[particleIndex] ?? 0, points: [] }
+          trajectories.set(key, trajectory)
+        }
+        const previous = trajectory.points.at(-1)
         if (
           !previous ||
           (point.x - previous.x) ** 2 + (point.y - previous.y) ** 2 >= minimumDistanceSquared
         ) {
-          points.push(point)
+          trajectory.points.push(point)
         }
       }
-      if (points.length > 0) {
-        result.push({ t: this.snapshot.particleIonTs[ionIndex] ?? 0, points })
-      }
+    }
+    for (const trajectory of trajectories.values()) {
+      if (trajectory.points.length > 0) result.push(trajectory)
     }
     return result
+  }
+
+  private particleFrame(sampleIndex: number): Map<string, RecordedParticle> {
+    const particles = new Map<string, RecordedParticle>()
+    const start = this.snapshot.particleFrameOffsets[sampleIndex] ?? 0
+    const end = this.snapshot.particleFrameOffsets[sampleIndex + 1] ?? start
+    for (let particleIndex = start; particleIndex < end; particleIndex += 1) {
+      const sourceIndex = this.snapshot.particleSourceIndexes[particleIndex] ?? 0
+      const id = this.snapshot.particleIonIds[particleIndex] ?? 0
+      const x = this.snapshot.particleValues[particleIndex * 2]!
+      const y = this.snapshot.particleValues[particleIndex * 2 + 1]!
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue
+      particles.set(`${sourceIndex}:${id}`, {
+        sourceIndex,
+        id,
+        t: this.snapshot.particleIonTs[particleIndex] ?? 0,
+        bornAt: this.snapshot.particleIonBornTimes[particleIndex] ?? 0,
+        continuous: Boolean(this.snapshot.particleIonContinuous[particleIndex]),
+        position: { x, y },
+      })
+    }
+    return particles
   }
 
   private valueOffset(sampleIndex: number, bodyIndex: number): number {
@@ -521,15 +608,15 @@ export function fitGifCamera(
     }
   }
 
-  const particleStride = snapshot.particleIonCount * 2
-  if (particleStride > 0 && snapshot.particleValues.length > 0) {
+  if (snapshot.particleValues.length > 0) {
     for (let sampleIndex = 0; sampleIndex < snapshot.times.length; sampleIndex += 1) {
       const time = snapshot.times[sampleIndex]!
       if (time < startTime || time > endTime) continue
-      const offset = sampleIndex * particleStride
-      for (let ionIndex = 0; ionIndex < snapshot.particleIonCount; ionIndex += 1) {
-        const x = snapshot.particleValues[offset + ionIndex * 2]!
-        const y = snapshot.particleValues[offset + ionIndex * 2 + 1]!
+      const start = snapshot.particleFrameOffsets[sampleIndex] ?? 0
+      const end = snapshot.particleFrameOffsets[sampleIndex + 1] ?? start
+      for (let particleIndex = start; particleIndex < end; particleIndex += 1) {
+        const x = snapshot.particleValues[particleIndex * 2]!
+        const y = snapshot.particleValues[particleIndex * 2 + 1]!
         if (Number.isFinite(x) && Number.isFinite(y)) include(x, y)
       }
     }

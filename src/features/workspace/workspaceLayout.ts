@@ -48,7 +48,7 @@ export const WORKSPACE_PANEL_IDS: readonly WorkspacePanelId[] = [
 ]
 
 const panelMinimums: Record<WorkspacePanelId, { width: number; height: number }> = {
-  tools: { width: 64, height: 220 },
+  tools: { width: 96, height: 220 },
   layers: { width: 240, height: 180 },
   inspector: { width: 240, height: 180 },
   charts: { width: 360, height: 240 },
@@ -66,7 +66,7 @@ export function createDefaultWorkspaceLayout(legacy: LegacyPanelSizes = {}): Wor
   return {
     version: WORKSPACE_LAYOUT_VERSION,
     dockSizes: {
-      left: 64,
+      left: 96,
       right: clampFinite(legacy.right, 240, 540, 296),
       bottom: clampFinite(legacy.chart, 140, 520, 184),
     },

@@ -6,6 +6,7 @@ import { useDocumentStore } from '../../stores/documentStore'
 import { useEditorStore } from '../../stores/editorStore'
 import { useSimulationStore } from '../../stores/simulationStore'
 import { PixiCanvas } from './PixiCanvas'
+import { ForceProbePanel } from '../measurements/ForceProbePanel'
 import styles from './CanvasWorkspace.module.css'
 
 export function CanvasWorkspace() {
@@ -52,6 +53,7 @@ export function CanvasWorkspace() {
 
       <div className={styles.canvasViewport} ref={viewportRef}>
         <PixiCanvas size={size} />
+        <ForceProbePanel />
 
         <div className={styles.canvasBadges} aria-hidden="true">
           <span>

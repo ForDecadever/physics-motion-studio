@@ -20,6 +20,7 @@ import {
   findSceneTreeLocation,
 } from '../../scene/model/booleanLayerGraph'
 import type { DocumentCommand } from './types'
+import { removeChangedNumericBindings } from '../../scene/model/numericPropertyRegistry'
 
 export class EntityListCommand implements DocumentCommand {
   constructor(
@@ -30,6 +31,7 @@ export class EntityListCommand implements DocumentCommand {
     private readonly afterCharts?: ChartDefinition[],
     private readonly beforeRootItems?: SceneTreeItem[],
     private readonly afterRootItems?: SceneTreeItem[],
+    readonly runtimeSafe = false,
   ) {}
 
   execute(document: SceneDocument): SceneDocument {
@@ -104,6 +106,7 @@ export class SceneGraphCommand implements DocumentCommand {
     readonly label: string,
     private readonly before: SceneDocument,
     private readonly after: SceneDocument,
+    readonly runtimeSafe = false,
   ) {}
 
   execute(document: SceneDocument): SceneDocument {
@@ -129,8 +132,14 @@ export function createReplaceSceneSettingsCommand(
   document: SceneDocument,
   settings: SceneSettings,
   label: string,
-): SceneSettingsCommand {
-  return new SceneSettingsCommand(label, document.settings, settings)
+): SceneGraphCommand {
+  const provisional = { ...document, settings }
+  const next = removeChangedNumericBindings(
+    document,
+    provisional,
+    (binding) => binding.target.type === 'scene',
+  )
+  return new SceneGraphCommand(label, document, next)
 }
 
 export function createReplaceSceneTreeCommand(
@@ -166,6 +175,7 @@ export function createAddEntityCommand(
       ...document.rootItems,
       ...additions.map((entity): SceneTreeItem => ({ kind: 'entity', entityId: entity.id })),
     ],
+    additions.every((entity) => entity.kind === 'measurement'),
   )
 }
 
@@ -174,14 +184,27 @@ export function createReplaceEntitiesCommand(
   replacements: SceneEntity[],
   label: string,
   booleanAnchorBehavior: 'preserve-world' | 'follow-result' = 'preserve-world',
-): EntityListCommand {
+): SceneGraphCommand {
   const replacementMap = new Map(replacements.map((entity) => [entity.id, entity]))
   const replaced = document.entities.map((entity) => replacementMap.get(entity.id) ?? entity)
-  const next =
+  const anchored =
     booleanAnchorBehavior === 'preserve-world'
       ? preserveBooleanConnectorWorldAnchors(document, { ...document, entities: replaced })
       : { ...document, entities: replaced }
-  return new EntityListCommand(label, document.entities, next.entities)
+  const replacedIds = new Set(replacements.map((entity) => entity.id))
+  const next = removeChangedNumericBindings(
+    document,
+    anchored,
+    (binding) =>
+      binding.target.type === 'boolean' ||
+      (binding.target.type === 'entity' && replacedIds.has(binding.target.entityId)),
+  )
+  return new SceneGraphCommand(
+    label,
+    document,
+    next,
+    replacements.every((entity) => entity.kind === 'measurement'),
+  )
 }
 
 export function preserveBooleanConnectorWorldAnchors(
@@ -236,12 +259,19 @@ export function createDeleteEntitiesCommand(
       return false
     })
 
+  const forceReferencesDeletedEntity = (entity: SceneEntity): boolean =>
+    entity.kind === 'force' && deletedReferenceIds.has(entity.bodyId)
+
   let addedDependency = true
   while (addedDependency) {
     addedDependency = false
     for (const entity of document.entities) {
       if (ids.has(entity.id)) continue
       if (entity.kind === 'connector' && connectorReferencesDeletedEntity(entity)) {
+        ids.add(entity.id)
+        addedDependency = true
+      }
+      if (forceReferencesDeletedEntity(entity)) {
         ids.add(entity.id)
         addedDependency = true
       }
@@ -276,6 +306,11 @@ export function createDeleteEntitiesCommand(
     bindings: chart.bindings.filter((binding) => !deletedReferenceIds.has(binding.entityId)),
     series: chart.series.filter((series) => !deletedReferenceIds.has(series.entityId)),
   }))
+  const afterPropertyExpressions = document.propertyExpressions.filter((binding) => {
+    if (binding.target.type === 'entity') return !ids.has(binding.target.entityId)
+    if (binding.target.type === 'boolean') return !selectedBooleanIds.has(binding.target.nodeId)
+    return true
+  })
 
   return new SceneGraphCommand(
     selectedBooleanIds.size > 0 ? '删除布尔组合' : '删除实体',
@@ -285,6 +320,11 @@ export function createDeleteEntitiesCommand(
       rootItems: afterRootItems,
       entities: after,
       charts: afterCharts,
+      propertyExpressions: afterPropertyExpressions,
     },
+    selectedBooleanIds.size === 0 &&
+      [...ids].every(
+        (id) => document.entities.find((entity) => entity.id === id)?.kind === 'measurement',
+      ),
   )
 }

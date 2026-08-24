@@ -48,6 +48,7 @@ function booleanLayer(
     continuousCollisionDetection: true,
     massDistribution: { mode: 'source' },
     chargeDistribution: { mode: 'source' },
+    fieldDistribution: { mode: 'source' },
     frictionDistribution: { mode: 'source' },
     restitutionDistribution: { mode: 'source' },
     initialVelocity: { mode: 'source' },

@@ -18,6 +18,7 @@ import {
   SkipForward,
   Trash2,
   Undo2,
+  Variable,
 } from 'lucide-react'
 import type { MouseEvent, ReactNode } from 'react'
 
@@ -38,18 +39,21 @@ interface MenuBarProps {
   onPaste: () => void
   onDelete: () => void
   onSelectAll: () => void
+  onShowGlobalVariables: () => void
+  onOpenSettings: () => void
   onToggleGrid: () => void
   onToggleSnap: () => void
   onPlayPause: () => void
   onStepSimulation: () => void
   onResetSimulation: () => void
   onClearRecords: () => void
-  onShowShortcuts: () => void
+  onShowManual: () => void
   onShowPhysics: () => void
   canUndo: boolean
   canRedo: boolean
   canPaste: boolean
   hasSelection: boolean
+  globalVariablesDisabled: boolean
   hasChartData: boolean
   gridVisible: boolean
   snapEnabled: boolean
@@ -160,18 +164,21 @@ export function MenuBar({
   onPaste,
   onDelete,
   onSelectAll,
+  onShowGlobalVariables,
+  onOpenSettings,
   onToggleGrid,
   onToggleSnap,
   onPlayPause,
   onStepSimulation,
   onResetSimulation,
   onClearRecords,
-  onShowShortcuts,
+  onShowManual,
   onShowPhysics,
   canUndo,
   canRedo,
   canPaste,
   hasSelection,
+  globalVariablesDisabled,
   hasChartData,
   gridVisible,
   snapEnabled,
@@ -254,6 +261,17 @@ export function MenuBar({
             <MenuAction shortcut="Ctrl+A" onClick={onSelectAll}>
               全选
             </MenuAction>
+            <MenuDivider />
+            <MenuAction
+              icon={<Variable size={15} />}
+              disabled={globalVariablesDisabled}
+              onClick={onShowGlobalVariables}
+            >
+              全局变量…
+            </MenuAction>
+            <MenuAction icon={<Settings2 size={15} />} onClick={onOpenSettings}>
+              设置…
+            </MenuAction>
           </Menu>
 
           <Menu label="视图">
@@ -316,15 +334,9 @@ export function MenuBar({
             </MenuAction>
           </Menu>
 
-          <Menu label="设置">
-            <MenuAction icon={<Settings2 size={15} />} disabled>
-              首选项
-            </MenuAction>
-          </Menu>
-
           <Menu label="帮助">
-            <MenuAction icon={<CircleHelp size={15} />} onClick={onShowShortcuts}>
-              快捷键与教程
+            <MenuAction icon={<CircleHelp size={15} />} onClick={onShowManual}>
+              软件说明
             </MenuAction>
             <MenuAction icon={<Info size={15} />} onClick={onShowPhysics}>
               物理模型说明

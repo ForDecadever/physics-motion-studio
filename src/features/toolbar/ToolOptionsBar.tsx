@@ -30,6 +30,11 @@ const toolNames: Record<EditorTool, string> = {
   field: '场工具',
   connector: '连接工具',
   particleSource: '粒子源工具',
+  force: '力工具',
+  marker: '记号笔',
+  ruler: '直尺',
+  protractor: '量角器',
+  forceMeter: '测力计',
 }
 
 export function ToolOptionsBar() {
@@ -75,7 +80,9 @@ export function ToolOptionsBar() {
   const toolDetail: Record<EditorTool, string> = {
     select: '拖动移动 · Shift 多选',
     rotate: '拖动旋转 · 15° 吸附',
-    scale: scalableSelectionBounds ? '拖动四角手柄等比缩放 · Alt 临时关闭吸附' : '当前选择不可缩放',
+    scale: scalableSelectionBounds
+      ? '四角等比 · 四边单轴（支持的形状） · Alt 临时关闭吸附'
+      : '当前选择不可缩放',
     hand: '拖动画布 · 空格临时启用',
     zoom: '点击放大 · Alt 点击缩小',
     ground:
@@ -95,6 +102,11 @@ export function ToolOptionsBar() {
           : `拖动绘制${fieldRegionToolShape === 'circle' ? '圆形' : '矩形'}作用范围`,
     connector: connectorStartEndpoint ? '请选择第二个端点' : '依次选择两个端点',
     particleSource: '点击放置点源；拖动绘制线源（垂直于线发射）',
+    force: '点击普通物体或根布尔物体锚定外加力',
+    marker: '按住拖动画记号；松开形成一条可撤销记录',
+    ruler: '依次选择两个点；Alt 临时关闭吸附',
+    protractor: '依次选择起点、顶点和终点；第二点是角顶点',
+    forceMeter: '点击物体上的点查看当前受力分解',
   }
 
   return (

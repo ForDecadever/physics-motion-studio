@@ -1,6 +1,7 @@
 import {
   ArrowUpDown,
   Box,
+  BoxSelect,
   ChevronDown,
   ChevronRight,
   Eye,
@@ -13,6 +14,8 @@ import {
   Plus,
   Sparkles,
   Spline,
+  MoveUpRight,
+  Pencil,
   Trash2,
   Unlink,
 } from 'lucide-react'
@@ -46,6 +49,8 @@ const entityIcons = {
   field: Magnet,
   connector: Link2,
   particleSource: Sparkles,
+  force: MoveUpRight,
+  measurement: Pencil,
 }
 
 export function LayersPanel({ embedded = false }: { embedded?: boolean }) {
@@ -260,7 +265,13 @@ export function LayersPanel({ embedded = false }: { embedded?: boolean }) {
               event.shiftKey ? toggleSelectedId(item.resultId) : setSelectedIds([item.resultId])
             }
           >
-            {item.operation === 'union' ? <GitMerge size={14} /> : <Box size={14} />}
+            {item.operation === 'union' ? (
+              <GitMerge size={14} />
+            ) : item.operation === 'intersection' ? (
+              <BoxSelect size={14} />
+            ) : (
+              <Box size={14} />
+            )}
             {renamingId === item.resultId ? (
               <input
                 className={styles.inlineNameInput}

@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Motion Studio",
-  "version": "1.5.4",
+  "version": "1.6.2",
   "identifier": "io.github.fordecadever.physics-motion-studio",
   "build": {
     "beforeDevCommand": "pnpm dev",

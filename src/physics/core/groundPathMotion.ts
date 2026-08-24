@@ -259,6 +259,7 @@ export function applyCoulombPathFriction(
   supportForceN: number,
   frictionCoefficient: number,
   timeStep: number,
+  surfaceSpeedMps = 0,
 ): PathFrictionResult {
   const inverseMass = massKg > 0 ? 1 / massKg : 0
   const inverseInertia =
@@ -273,7 +274,7 @@ export function applyCoulombPathFriction(
     return { tangentialSpeedMps: speedMps, angularVelocityRad, impulseNs: 0 }
   }
 
-  const slipSpeed = speedMps + side * angularVelocityRad * radiusM
+  const slipSpeed = speedMps + side * angularVelocityRad * radiusM - surfaceSpeedMps
   const stoppingImpulse = -slipSpeed / inverseEffectiveMass
   const maximumImpulse = frictionCoefficient * supportForceN * timeStep
   const impulseNs = clamped(stoppingImpulse, -maximumImpulse, maximumImpulse)

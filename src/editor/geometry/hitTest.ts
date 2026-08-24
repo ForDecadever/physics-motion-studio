@@ -211,6 +211,23 @@ export function hitTestEntity(
     }
     return distanceToSegment(point, entity.shape.start, entity.shape.end) <= tolerance
   }
+  if (entity.kind === 'measurement') {
+    const measurement = entity.measurement
+    if (measurement.type === 'marker') {
+      return measurement.points.some((end, index) => {
+        const start = measurement.points[index - 1]
+        return start ? distanceToSegment(point, start, end) <= tolerance : false
+      })
+    }
+    if (measurement.type === 'ruler') {
+      return distanceToSegment(point, measurement.a, measurement.b) <= tolerance
+    }
+    return (
+      distanceToSegment(point, measurement.vertex, measurement.a) <= tolerance ||
+      distanceToSegment(point, measurement.vertex, measurement.b) <= tolerance
+    )
+  }
+  if (entity.kind === 'force') return false
 
   if (entity.kind === 'groundJoint') {
     const transitionPath = (
@@ -249,6 +266,7 @@ export function findTopEntity(
   runtimeConnectors: Record<EntityId, RuntimeConnectorState> = {},
 ): SceneEntity | null {
   const visualOrder: SceneEntity['kind'][] = [
+    'measurement',
     'body',
     'particleSource',
     'groundJoint',

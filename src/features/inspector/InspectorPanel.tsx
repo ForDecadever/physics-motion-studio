@@ -1,4 +1,4 @@
-import { BoxSelect, Gauge, Grid2X2, Pin, Timer, Unlink } from 'lucide-react'
+import { BoxSelect, Gauge, Palette, Pin, Timer, Unlink } from 'lucide-react'
 import {
   Fragment,
   useEffect,
@@ -12,13 +12,17 @@ import {
 import { createReplaceBooleanNodeCommand } from '../../editor/commands/booleanLayerCommands'
 import {
   createReplaceEntitiesCommand,
+  createReplaceSceneCommand,
   createReplaceSceneSettingsCommand,
 } from '../../editor/commands/entityCommands'
 import {
   bodyLocalAnchorIsInside,
   clampBodyLocalAnchor,
+  distance,
+  dot,
   getEntityTransform,
   resolveConnectorEndpoint,
+  subtract,
   withEntityTransform,
 } from '../../editor/geometry/entityGeometry'
 import { resolveGroundJoint } from '../../scene/model/groundEndpoints'
@@ -32,9 +36,25 @@ import type {
   BodyEntity,
   BooleanNode,
   ConnectorEndpoint,
+  ForceEntity,
+  PropertyExpressionTarget,
+  ScalarExpressionDefinition,
   SceneEntity,
   Vec2,
 } from '../../scene/model/types'
+import { compileScalarExpression } from '../../scene/expressions/scalarExpression'
+import {
+  globalVariableValues,
+  propertyExpressionTargetKey,
+  setPropertyExpression,
+  stepPropertyExpressionSource,
+} from '../../scene/model/propertyExpressions'
+import { readNumericPropertyTarget } from '../../scene/model/numericPropertyRegistry'
+import {
+  electricFieldWithComponentExpression,
+  fieldDefinitionMagnitude,
+  fieldDefinitionWithExpression,
+} from '../../scene/model/fieldExpressions'
 import {
   resolveBooleanScene,
   type ResolvedBooleanBody,
@@ -63,7 +83,7 @@ function PropertyRow({ icon, label, value }: { icon: ReactNode; label: string; v
   )
 }
 
-function NumberProperty({
+function LiteralNumberProperty({
   label,
   value,
   unit,
@@ -76,10 +96,10 @@ function NumberProperty({
 }: {
   label: string
   value: number
-  unit?: string
-  min?: number
-  max?: number
-  step?: number | 'any'
+  unit?: string | undefined
+  min?: number | undefined
+  max?: number | undefined
+  step?: number | 'any' | undefined
   disabled: boolean
   commitWhenEdited?: boolean
   onCommit: (value: number) => void
@@ -154,6 +174,315 @@ function NumberProperty({
   )
 }
 
+function FormulaNumberProperty({
+  label,
+  value,
+  target,
+  unit,
+  min,
+  max,
+  step = 1,
+  disabled,
+}: {
+  label: string
+  value: number
+  target: PropertyExpressionTarget
+  unit?: string | undefined
+  min?: number | undefined
+  max?: number | undefined
+  step?: number | 'any' | undefined
+  disabled: boolean
+}) {
+  const scene = useDocumentStore((state) => state.scene)
+  const binding = scene.propertyExpressions.find(
+    (candidate) =>
+      propertyExpressionTargetKey(candidate.target) === propertyExpressionTargetKey(target),
+  )
+  const displayedSource = binding?.expression ?? formatNumber(value, 5)
+  const [edit, setEdit] = useState({ source: displayedSource, text: displayedSource, dirty: false })
+  const draft = edit.source === displayedSource ? edit.text : displayedSource
+  const latest = useRef({ draft, displayedSource, target, min, max })
+  useEffect(() => {
+    latest.current = { draft, displayedSource, target, min, max }
+  }, [displayedSource, draft, max, min, target])
+  const reset = () =>
+    setEdit({
+      source: latest.current.displayedSource,
+      text: latest.current.displayedSource,
+      dirty: false,
+    })
+  const applySource = (source: string) => {
+    const current = latest.current
+    try {
+      const document = useDocumentStore.getState()
+      const next = setPropertyExpression(document.scene, current.target, source)
+      const nextValue = readNumericPropertyTarget(next, current.target)
+      if (
+        nextValue === null ||
+        (current.min !== undefined && nextValue < current.min) ||
+        (current.max !== undefined && nextValue > current.max)
+      ) {
+        throw new Error(`${label}必须在 ${current.min ?? '−∞'} 到 ${current.max ?? '+∞'} 之间。`)
+      }
+      if (JSON.stringify(next) !== JSON.stringify(document.scene)) {
+        document.executeCommand(createReplaceSceneCommand(document.scene, next, `修改${label}`))
+      }
+      setEdit({ source: source.trim(), text: source.trim(), dirty: false })
+    } catch (error) {
+      useSimulationStore
+        .getState()
+        .addWarning(error instanceof Error ? error.message : `${label}表达式无效。`)
+      reset()
+    }
+  }
+  const commit = () => applySource(latest.current.draft)
+  const stepValue = typeof step === 'number' && Number.isFinite(step) && step > 0 ? step : 1
+  const applyStep = (direction: 1 | -1) => {
+    if (disabled) return
+    const source = binding
+      ? stepPropertyExpressionSource(binding.expression, direction * stepValue)
+      : formatNumber(value + direction * stepValue, 12)
+    applySource(source)
+  }
+
+  return (
+    <label className={styles.editablePropertyRow}>
+      <Gauge size={14} />
+      <span>{label}</span>
+      <span className={styles.expressionValueWrap}>
+        <span className={styles.expressionInputWrap}>
+          <input
+            type="text"
+            role="spinbutton"
+            aria-label={label}
+            aria-valuenow={value}
+            aria-valuemin={min}
+            aria-valuemax={max}
+            value={draft}
+            disabled={disabled}
+            onChange={(event) =>
+              setEdit({ source: displayedSource, text: event.target.value, dirty: true })
+            }
+            onFocus={(event) =>
+              registerPendingEditorEdit({ input: event.currentTarget, commit, cancel: reset })
+            }
+            onBlur={(event) => commitPendingEditorEditFromBlur(event.currentTarget)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') commitPendingEditorEdit()
+              if (event.key === 'Escape') cancelPendingEditorEdit(event.currentTarget)
+              if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+                event.preventDefault()
+                applyStep(event.key === 'ArrowUp' ? 1 : -1)
+              }
+            }}
+          />
+          <span className={styles.expressionStepper} aria-hidden={disabled}>
+            <button
+              type="button"
+              tabIndex={-1}
+              aria-label="增加当前属性"
+              disabled={disabled}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => applyStep(1)}
+            >
+              ▲
+            </button>
+            <button
+              type="button"
+              tabIndex={-1}
+              aria-label="减少当前属性"
+              disabled={disabled}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => applyStep(-1)}
+            >
+              ▼
+            </button>
+          </span>
+        </span>
+        <span className={styles.expressionMeta}>
+          <small>{unit ?? ''}</small>
+          {binding ? <small title="当前解析值">= {formatNumber(value, 5)}</small> : <small />}
+        </span>
+      </span>
+    </label>
+  )
+}
+
+function NumberProperty({
+  target,
+  ...props
+}: {
+  label: string
+  value: number
+  unit?: string
+  min?: number
+  max?: number
+  step?: number | 'any'
+  disabled: boolean
+  commitWhenEdited?: boolean
+  onCommit: (value: number) => void
+  target?: PropertyExpressionTarget
+}) {
+  return target ? (
+    <FormulaNumberProperty
+      label={props.label}
+      value={props.value}
+      unit={props.unit}
+      min={props.min}
+      max={props.max}
+      step={props.step}
+      disabled={props.disabled}
+      target={target}
+    />
+  ) : (
+    <LiteralNumberProperty {...props} />
+  )
+}
+
+function TimeExpressionProperty({
+  label,
+  value,
+  definition,
+  unit,
+  step = 1,
+  disabled,
+  onCommit,
+}: {
+  label: string
+  value: number
+  definition?: ScalarExpressionDefinition | undefined
+  unit?: string
+  step?: number
+  disabled: boolean
+  onCommit: (value: number, definition: ScalarExpressionDefinition | undefined) => void
+}) {
+  const displayedSource = definition?.expression ?? formatNumber(value, 5)
+  const [edit, setEdit] = useState({ source: displayedSource, text: displayedSource })
+  const draft = edit.source === displayedSource ? edit.text : displayedSource
+  const latest = useRef({ draft, displayedSource, value, onCommit })
+  useEffect(() => {
+    latest.current = { draft, displayedSource, value, onCommit }
+  }, [displayedSource, draft, onCommit, value])
+  const reset = () =>
+    setEdit({ source: latest.current.displayedSource, text: latest.current.displayedSource })
+  const applySource = (draftSource: string) => {
+    const current = latest.current
+    const source = draftSource.trim()
+    const numeric = Number(source)
+    try {
+      if (source && Number.isFinite(numeric)) {
+        current.onCommit(numeric, undefined)
+      } else {
+        const scene = useDocumentStore.getState().scene
+        const variables = globalVariableValues(scene)
+        const compiled = compileScalarExpression(source, {
+          allowTime: true,
+          variableNames: new Set(Object.keys(variables)),
+        })
+        const fallbackValue = compiled.evaluate({ time: 0, variables })
+        if (fallbackValue === null) throw new Error(`${label}在 t=0 时没有有限结果。`)
+        current.onCommit(fallbackValue, { expression: compiled.source, fallbackValue })
+      }
+      setEdit({ source, text: source })
+    } catch (error) {
+      useSimulationStore
+        .getState()
+        .addWarning(error instanceof Error ? error.message : `${label}表达式无效。`)
+      reset()
+    }
+  }
+  const commit = () => applySource(latest.current.draft)
+  const stepValue = Number.isFinite(step) && step > 0 ? step : 1
+  const applyStep = (direction: 1 | -1) => {
+    if (disabled) return
+    applySource(
+      definition
+        ? stepPropertyExpressionSource(definition.expression, direction * stepValue)
+        : formatNumber(value + direction * stepValue, 12),
+    )
+  }
+
+  return (
+    <label className={styles.editablePropertyRow}>
+      <Timer size={14} />
+      <span>{label}</span>
+      <span className={styles.expressionValueWrap}>
+        <span className={styles.expressionInputWrap}>
+          <input
+            type="text"
+            role="spinbutton"
+            aria-label={label}
+            aria-valuenow={value}
+            value={draft}
+            disabled={disabled}
+            onChange={(event) => setEdit({ source: displayedSource, text: event.target.value })}
+            onFocus={(event) =>
+              registerPendingEditorEdit({ input: event.currentTarget, commit, cancel: reset })
+            }
+            onBlur={(event) => commitPendingEditorEditFromBlur(event.currentTarget)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') commitPendingEditorEdit()
+              if (event.key === 'Escape') cancelPendingEditorEdit(event.currentTarget)
+              if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+                event.preventDefault()
+                applyStep(event.key === 'ArrowUp' ? 1 : -1)
+              }
+            }}
+          />
+          <span className={styles.expressionStepper}>
+            <button
+              type="button"
+              tabIndex={-1}
+              aria-label="增加当前属性"
+              disabled={disabled}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => applyStep(1)}
+            >
+              ▲
+            </button>
+            <button
+              type="button"
+              tabIndex={-1}
+              aria-label="减少当前属性"
+              disabled={disabled}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => applyStep(-1)}
+            >
+              ▼
+            </button>
+          </span>
+        </span>
+        <span className={styles.expressionMeta}>
+          <small>{unit ?? ''}</small>
+          {definition ? <small>= {formatNumber(value, 5)}（t=0）</small> : <small />}
+        </span>
+      </span>
+    </label>
+  )
+}
+
+function forceWithMagnitudeExpression(
+  entity: ForceEntity,
+  magnitudeN: number,
+  definition: ScalarExpressionDefinition | undefined,
+): ForceEntity {
+  const next: ForceEntity = { ...entity, magnitudeN }
+  if (definition) next.magnitudeExpression = definition
+  else delete next.magnitudeExpression
+  return next
+}
+
+function forceWithDirectionExpression(
+  entity: ForceEntity,
+  directionDegrees: number,
+  definition: ScalarExpressionDefinition | undefined,
+): ForceEntity {
+  const next: ForceEntity = { ...entity, directionRad: (directionDegrees * Math.PI) / 180 }
+  if (definition) next.directionDegreesExpression = definition
+  else delete next.directionDegreesExpression
+  return next
+}
+
 function ToggleProperty({
   label,
   checked,
@@ -179,6 +508,33 @@ function ToggleProperty({
   )
 }
 
+function ColorProperty({
+  label,
+  value,
+  disabled,
+  onChange,
+}: {
+  label: string
+  value: string
+  disabled: boolean
+  onChange: (value: string) => void
+}) {
+  return (
+    <label className={styles.editablePropertyRow}>
+      <Palette size={14} />
+      <span>{label}</span>
+      <input
+        className={styles.colorInput}
+        type="color"
+        value={value}
+        disabled={disabled}
+        aria-label={label}
+        onChange={(event) => onChange(event.target.value)}
+      />
+    </label>
+  )
+}
+
 function PropertySubheading({ children }: { children: ReactNode }) {
   return <h4 className={styles.propertySubheading}>{children}</h4>
 }
@@ -198,7 +554,7 @@ function entityCategories(entity: SceneEntity): InspectorCategory[] {
   const categories: InspectorCategory[] = ['basic']
   if (getEntityTransform(entity)) categories.push('transform')
   categories.push('geometry')
-  if (entity.kind !== 'groundJoint') categories.push('physics')
+  if (entity.kind !== 'groundJoint' && entity.kind !== 'measurement') categories.push('physics')
   if (entity.kind === 'body') categories.push('initial', 'advanced')
   return categories
 }
@@ -262,6 +618,8 @@ const kindNames: Record<SceneEntity['kind'], string> = {
   field: '物理场',
   connector: '连接器',
   particleSource: '粒子源',
+  force: '外加力',
+  measurement: '测量标记',
 }
 
 function formatNumber(value: number, digits = 2): string {
@@ -270,6 +628,13 @@ function formatNumber(value: number, digits = 2): string {
     return value.toExponential(Math.min(3, digits))
   }
   return Number(value.toFixed(digits)).toString()
+}
+
+function angleBetweenDegrees(a: Vec2, vertex: Vec2, b: Vec2): number {
+  const first = subtract(a, vertex)
+  const second = subtract(b, vertex)
+  const denominator = Math.max(1e-12, distance(a, vertex) * distance(b, vertex))
+  return Math.acos(Math.max(-1, Math.min(1, dot(first, second) / denominator))) * (180 / Math.PI)
 }
 
 function groundJointStatus(
@@ -340,12 +705,22 @@ function EntityProperties({
           <h3>基本信息</h3>
           <PropertyRow icon={<Gauge size={14} />} label="名称" value={entity.name} />
           <PropertyRow icon={<BoxSelect size={14} />} label="类型" value={kindNames[entity.kind]} />
-          {entity.kind === 'body' && entity.shape.type === 'circle' ? (
-            <PropertyRow
-              icon={<Gauge size={14} />}
-              label="画布标记"
-              value={`${entity.shape.collisionEnabled ? '红色·碰撞开' : '蓝色·碰撞关'} · ${entity.chargeC > 0 ? '+' : entity.chargeC < 0 ? '−' : '无电荷符号'}`}
-            />
+          {entity.kind === 'body' ? (
+            <>
+              <ColorProperty
+                label="物体颜色"
+                value={entity.color}
+                disabled={disabled}
+                onChange={(color) => replace({ ...entity, color }, '修改物体颜色')}
+              />
+              {entity.shape.type === 'circle' ? (
+                <PropertyRow
+                  icon={<Gauge size={14} />}
+                  label="画布标记"
+                  value={`${entity.shape.collisionEnabled ? '碰撞开' : '碰撞关'} · ${entity.chargeC > 0 ? '+' : entity.chargeC < 0 ? '−' : '无电荷符号'}`}
+                />
+              ) : null}
+            </>
           ) : null}
         </section>
       ) : null}
@@ -358,6 +733,7 @@ function EntityProperties({
             value={transform.position.x}
             unit="m"
             disabled={disabled}
+            target={{ type: 'entity', entityId: entity.id, property: 'transform.position.x' }}
             onCommit={(value) => updateTransform(value, transform.position.y, transform.angleRad)}
           />
           <NumberProperty
@@ -365,6 +741,7 @@ function EntityProperties({
             value={transform.position.y}
             unit="m"
             disabled={disabled}
+            target={{ type: 'entity', entityId: entity.id, property: 'transform.position.y' }}
             onCommit={(value) => updateTransform(transform.position.x, value, transform.angleRad)}
           />
           <NumberProperty
@@ -372,6 +749,18 @@ function EntityProperties({
             value={(transform.angleRad * 180) / Math.PI}
             unit="°"
             disabled={disabled}
+            target={{
+              type: 'entity',
+              entityId: entity.id,
+              property:
+                entity.kind === 'ground' && entity.geometry.type === 'arc'
+                  ? 'ground.geometry.startDegrees'
+                  : entity.kind === 'field' && entity.region.type === 'circle'
+                    ? 'field.region.startDegrees'
+                    : entity.kind === 'particleSource' && entity.shape.type === 'point'
+                      ? 'particleSource.directionDegrees'
+                      : 'transform.angleDegrees',
+            }}
             onCommit={(value) =>
               updateTransform(transform.position.x, transform.position.y, (value * Math.PI) / 180)
             }
@@ -467,6 +856,11 @@ function EntityProperties({
                         unit="m"
                         min={0}
                         disabled={smoothSettingsDisabled}
+                        target={{
+                          type: 'entity',
+                          entityId: entity.id,
+                          property: 'groundJoint.transition.lengthM',
+                        }}
                         onCommit={(lengthM) =>
                           replace(
                             { ...entity, transition: { ...transition, lengthM } },
@@ -525,6 +919,7 @@ function EntityProperties({
                   unit="m"
                   min={0.001}
                   disabled={disabled}
+                  target={{ type: 'entity', entityId: entity.id, property: 'body.shape.radius' }}
                   onCommit={(radius) => {
                     if (entity.kind !== 'body' || entity.shape.type !== 'circle') return
                     replace({ ...entity, shape: { ...entity.shape, radius } }, '修改小球半径')
@@ -538,6 +933,7 @@ function EntityProperties({
                     unit="m"
                     min={0.001}
                     disabled={disabled}
+                    target={{ type: 'entity', entityId: entity.id, property: 'body.shape.width' }}
                     onCommit={(width) => {
                       if (entity.kind !== 'body' || entity.shape.type !== 'box') return
                       replace({ ...entity, shape: { ...entity.shape, width } }, '修改物块宽度')
@@ -549,6 +945,7 @@ function EntityProperties({
                     unit="m"
                     min={0.001}
                     disabled={disabled}
+                    target={{ type: 'entity', entityId: entity.id, property: 'body.shape.height' }}
                     onCommit={(height) => {
                       if (entity.kind !== 'body' || entity.shape.type !== 'box') return
                       replace({ ...entity, shape: { ...entity.shape, height } }, '修改物块高度')
@@ -567,20 +964,19 @@ function EntityProperties({
           {entity.kind === 'body' && category === 'physics' ? (
             <>
               <PropertySubheading>质量与电荷</PropertySubheading>
-              <NumberProperty
+              <FormulaNumberProperty
                 label="质量"
                 value={entity.massKg}
                 unit="kg"
-                min={0.000001}
                 disabled={disabled}
-                onCommit={(massKg) => replace({ ...entity, massKg }, '修改物体质量')}
+                target={{ type: 'entity', entityId: entity.id, property: 'body.massKg' }}
               />
-              <NumberProperty
+              <FormulaNumberProperty
                 label="电荷量"
                 value={entity.chargeC}
                 unit="C"
                 disabled={disabled}
-                onCommit={(chargeC) => replace({ ...entity, chargeC }, '修改物体电荷量')}
+                target={{ type: 'entity', entityId: entity.id, property: 'body.chargeC' }}
               />
               {entity.shape.type === 'circle' ? (
                 <ToggleProperty
@@ -606,28 +1002,25 @@ function EntityProperties({
                 }
               />
               <PropertySubheading>接触材质</PropertySubheading>
-              <NumberProperty
+              <FormulaNumberProperty
                 label="摩擦系数"
                 value={entity.material.friction}
-                min={0}
-                max={5}
                 disabled={disabled}
-                onCommit={(friction) =>
-                  replace({ ...entity, material: { ...entity.material, friction } }, '修改摩擦系数')
-                }
+                target={{
+                  type: 'entity',
+                  entityId: entity.id,
+                  property: 'body.material.friction',
+                }}
               />
-              <NumberProperty
+              <FormulaNumberProperty
                 label="弹性系数"
                 value={entity.material.restitution}
-                min={0}
-                max={1}
                 disabled={disabled}
-                onCommit={(restitution) =>
-                  replace(
-                    { ...entity, material: { ...entity.material, restitution } },
-                    '修改弹性系数',
-                  )
-                }
+                target={{
+                  type: 'entity',
+                  entityId: entity.id,
+                  property: 'body.material.restitution',
+                }}
               />
             </>
           ) : null}
@@ -639,6 +1032,11 @@ function EntityProperties({
                 value={entity.initialVelocity.x}
                 unit="m/s"
                 disabled={disabled}
+                target={{
+                  type: 'entity',
+                  entityId: entity.id,
+                  property: 'body.initialVelocity.x',
+                }}
                 onCommit={(x) =>
                   replace(
                     { ...entity, initialVelocity: { ...entity.initialVelocity, x } },
@@ -651,6 +1049,11 @@ function EntityProperties({
                 value={entity.initialVelocity.y}
                 unit="m/s"
                 disabled={disabled}
+                target={{
+                  type: 'entity',
+                  entityId: entity.id,
+                  property: 'body.initialVelocity.y',
+                }}
                 onCommit={(y) =>
                   replace(
                     { ...entity, initialVelocity: { ...entity.initialVelocity, y } },
@@ -663,6 +1066,11 @@ function EntityProperties({
                 value={entity.initialAngularVelocityRad}
                 unit="rad/s"
                 disabled={disabled || !entity.rotationEnabled}
+                target={{
+                  type: 'entity',
+                  entityId: entity.id,
+                  property: 'body.initialAngularVelocityRad',
+                }}
                 onCommit={(initialAngularVelocityRad) =>
                   replace({ ...entity, initialAngularVelocityRad }, '修改初角速度')
                 }
@@ -710,6 +1118,11 @@ function EntityProperties({
                     unit="m"
                     min={0.001}
                     disabled={disabled}
+                    target={{
+                      type: 'entity',
+                      entityId: entity.id,
+                      property: 'ground.geometry.radius',
+                    }}
                     onCommit={(radius) => {
                       if (entity.kind !== 'ground' || entity.geometry.type !== 'arc') return
                       replace(
@@ -723,6 +1136,11 @@ function EntityProperties({
                     value={(entity.geometry.startRad * 180) / Math.PI}
                     unit="°"
                     disabled={disabled}
+                    target={{
+                      type: 'entity',
+                      entityId: entity.id,
+                      property: 'ground.geometry.startDegrees',
+                    }}
                     onCommit={(degrees) => {
                       if (entity.kind !== 'ground' || entity.geometry.type !== 'arc') return
                       replace(
@@ -739,6 +1157,11 @@ function EntityProperties({
                     value={(entity.geometry.endRad * 180) / Math.PI}
                     unit="°"
                     disabled={disabled}
+                    target={{
+                      type: 'entity',
+                      entityId: entity.id,
+                      property: 'ground.geometry.endDegrees',
+                    }}
                     onCommit={(degrees) => {
                       if (entity.kind !== 'ground' || entity.geometry.type !== 'arc') return
                       replace(
@@ -764,6 +1187,11 @@ function EntityProperties({
                         value={point.x}
                         unit="m"
                         disabled={disabled}
+                        target={{
+                          type: 'entity',
+                          entityId: entity.id,
+                          property: `ground.geometry.${pointKey}.x`,
+                        }}
                         onCommit={(x) => {
                           if (entity.kind !== 'ground' || entity.geometry.type !== 'cubicBezier')
                             return
@@ -785,6 +1213,11 @@ function EntityProperties({
                         value={point.y}
                         unit="m"
                         disabled={disabled}
+                        target={{
+                          type: 'entity',
+                          entityId: entity.id,
+                          property: `ground.geometry.${pointKey}.y`,
+                        }}
                         onCommit={(y) => {
                           if (entity.kind !== 'ground' || entity.geometry.type !== 'cubicBezier')
                             return
@@ -808,29 +1241,81 @@ function EntityProperties({
           {entity.kind === 'ground' && category === 'physics' ? (
             <>
               <PropertySubheading>接触材质</PropertySubheading>
-              <NumberProperty
+              <FormulaNumberProperty
                 label="摩擦系数"
                 value={entity.material.friction}
-                min={0}
-                max={5}
                 disabled={disabled}
-                onCommit={(friction) =>
-                  replace({ ...entity, material: { ...entity.material, friction } }, '修改地面摩擦')
-                }
+                target={{
+                  type: 'entity',
+                  entityId: entity.id,
+                  property: 'ground.material.friction',
+                }}
               />
-              <NumberProperty
+              <FormulaNumberProperty
                 label="弹性系数"
                 value={entity.material.restitution}
-                min={0}
-                max={1}
                 disabled={disabled}
-                onCommit={(restitution) =>
+                target={{
+                  type: 'entity',
+                  entityId: entity.id,
+                  property: 'ground.material.restitution',
+                }}
+              />
+              <PropertySubheading>传送带</PropertySubheading>
+              <ToggleProperty
+                label="启用传送带"
+                checked={entity.conveyor.enabled}
+                disabled={disabled}
+                onChange={(enabled) =>
                   replace(
-                    { ...entity, material: { ...entity.material, restitution } },
-                    '修改地面弹性',
+                    { ...entity, conveyor: { ...entity.conveyor, enabled } },
+                    enabled ? '启用传送带' : '关闭传送带',
                   )
                 }
               />
+              {entity.conveyor.enabled ? (
+                <>
+                  <label className={styles.editablePropertyRow}>
+                    <Gauge size={14} />
+                    <span>运行方向</span>
+                    <select
+                      aria-label="传送带方向"
+                      value={entity.conveyor.direction}
+                      disabled={disabled}
+                      onChange={(event) => {
+                        if (entity.kind !== 'ground') return
+                        replace(
+                          {
+                            ...entity,
+                            conveyor: {
+                              ...entity.conveyor,
+                              direction: event.target.value as 'forward' | 'reverse',
+                            },
+                          },
+                          '修改传送带方向',
+                        )
+                      }}
+                    >
+                      <option value="forward">起点 → 终点</option>
+                      <option value="reverse">终点 → 起点</option>
+                    </select>
+                  </label>
+                  <FormulaNumberProperty
+                    label="表面速度"
+                    value={entity.conveyor.speedMps}
+                    unit="m/s"
+                    disabled={disabled}
+                    target={{
+                      type: 'entity',
+                      entityId: entity.id,
+                      property: 'ground.conveyor.speedMps',
+                    }}
+                  />
+                  <div className={styles.readonlyCallout}>
+                    方向沿地面的起点与终点定义；只有摩擦接触会跟随传送带。
+                  </div>
+                </>
+              ) : null}
             </>
           ) : null}
 
@@ -854,7 +1339,42 @@ function EntityProperties({
                           : '无限范围'
                 }
               />
-              {entity.region.type === 'circle' ? (
+              {entity.region.type === 'rectangle' ? (
+                <>
+                  <NumberProperty
+                    label="范围宽度"
+                    value={entity.region.width}
+                    unit="m"
+                    min={0.001}
+                    disabled={disabled}
+                    target={{
+                      type: 'entity',
+                      entityId: entity.id,
+                      property: 'field.region.width',
+                    }}
+                    onCommit={(width) => {
+                      if (entity.kind !== 'field' || entity.region.type !== 'rectangle') return
+                      replace({ ...entity, region: { ...entity.region, width } }, '修改场范围宽度')
+                    }}
+                  />
+                  <NumberProperty
+                    label="范围高度"
+                    value={entity.region.height}
+                    unit="m"
+                    min={0.001}
+                    disabled={disabled}
+                    target={{
+                      type: 'entity',
+                      entityId: entity.id,
+                      property: 'field.region.height',
+                    }}
+                    onCommit={(height) => {
+                      if (entity.kind !== 'field' || entity.region.type !== 'rectangle') return
+                      replace({ ...entity, region: { ...entity.region, height } }, '修改场范围高度')
+                    }}
+                  />
+                </>
+              ) : entity.region.type === 'circle' ? (
                 <>
                   <NumberProperty
                     label="范围半径"
@@ -862,6 +1382,11 @@ function EntityProperties({
                     unit="m"
                     min={0.001}
                     disabled={disabled}
+                    target={{
+                      type: 'entity',
+                      entityId: entity.id,
+                      property: 'field.region.radius',
+                    }}
                     onCommit={(radius) => {
                       if (entity.kind !== 'field' || entity.region.type !== 'circle') return
                       replace({ ...entity, region: { ...entity.region, radius } }, '修改场范围半径')
@@ -872,6 +1397,11 @@ function EntityProperties({
                     value={(entity.region.startRad * 180) / Math.PI}
                     unit="°"
                     disabled={disabled}
+                    target={{
+                      type: 'entity',
+                      entityId: entity.id,
+                      property: 'field.region.startDegrees',
+                    }}
                     onCommit={(degrees) => {
                       if (entity.kind !== 'field' || entity.region.type !== 'circle') return
                       replace(
@@ -890,6 +1420,11 @@ function EntityProperties({
                     min={-360}
                     max={360}
                     disabled={disabled}
+                    target={{
+                      type: 'entity',
+                      entityId: entity.id,
+                      property: 'field.region.sweepDegrees',
+                    }}
                     onCommit={(degrees) => {
                       if (entity.kind !== 'field' || entity.region.type !== 'circle') return
                       replace(
@@ -926,6 +1461,7 @@ function EntityProperties({
                     value={entity.field.acceleration.x}
                     unit="m/s²"
                     disabled={disabled}
+                    target={{ type: 'entity', entityId: entity.id, property: 'field.gravity.x' }}
                     onCommit={(x) => {
                       if (entity.kind !== 'field' || entity.field.type !== 'uniformGravity') return
                       replace(
@@ -945,6 +1481,7 @@ function EntityProperties({
                     value={entity.field.acceleration.y}
                     unit="m/s²"
                     disabled={disabled}
+                    target={{ type: 'entity', entityId: entity.id, property: 'field.gravity.y' }}
                     onCommit={(y) => {
                       if (entity.kind !== 'field' || entity.field.type !== 'uniformGravity') return
                       replace(
@@ -959,39 +1496,72 @@ function EntityProperties({
                       )
                     }}
                   />
+                  <TimeExpressionProperty
+                    label="重力场强大小"
+                    value={fieldDefinitionMagnitude(entity.field)}
+                    definition={entity.field.magnitudeExpression}
+                    unit="m/s²"
+                    disabled={disabled}
+                    onCommit={(magnitude, magnitudeExpression) => {
+                      if (entity.kind !== 'field' || entity.field.type !== 'uniformGravity') return
+                      replace(
+                        {
+                          ...entity,
+                          field: fieldDefinitionWithExpression(
+                            entity.field,
+                            magnitude,
+                            magnitudeExpression,
+                          ),
+                        },
+                        '修改重力场强公式',
+                      )
+                    }}
+                  />
                 </>
               ) : null}
               {entity.field.type === 'uniformElectric' ? (
                 <>
-                  <NumberProperty
+                  <TimeExpressionProperty
                     label="电场强度 X"
                     value={entity.field.strength.x}
+                    definition={entity.field.componentExpressions?.x}
                     unit="N/C"
                     disabled={disabled}
-                    onCommit={(x) => {
+                    onCommit={(x, definition) => {
                       if (entity.kind !== 'field' || entity.field.type !== 'uniformElectric') return
                       replace(
                         {
                           ...entity,
-                          field: { ...entity.field, strength: { ...entity.field.strength, x } },
+                          field: electricFieldWithComponentExpression(
+                            entity.field,
+                            'x',
+                            x,
+                            definition,
+                          ),
                         },
-                        '修改电场',
+                        '修改电场 X 分量公式',
                       )
                     }}
                   />
-                  <NumberProperty
+                  <TimeExpressionProperty
                     label="电场强度 Y"
                     value={entity.field.strength.y}
+                    definition={entity.field.componentExpressions?.y}
                     unit="N/C"
                     disabled={disabled}
-                    onCommit={(y) => {
+                    onCommit={(y, definition) => {
                       if (entity.kind !== 'field' || entity.field.type !== 'uniformElectric') return
                       replace(
                         {
                           ...entity,
-                          field: { ...entity.field, strength: { ...entity.field.strength, y } },
+                          field: electricFieldWithComponentExpression(
+                            entity.field,
+                            'y',
+                            y,
+                            definition,
+                          ),
                         },
-                        '修改电场',
+                        '修改电场 Y 分量公式',
                       )
                     }}
                   />
@@ -1004,18 +1574,186 @@ function EntityProperties({
                     label="磁场方向"
                     value={entity.field.bzTesla >= 0 ? '⊙ 出屏' : '⊗ 入屏'}
                   />
-                  <NumberProperty
+                  <TimeExpressionProperty
                     label="磁感应强度 Bz"
                     value={entity.field.bzTesla}
+                    definition={entity.field.magnitudeExpression}
                     unit="T"
                     disabled={disabled}
-                    onCommit={(bzTesla) => {
+                    onCommit={(bzTesla, magnitudeExpression) => {
                       if (entity.kind !== 'field' || entity.field.type !== 'uniformMagnetic') return
-                      replace({ ...entity, field: { ...entity.field, bzTesla } }, '修改磁场')
+                      replace(
+                        {
+                          ...entity,
+                          field: fieldDefinitionWithExpression(
+                            entity.field,
+                            bzTesla,
+                            magnitudeExpression,
+                          ),
+                        },
+                        '修改磁场公式',
+                      )
                     }}
                   />
                 </>
               ) : null}
+            </>
+          ) : null}
+
+          {entity.kind === 'force' && category === 'geometry' ? (
+            <>
+              <PropertySubheading>锚定点</PropertySubheading>
+              <PropertyRow
+                icon={<Pin size={14} />}
+                label="目标物体"
+                value={
+                  allEntities.find((candidate) => candidate.id === entity.bodyId)?.name ??
+                  `布尔结果 ${entity.bodyId.slice(0, 8)}`
+                }
+              />
+              <NumberProperty
+                label="局部锚点 X"
+                value={entity.localAnchor.x}
+                unit="m"
+                disabled={disabled}
+                target={{ type: 'entity', entityId: entity.id, property: 'force.localAnchor.x' }}
+                onCommit={(x) =>
+                  replace({ ...entity, localAnchor: { ...entity.localAnchor, x } }, '修改力锚点')
+                }
+              />
+              <NumberProperty
+                label="局部锚点 Y"
+                value={entity.localAnchor.y}
+                unit="m"
+                disabled={disabled}
+                target={{ type: 'entity', entityId: entity.id, property: 'force.localAnchor.y' }}
+                onCommit={(y) =>
+                  replace({ ...entity, localAnchor: { ...entity.localAnchor, y } }, '修改力锚点')
+                }
+              />
+            </>
+          ) : null}
+
+          {entity.kind === 'force' && category === 'physics' ? (
+            <>
+              <PropertySubheading>力的定义</PropertySubheading>
+              <TimeExpressionProperty
+                label="力大小"
+                value={entity.magnitudeN}
+                definition={entity.magnitudeExpression}
+                unit="N"
+                disabled={disabled}
+                onCommit={(magnitudeN, magnitudeExpression) =>
+                  replace(
+                    forceWithMagnitudeExpression(entity, magnitudeN, magnitudeExpression),
+                    '修改力大小公式',
+                  )
+                }
+              />
+              <TimeExpressionProperty
+                label="力方向"
+                value={(entity.directionRad * 180) / Math.PI}
+                definition={entity.directionDegreesExpression}
+                unit="°"
+                disabled={disabled}
+                onCommit={(directionDegrees, directionDegreesExpression) =>
+                  replace(
+                    forceWithDirectionExpression(
+                      entity,
+                      directionDegrees,
+                      directionDegreesExpression,
+                    ),
+                    '修改力方向公式',
+                  )
+                }
+              />
+              <div className={styles.readonlyCallout}>
+                方向以世界坐标 X 轴正向为 0°；表达式以度为单位，可使用 t 和全局变量。
+              </div>
+            </>
+          ) : null}
+
+          {entity.kind === 'measurement' && category === 'geometry' ? (
+            <>
+              <PropertySubheading>测量结果</PropertySubheading>
+              {entity.measurement.type === 'marker' ? (
+                <>
+                  <ColorProperty
+                    label="记号颜色"
+                    value={entity.measurement.color}
+                    disabled={disabled}
+                    onChange={(color) => {
+                      if (entity.measurement.type !== 'marker') return
+                      replace(
+                        {
+                          ...entity,
+                          measurement: { ...entity.measurement, color },
+                        },
+                        '修改记号颜色',
+                      )
+                    }}
+                  />
+                  <NumberProperty
+                    label="记号线宽"
+                    value={entity.measurement.lineWidthM}
+                    unit="m"
+                    min={0.001}
+                    max={1}
+                    disabled={disabled}
+                    target={{
+                      type: 'entity',
+                      entityId: entity.id,
+                      property: 'measurement.marker.lineWidthM',
+                    }}
+                    onCommit={(lineWidthM) => {
+                      if (entity.measurement.type !== 'marker') return
+                      replace(
+                        {
+                          ...entity,
+                          measurement: { ...entity.measurement, lineWidthM },
+                        },
+                        '修改记号线宽',
+                      )
+                    }}
+                  />
+                  <PropertyRow
+                    icon={<Gauge size={14} />}
+                    label="路径点"
+                    value={String(entity.measurement.points.length)}
+                  />
+                </>
+              ) : entity.measurement.type === 'ruler' ? (
+                <>
+                  <PropertyRow
+                    icon={<Gauge size={14} />}
+                    label="距离"
+                    value={`${formatNumber(distance(entity.measurement.a, entity.measurement.b), 6)} m`}
+                  />
+                  <PropertyRow
+                    icon={<Pin size={14} />}
+                    label="A 点"
+                    value={`(${formatNumber(entity.measurement.a.x, 5)}, ${formatNumber(entity.measurement.a.y, 5)}) m`}
+                  />
+                  <PropertyRow
+                    icon={<Pin size={14} />}
+                    label="B 点"
+                    value={`(${formatNumber(entity.measurement.b.x, 5)}, ${formatNumber(entity.measurement.b.y, 5)}) m`}
+                  />
+                </>
+              ) : (
+                <PropertyRow
+                  icon={<Gauge size={14} />}
+                  label="夹角"
+                  value={`${formatNumber(
+                    angleBetweenDegrees(
+                      entity.measurement.a,
+                      entity.measurement.vertex,
+                      entity.measurement.b,
+                    ),
+                    6,
+                  )}°`}
+                />
+              )}
             </>
           ) : null}
 
@@ -1074,15 +1812,57 @@ function EntityProperties({
             <>
               <PropertySubheading>发射参数</PropertySubheading>
               {entity.shape.type === 'point' ? (
-                <NumberProperty
-                  label="发射方向"
-                  value={(entity.directionRad * 180) / Math.PI}
-                  unit="°"
-                  disabled={disabled}
-                  onCommit={(deg) =>
-                    replace({ ...entity, directionRad: (deg * Math.PI) / 180 }, '修改发射方向')
-                  }
-                />
+                <>
+                  <NumberProperty
+                    label="发射方向"
+                    value={(entity.directionRad * 180) / Math.PI}
+                    unit="°"
+                    disabled={disabled}
+                    target={{
+                      type: 'entity',
+                      entityId: entity.id,
+                      property: 'particleSource.directionDegrees',
+                    }}
+                    onCommit={(deg) =>
+                      replace({ ...entity, directionRad: (deg * Math.PI) / 180 }, '修改发射方向')
+                    }
+                  />
+                  <NumberProperty
+                    label="发射角范围"
+                    value={(entity.spreadRad * 180) / Math.PI}
+                    unit="°"
+                    min={0}
+                    max={360}
+                    disabled={disabled}
+                    target={{
+                      type: 'entity',
+                      entityId: entity.id,
+                      property: 'particleSource.spreadDegrees',
+                    }}
+                    onCommit={(spreadDeg) =>
+                      replace(
+                        { ...entity, spreadRad: (spreadDeg * Math.PI) / 180 },
+                        '修改发射角范围',
+                      )
+                    }
+                  />
+                  <NumberProperty
+                    label="角度密度"
+                    value={entity.densityPerDegree}
+                    unit="个/度"
+                    min={0.01}
+                    max={10}
+                    disabled={disabled}
+                    target={{
+                      type: 'entity',
+                      entityId: entity.id,
+                      property: 'particleSource.densityPerDegree',
+                    }}
+                    onCommit={(densityPerDegree) =>
+                      replace({ ...entity, densityPerDegree }, '修改点源角度密度')
+                    }
+                  />
+                </>
               ) : (
                 <ToggleProperty
                   label="翻转发射侧"
@@ -1091,29 +1871,124 @@ function EntityProperties({
                   onChange={(flipEmission) => replace({ ...entity, flipEmission }, '修改发射侧')}
                 />
               )}
-              <NumberProperty
+              <FormulaNumberProperty
                 label="发射速率"
                 value={entity.speedMps}
                 unit="m/s"
-                min={0}
                 disabled={disabled}
-                onCommit={(speedMps) => replace({ ...entity, speedMps }, '修改发射速率')}
+                target={{
+                  type: 'entity',
+                  entityId: entity.id,
+                  property: 'particleSource.speedMps',
+                }}
               />
+              <ToggleProperty
+                label="连续发射"
+                checked={entity.continuousEmission.enabled}
+                disabled={disabled}
+                onChange={(enabled) =>
+                  replace(
+                    {
+                      ...entity,
+                      continuousEmission: { ...entity.continuousEmission, enabled },
+                    },
+                    enabled ? '开启连续发射' : '关闭连续发射',
+                  )
+                }
+              />
+              {entity.continuousEmission.enabled ? (
+                <>
+                  <ToggleProperty
+                    label="同时发射"
+                    checked={entity.continuousEmission.simultaneous}
+                    disabled={disabled}
+                    onChange={(simultaneous) =>
+                      replace(
+                        {
+                          ...entity,
+                          continuousEmission: {
+                            ...entity.continuousEmission,
+                            simultaneous,
+                          },
+                        },
+                        simultaneous ? '开启同时发射' : '关闭同时发射',
+                      )
+                    }
+                  />
+                  <NumberProperty
+                    label="发射间隔"
+                    value={entity.continuousEmission.intervalSeconds}
+                    unit="s"
+                    min={1 / 120}
+                    max={3600}
+                    disabled={disabled}
+                    target={{
+                      type: 'entity',
+                      entityId: entity.id,
+                      property: 'particleSource.continuous.intervalSeconds',
+                    }}
+                    onCommit={(intervalSeconds) =>
+                      replace(
+                        {
+                          ...entity,
+                          continuousEmission: {
+                            ...entity.continuousEmission,
+                            intervalSeconds,
+                          },
+                        },
+                        '修改连续发射间隔',
+                      )
+                    }
+                  />
+                  <NumberProperty
+                    label="粒子寿命"
+                    value={entity.continuousEmission.lifetimeSeconds}
+                    unit="s"
+                    min={1 / 120}
+                    max={86400}
+                    disabled={disabled}
+                    target={{
+                      type: 'entity',
+                      entityId: entity.id,
+                      property: 'particleSource.continuous.lifetimeSeconds',
+                    }}
+                    onCommit={(lifetimeSeconds) =>
+                      replace(
+                        {
+                          ...entity,
+                          continuousEmission: {
+                            ...entity.continuousEmission,
+                            lifetimeSeconds,
+                          },
+                        },
+                        '修改连续粒子寿命',
+                      )
+                    }
+                  />
+                </>
+              ) : null}
               <PropertySubheading>离子属性</PropertySubheading>
-              <NumberProperty
+              <FormulaNumberProperty
                 label="离子电荷量"
                 value={entity.chargeC}
                 unit="C"
                 disabled={disabled}
-                onCommit={(chargeC) => replace({ ...entity, chargeC }, '修改离子电荷量')}
+                target={{
+                  type: 'entity',
+                  entityId: entity.id,
+                  property: 'particleSource.chargeC',
+                }}
               />
-              <NumberProperty
+              <FormulaNumberProperty
                 label="离子质量"
                 value={entity.massKg}
                 unit="kg"
-                min={1e-6}
                 disabled={disabled}
-                onCommit={(massKg) => replace({ ...entity, massKg }, '修改离子质量')}
+                target={{
+                  type: 'entity',
+                  entityId: entity.id,
+                  property: 'particleSource.massKg',
+                }}
               />
               <ToggleProperty
                 label="受物体库仑力"
@@ -1151,6 +2026,7 @@ function EntityProperties({
                   unit="m"
                   min={0.001}
                   disabled={disabled}
+                  target={{ type: 'entity', entityId: entity.id, property: 'connector.radiusM' }}
                   onCommit={(radiusM) => replace({ ...entity, radiusM }, '修改连接体半径')}
                 />
               ) : null}
@@ -1167,6 +2043,7 @@ function EntityProperties({
                   disabled={
                     disabled || (entity.connector.type === 'rope' && !entity.collisionEnabled)
                   }
+                  target={{ type: 'entity', entityId: entity.id, property: 'connector.massKg' }}
                   onCommit={(massKg) => replace({ ...entity, massKg }, '修改连接体质量')}
                 />
               ) : null}
@@ -1177,6 +2054,11 @@ function EntityProperties({
                     value={entity.material.friction}
                     min={0}
                     disabled={disabled}
+                    target={{
+                      type: 'entity',
+                      entityId: entity.id,
+                      property: 'connector.material.friction',
+                    }}
                     onCommit={(friction) =>
                       replace(
                         { ...entity, material: { ...entity.material, friction } },
@@ -1190,6 +2072,11 @@ function EntityProperties({
                     min={0}
                     max={1}
                     disabled={disabled}
+                    target={{
+                      type: 'entity',
+                      entityId: entity.id,
+                      property: 'connector.material.restitution',
+                    }}
                     onCommit={(restitution) =>
                       replace(
                         { ...entity, material: { ...entity.material, restitution } },
@@ -1224,6 +2111,7 @@ function EntityProperties({
                       ) ?? 0,
                     )}
                     disabled={disabled}
+                    target={{ type: 'entity', entityId: entity.id, property: 'connector.length' }}
                     onCommit={(maxLength) => {
                       if (entity.kind !== 'connector' || entity.connector.type !== 'rope') return
                       replace(
@@ -1256,6 +2144,7 @@ function EntityProperties({
                     unit="m"
                     min={0.001}
                     disabled={disabled}
+                    target={{ type: 'entity', entityId: entity.id, property: 'connector.length' }}
                     onCommit={(length) => {
                       if (entity.kind !== 'connector' || entity.connector.type !== 'rod') return
                       replace({ ...entity, connector: { ...entity.connector, length } }, '修改杆长')
@@ -1313,6 +2202,7 @@ function EntityProperties({
                     unit="m"
                     min={0.001}
                     disabled={disabled}
+                    target={{ type: 'entity', entityId: entity.id, property: 'connector.length' }}
                     onCommit={(restLength) => {
                       if (entity.kind !== 'connector' || entity.connector.type !== 'spring') return
                       replace(
@@ -1327,6 +2217,11 @@ function EntityProperties({
                     unit="N/m"
                     min={0}
                     disabled={disabled}
+                    target={{
+                      type: 'entity',
+                      entityId: entity.id,
+                      property: 'connector.stiffness',
+                    }}
                     onCommit={(stiffness) => {
                       if (entity.kind !== 'connector' || entity.connector.type !== 'spring') return
                       replace(
@@ -1341,6 +2236,7 @@ function EntityProperties({
                     unit="N·s/m"
                     min={0}
                     disabled={disabled}
+                    target={{ type: 'entity', entityId: entity.id, property: 'connector.damping' }}
                     onCommit={(damping) => {
                       if (entity.kind !== 'connector' || entity.connector.type !== 'spring') return
                       replace(
@@ -1447,6 +2343,11 @@ function EntityProperties({
                           value={endpoint.localAnchor.x}
                           unit="m"
                           disabled={disabled}
+                          target={{
+                            type: 'entity',
+                            entityId: entity.id,
+                            property: `connector.endpoint.${endpointKey}.localAnchor.x`,
+                          }}
                           onCommit={(x) => commitBodyAnchor({ ...endpoint.localAnchor, x })}
                         />
                         <NumberProperty
@@ -1454,6 +2355,11 @@ function EntityProperties({
                           value={endpoint.localAnchor.y}
                           unit="m"
                           disabled={disabled}
+                          target={{
+                            type: 'entity',
+                            entityId: entity.id,
+                            property: `connector.endpoint.${endpointKey}.localAnchor.y`,
+                          }}
                           onCommit={(y) => commitBodyAnchor({ ...endpoint.localAnchor, y })}
                         />
                       </>
@@ -1464,6 +2370,11 @@ function EntityProperties({
                           value={endpoint.position.x}
                           unit="m"
                           disabled={disabled}
+                          target={{
+                            type: 'entity',
+                            entityId: entity.id,
+                            property: `connector.endpoint.${endpointKey}.position.x`,
+                          }}
                           onCommit={(x) => {
                             replace(
                               {
@@ -1482,6 +2393,11 @@ function EntityProperties({
                           value={endpoint.position.y}
                           unit="m"
                           disabled={disabled}
+                          target={{
+                            type: 'entity',
+                            entityId: entity.id,
+                            property: `connector.endpoint.${endpointKey}.position.y`,
+                          }}
                           onCommit={(y) => {
                             replace(
                               {
@@ -1524,6 +2440,11 @@ function EntityProperties({
                         min={0}
                         max={100}
                         disabled={disabled}
+                        target={{
+                          type: 'entity',
+                          entityId: entity.id,
+                          property: `connector.endpoint.${endpointKey}.pathPercent`,
+                        }}
                         onCommit={(value) =>
                           replace(
                             {
@@ -1625,6 +2546,7 @@ function BooleanResultProperties({
             }
           >
             <option value="union">加法（并集）</option>
+            <option value="intersection">交集（共同区域）</option>
             <option value="difference">减法（上减下）</option>
           </select>
         </label>
@@ -1657,10 +2579,123 @@ function BooleanResultProperties({
       )
     }
     if (result.kind === 'field') {
+      const field =
+        layer.fieldDistribution.mode === 'uniform'
+          ? layer.fieldDistribution.field
+          : result.regions[0]?.field
+      const replaceUniformField = (nextField: NonNullable<typeof field>) =>
+        replaceLayer(
+          { ...layer, fieldDistribution: { mode: 'uniform', field: nextField } },
+          '修改布尔结果场强',
+        )
       return (
         <section className={styles.propertyGroup}>
           <h3>派生场</h3>
           <PropertyRow icon={<Gauge size={14} />} label="场类型" value={result.fieldType} />
+          {field ? (
+            <ToggleProperty
+              label="统一场强"
+              checked={layer.fieldDistribution.mode === 'uniform'}
+              disabled={disabled}
+              onChange={(uniform) =>
+                replaceLayer(
+                  {
+                    ...layer,
+                    fieldDistribution: uniform ? { mode: 'uniform', field } : { mode: 'source' },
+                  },
+                  uniform ? '启用布尔统一场强' : '恢复布尔来源场强',
+                )
+              }
+            />
+          ) : null}
+          {field?.type === 'uniformGravity' ? (
+            <>
+              <NumberProperty
+                label="重力场强 X"
+                value={field.acceleration.x}
+                unit="m/s²"
+                disabled={disabled}
+                commitWhenEdited={layer.fieldDistribution.mode === 'source'}
+                target={{
+                  type: 'boolean',
+                  nodeId: layer.id,
+                  property: 'boolean.field.gravity.x',
+                }}
+                onCommit={(x) =>
+                  replaceUniformField({
+                    ...field,
+                    acceleration: { ...field.acceleration, x },
+                  })
+                }
+              />
+              <NumberProperty
+                label="重力场强 Y"
+                value={field.acceleration.y}
+                unit="m/s²"
+                disabled={disabled}
+                commitWhenEdited={layer.fieldDistribution.mode === 'source'}
+                target={{
+                  type: 'boolean',
+                  nodeId: layer.id,
+                  property: 'boolean.field.gravity.y',
+                }}
+                onCommit={(y) =>
+                  replaceUniformField({
+                    ...field,
+                    acceleration: { ...field.acceleration, y },
+                  })
+                }
+              />
+              <TimeExpressionProperty
+                label="重力场强大小"
+                value={fieldDefinitionMagnitude(field)}
+                definition={field.magnitudeExpression}
+                unit="m/s²"
+                disabled={disabled}
+                onCommit={(magnitude, definition) =>
+                  replaceUniformField(fieldDefinitionWithExpression(field, magnitude, definition))
+                }
+              />
+            </>
+          ) : field?.type === 'uniformElectric' ? (
+            <>
+              <TimeExpressionProperty
+                label="电场强度 X"
+                value={field.strength.x}
+                definition={field.componentExpressions?.x}
+                unit="N/C"
+                disabled={disabled}
+                onCommit={(x, definition) =>
+                  replaceUniformField(
+                    electricFieldWithComponentExpression(field, 'x', x, definition),
+                  )
+                }
+              />
+              <TimeExpressionProperty
+                label="电场强度 Y"
+                value={field.strength.y}
+                definition={field.componentExpressions?.y}
+                unit="N/C"
+                disabled={disabled}
+                onCommit={(y, definition) =>
+                  replaceUniformField(
+                    electricFieldWithComponentExpression(field, 'y', y, definition),
+                  )
+                }
+              />
+            </>
+          ) : field?.type === 'uniformMagnetic' ? (
+            <TimeExpressionProperty
+              label="磁感应强度 Bz"
+              value={field.bzTesla}
+              definition={field.magnitudeExpression}
+              unit="T"
+              disabled={disabled}
+              onCommit={(bzTesla, definition) =>
+                replaceUniformField(fieldDefinitionWithExpression(field, bzTesla, definition))
+              }
+            />
+          ) : null}
           <PropertyRow
             icon={<Gauge size={14} />}
             label="有效面积"
@@ -1680,60 +2715,31 @@ function BooleanResultProperties({
     return (
       <section className={styles.propertyGroup}>
         <h3>结果物理量</h3>
-        <NumberProperty
+        <FormulaNumberProperty
           label="总质量"
           value={result.massKg}
+          target={{ type: 'boolean', nodeId: layer.id, property: 'boolean.totalMassKg' }}
           unit="kg"
-          min={1e-9}
           disabled={disabled}
-          commitWhenEdited={layer.massDistribution.mode === 'source'}
-          onCommit={(totalMassKg) =>
-            replaceLayer(
-              { ...layer, massDistribution: { mode: 'uniform', totalMassKg } },
-              '修改布尔总质量',
-            )
-          }
         />
-        <NumberProperty
+        <FormulaNumberProperty
           label="总电荷"
           value={result.chargeC}
+          target={{ type: 'boolean', nodeId: layer.id, property: 'boolean.totalChargeC' }}
           unit="C"
           disabled={disabled}
-          commitWhenEdited={layer.chargeDistribution.mode === 'source'}
-          onCommit={(totalChargeC) =>
-            replaceLayer(
-              { ...layer, chargeDistribution: { mode: 'uniform', totalChargeC } },
-              '修改布尔总电荷',
-            )
-          }
         />
-        <NumberProperty
+        <FormulaNumberProperty
           label="摩擦系数"
           value={result.materialRegions[0]?.material.friction ?? 0}
-          min={0}
-          max={5}
+          target={{ type: 'boolean', nodeId: layer.id, property: 'boolean.friction' }}
           disabled={disabled}
-          commitWhenEdited={layer.frictionDistribution.mode === 'source'}
-          onCommit={(friction) =>
-            replaceLayer(
-              { ...layer, frictionDistribution: { mode: 'uniform', value: friction } },
-              '修改布尔结果摩擦系数',
-            )
-          }
         />
-        <NumberProperty
+        <FormulaNumberProperty
           label="弹性系数"
           value={result.materialRegions[0]?.material.restitution ?? 0}
-          min={0}
-          max={1}
+          target={{ type: 'boolean', nodeId: layer.id, property: 'boolean.restitution' }}
           disabled={disabled}
-          commitWhenEdited={layer.restitutionDistribution.mode === 'source'}
-          onCommit={(restitution) =>
-            replaceLayer(
-              { ...layer, restitutionDistribution: { mode: 'uniform', value: restitution } },
-              '修改布尔结果弹性系数',
-            )
-          }
         />
         <div className={styles.readonlyCallout}>
           修改质量、电荷、摩擦或弹性后，仅对应项目改为按整个布尔结果统一处理。
@@ -1789,6 +2795,11 @@ function BooleanResultProperties({
           value={result.centerOfMass.x}
           unit="m"
           disabled={disabled}
+          target={{
+            type: 'boolean',
+            nodeId: layer.id,
+            property: 'boolean.transform.position.x',
+          }}
           onCommit={(x) =>
             replaceBodyTransform(result, { x, y: result.centerOfMass.y }, result.angleRad)
           }
@@ -1798,6 +2809,11 @@ function BooleanResultProperties({
           value={result.centerOfMass.y}
           unit="m"
           disabled={disabled}
+          target={{
+            type: 'boolean',
+            nodeId: layer.id,
+            property: 'boolean.transform.position.y',
+          }}
           onCommit={(y) =>
             replaceBodyTransform(result, { x: result.centerOfMass.x, y }, result.angleRad)
           }
@@ -1807,6 +2823,11 @@ function BooleanResultProperties({
           value={(result.angleRad * 180) / Math.PI}
           unit="°"
           disabled={disabled}
+          target={{
+            type: 'boolean',
+            nodeId: layer.id,
+            property: 'boolean.transform.angleDegrees',
+          }}
           onCommit={(angleDeg) =>
             replaceBodyTransform(result, result.centerOfMass, (angleDeg * Math.PI) / 180)
           }
@@ -1828,6 +2849,11 @@ function BooleanResultProperties({
           unit="m/s"
           disabled={disabled}
           commitWhenEdited={layer.initialVelocity.mode === 'source'}
+          target={{
+            type: 'boolean',
+            nodeId: layer.id,
+            property: 'boolean.initialVelocity.x',
+          }}
           onCommit={(x) =>
             replaceLayer(
               {
@@ -1847,6 +2873,11 @@ function BooleanResultProperties({
           unit="m/s"
           disabled={disabled}
           commitWhenEdited={layer.initialVelocity.mode === 'source'}
+          target={{
+            type: 'boolean',
+            nodeId: layer.id,
+            property: 'boolean.initialVelocity.y',
+          }}
           onCommit={(y) =>
             replaceLayer(
               {
@@ -1866,6 +2897,11 @@ function BooleanResultProperties({
           unit="rad/s"
           disabled={disabled}
           commitWhenEdited={layer.initialAngularVelocity.mode === 'source'}
+          target={{
+            type: 'boolean',
+            nodeId: layer.id,
+            property: 'boolean.initialAngularVelocityRad',
+          }}
           onCommit={(valueRadPerSecond) =>
             replaceLayer(
               {
@@ -2022,7 +3058,7 @@ export function InspectorPanel({ embedded = false }: { embedded?: boolean }) {
               key={selectedEntity.id}
               entity={selectedEntity}
               disabled={
-                runtimeLocked ||
+                (runtimeLocked && selectedEntity.kind !== 'measurement') ||
                 selectedEntity.locked ||
                 isTreeItemEffectivelyLocked(scene.rootItems, selectedEntity.id)
               }
@@ -2044,10 +3080,41 @@ export function InspectorPanel({ embedded = false }: { embedded?: boolean }) {
                 label="固定步长"
                 value={`1 / ${Math.round(1 / scene.settings.fixedTimeStep)} s`}
               />
-              <PropertyRow
-                icon={<Grid2X2 size={14} />}
+              <FormulaNumberProperty
                 label="主网格"
-                value={`${scene.settings.gridStep} m`}
+                value={scene.settings.gridStep}
+                unit="m"
+                min={Number.EPSILON}
+                disabled={runtimeLocked}
+                target={{ type: 'scene', property: 'settings.gridStep' }}
+              />
+              <FormulaNumberProperty
+                label="吸附步长"
+                value={scene.settings.snapStep}
+                unit="m"
+                min={Number.EPSILON}
+                disabled={runtimeLocked}
+                target={{ type: 'scene', property: 'settings.snapStep' }}
+              />
+              <FormulaNumberProperty
+                label="记录频率"
+                value={scene.settings.recordingSampleRate}
+                unit="Hz"
+                min={1}
+                max={120}
+                step={1}
+                disabled={runtimeLocked}
+                target={{ type: 'scene', property: 'settings.recordingSampleRate' }}
+              />
+              <FormulaNumberProperty
+                label="记录时长"
+                value={scene.settings.recordingDurationSeconds}
+                unit="s"
+                min={1}
+                max={3600}
+                step={1}
+                disabled={runtimeLocked}
+                target={{ type: 'scene', property: 'settings.recordingDurationSeconds' }}
               />
             </section>
           ) : (

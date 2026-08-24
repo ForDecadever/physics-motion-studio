@@ -1,6 +1,6 @@
 [package]
 name = "physics-motion-studio"
-version = "1.5.4"
+version = "1.6.2"
 description = "A two-dimensional physics motion editor and simulator"
 authors = ["ForDecadever"]
 edition = "2021"

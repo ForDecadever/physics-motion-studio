@@ -1,7 +1,7 @@
 {
   "name": "motion-studio",
   "private": true,
-  "version": "1.5.4",
+  "version": "1.6.2",
   "type": "module",
   "packageManager": "pnpm@11.9.0",
   "engines": {
@@ -15,14 +15,12 @@
     "desktop:build": "tauri build --target x86_64-pc-windows-msvc",
     "typecheck": "tsc -b --pretty false",
     "lint": "eslint .",
-    "format": "prettier --write \"src/**/*.{ts,tsx,css}\" \"e2e/**/*.ts\" \"scripts/**/*.mjs\" \"*.{js,json,ts}\"",
-    "format:check": "prettier --check \"src/**/*.{ts,tsx,css}\" \"e2e/**/*.ts\" \"scripts/**/*.mjs\" \"*.{js,json,ts}\"",
+    "format": "prettier --write \"src/**/*.{ts,tsx,css}\" \"*.{js,json,ts}\"",
+    "format:check": "prettier --check \"src/**/*.{ts,tsx,css}\" \"*.{js,json,ts}\"",
     "test": "vitest run",
     "test:watch": "vitest",
     "benchmark": "vitest bench --run --no-file-parallelism",
-    "e2e:install": "playwright install chromium",
-    "e2e": "node scripts/run-e2e.mjs",
-    "e2e:update": "node scripts/run-e2e.mjs --update-snapshots",
+    "benchmark:long": "vitest run --config vitest.long.config.ts --no-file-parallelism",
     "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm build"
   },
   "dependencies": {
@@ -41,7 +39,6 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@playwright/test": "^1.61.1",
     "@tauri-apps/cli": "^2.11.4",
     "@types/node": "^26.1.1",
     "@types/react": "^19.2.17",

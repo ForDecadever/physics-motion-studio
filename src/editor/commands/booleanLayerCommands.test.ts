@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { createEmptyScene } from '../../scene/model/createEmptyScene'
-import { createBall, createBlock } from '../../scene/model/entityFactories'
+import { createBall, createBlock, createForce } from '../../scene/model/entityFactories'
 import { findBooleanNode, sceneTreeItemTargetId } from '../../scene/model/booleanLayerGraph'
 import {
   createAddBooleanOperandCommand,
@@ -13,6 +13,7 @@ import {
   createReplaceBooleanNodeCommand,
   createSwapBooleanOperandsCommand,
 } from './booleanLayerCommands'
+import { setPropertyExpression } from '../../scene/model/propertyExpressions'
 
 function sceneWithTwoBodies() {
   const scene = createEmptyScene()
@@ -120,6 +121,28 @@ describe('场景树布尔命令', () => {
     expect(command.undo(dissolved)).toEqual(combined)
   })
 
+  it('组合与解散刚体时保持外加力的世界锚点并重映射目标', () => {
+    const { scene, upper, lower } = sceneWithTwoBodies()
+    const force = createForce('', upper.id, { x: 0.5, y: -0.25 }, 1)
+    scene.entities.push(force)
+    const created = createBooleanLayerCommand(scene, 'union', [upper.id, lower.id])
+    const combined = created.command.execute(scene)
+    const combinedForce = combined.entities.find((entity) => entity.id === force.id)
+
+    expect(combinedForce?.kind).toBe('force')
+    expect(combinedForce?.kind === 'force' && combinedForce.bodyId).toBe(created.resultId)
+
+    const command = createDissolveBooleanLayerCommand(combined, created.nodeId)!
+    const dissolved = command.execute(combined)
+    const dissolvedForce = dissolved.entities.find((entity) => entity.id === force.id)
+    expect(dissolvedForce).toMatchObject({
+      kind: 'force',
+      bodyId: upper.id,
+      localAnchor: { x: 0.5, y: -0.25 },
+    })
+    expect(command.undo(dissolved)).toEqual(combined)
+  })
+
   it('质量覆盖是一条独立可撤销命令', () => {
     const { scene, upper, lower } = sceneWithTwoBodies()
     const created = createBooleanLayerCommand(scene, 'union', [upper.id, lower.id])
@@ -134,5 +157,28 @@ describe('场景树布尔命令', () => {
       { mode: 'uniform', totalMassKg: 20 },
     )
     expect(command.undo(command.execute(combined))).toEqual(combined)
+  })
+
+  it('直接修改布尔数值覆盖会解除对应公式，撤销后恢复', () => {
+    const { scene, upper, lower } = sceneWithTwoBodies()
+    scene.globalVariables = [{ name: 'a', expression: '10', value: 10 }]
+    const created = createBooleanLayerCommand(scene, 'union', [upper.id, lower.id])
+    const combined = created.command.execute(scene)
+    const bound = setPropertyExpression(
+      combined,
+      { type: 'boolean', nodeId: created.nodeId, property: 'boolean.totalMassKg' },
+      '2a',
+    )
+    const node = findBooleanNode(bound.rootItems, created.nodeId)
+    if (!node) throw new Error('测试布尔节点无效')
+    const command = createReplaceBooleanNodeCommand(
+      bound,
+      { ...node, massDistribution: { mode: 'uniform', totalMassKg: 30 } },
+      '修改布尔总质量',
+    )
+    const changed = command.execute(bound)
+
+    expect(changed.propertyExpressions).toEqual([])
+    expect(command.undo(changed)).toEqual(bound)
   })
 })

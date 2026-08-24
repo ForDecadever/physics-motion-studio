@@ -454,12 +454,14 @@ export function GifExportDialog({
     status.kind === 'blocked'
       ? status.reason === 'body-limit'
         ? `当前有 ${status.bodyCount} 个动态物体，GIF 最多记录 ${status.maxBodies} 个。请减少物体并重置模拟。`
-        : status.reason === 'connector-point-limit'
-          ? `当前有 ${status.pointCount} 个运行时连接器节点，GIF 最多记录 ${status.maxPoints} 个。请减少带质量或带碰撞的连接器并重置模拟。`
-          : `当前有 ${status.ionCount} 个粒子源离子，GIF 最多记录 ${status.maxIons} 个。请缩短线源或减少粒子源并重置模拟。`
+        : `当前有 ${status.pointCount} 个运行时连接器节点，GIF 最多记录 ${status.maxPoints} 个。请减少带质量或带碰撞的连接器并重置模拟。`
       : status.sampleCount < 2
         ? '还没有足够的运动记录。请关闭窗口，播放或单步运行模拟后再试。'
         : null
+  const historyNotice =
+    status.kind === 'ready' && status.historyTruncated
+      ? `粒子记录已达到 ${Math.round(status.telemetryBudgetBytes / 1024 / 1024)} MiB 遥测预算，最旧记录已被淘汰；当前可导出 ${status.startTime.toFixed(2)}～${status.endTime.toFixed(2)} s。`
+      : null
 
   return (
     <dialog
@@ -821,6 +823,7 @@ export function GifExportDialog({
           </section>
 
           {statusMessage ? <div className={styles.warning}>{statusMessage}</div> : null}
+          {historyNotice ? <div className={styles.warning}>{historyNotice}</div> : null}
           {load.message ? <div className={styles.warning}>{load.message}</div> : null}
           {errorMessage ? <div className={styles.error}>{errorMessage}</div> : null}
 

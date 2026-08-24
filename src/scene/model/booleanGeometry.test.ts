@@ -1,18 +1,19 @@
 import { describe, expect, it } from 'vitest'
 
 import { createEmptyScene } from './createEmptyScene'
-import { createBall, createBlock } from './entityFactories'
+import { createBall, createBlock, createGravityField } from './entityFactories'
 import {
   pointInBooleanGeometry,
   polygonMetrics,
   resolveBooleanScene,
   type ResolvedBooleanBody,
+  type ResolvedBooleanField,
 } from './booleanGeometry'
-import type { BodyEntity, BooleanNode, SceneDocument, SceneTreeItem } from './types'
+import type { BodyEntity, BooleanNode, SceneDocument, SceneEntity, SceneTreeItem } from './types'
 
 const uuid = (suffix: number) => `00000000-0000-4000-8000-${String(suffix).padStart(12, '0')}`
 
-function entityItem(entity: BodyEntity): SceneTreeItem {
+function entityItem(entity: SceneEntity): SceneTreeItem {
   return { kind: 'entity', entityId: entity.id }
 }
 
@@ -25,7 +26,8 @@ function booleanNode(
     kind: 'boolean',
     id: uuid(suffix),
     resultId: uuid(suffix + 1),
-    name: operation === 'union' ? '布尔加法' : '布尔减法',
+    name:
+      operation === 'union' ? '布尔加法' : operation === 'intersection' ? '布尔交集' : '布尔减法',
     visible: true,
     locked: false,
     operation,
@@ -35,6 +37,7 @@ function booleanNode(
     continuousCollisionDetection: false,
     massDistribution: { mode: 'source' },
     chargeDistribution: { mode: 'source' },
+    fieldDistribution: { mode: 'source' },
     frictionDistribution: { mode: 'source' },
     restitutionDistribution: { mode: 'source' },
     initialVelocity: { mode: 'source' },
@@ -90,6 +93,49 @@ function oldFloat32AreaCheckWouldReject(result: ResolvedBooleanBody): boolean {
 }
 
 describe('布尔几何和属性区域', () => {
+  it('交集只保留共同区域并采用上方来源属性', () => {
+    const upper = {
+      ...createBlock('', { x: 0, y: 0 }, 2, 2, 1),
+      massKg: 4,
+      material: { friction: 0.2, restitution: 0.3 },
+    }
+    const lower = {
+      ...createBlock('', { x: 1, y: 0 }, 2, 2, 2),
+      massKg: 20,
+      material: { friction: 0.8, restitution: 0.1 },
+    }
+    const result = resolvedBody(bodyScene('intersection', upper, lower).scene)
+
+    expect(polygonMetrics(result.geometry).area).toBeCloseTo(2, 10)
+    expect(result.massKg).toBeCloseTo(2, 10)
+    expect(result.materialRegions).toHaveLength(1)
+    expect(result.materialRegions[0]?.material).toEqual(upper.material)
+    expect(result.materialRegions[0]?.color).toBe(upper.color)
+  })
+
+  it('场布尔覆盖场强后在整个真实结果区域使用同一个均匀场', () => {
+    const scene = createEmptyScene()
+    const upper = createGravityField('', { x: 0, y: 0 }, 2, 2, 1)
+    const lower = createGravityField('', { x: 1, y: 0 }, 2, 2, 2)
+    const node = booleanNode('intersection', [entityItem(upper), entityItem(lower)])
+    node.fieldDistribution = {
+      mode: 'uniform',
+      field: { type: 'uniformGravity', acceleration: { x: 3, y: -4 } },
+    }
+    scene.entities = [upper, lower]
+    scene.rootItems = [node]
+
+    const result = resolveBooleanScene(scene).roots[0] as ResolvedBooleanField
+    expect(result.valid).toBe(true)
+    expect(result.kind).toBe('field')
+    expect(result.regions).toHaveLength(1)
+    expect(result.regions[0]?.area).toBeCloseTo(2, 10)
+    expect(result.regions[0]?.field).toEqual({
+      type: 'uniformGravity',
+      acceleration: { x: 3, y: -4 },
+    })
+  })
+
   it('并集重叠区域使用上方材料，并保留来源质量和电荷密度', () => {
     const upper = {
       ...createBlock('', { x: 0, y: 0 }, 2, 2, 1),

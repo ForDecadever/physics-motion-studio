@@ -16,6 +16,7 @@ export function listRuntimeBodyTargets(scene: SceneDocument): BodyEntity[] {
       id: result.resultId,
       kind: 'body',
       preset: 'block',
+      color: '#725bd8',
       name: node?.name ?? '布尔复合物体',
       visible: node?.visible ?? true,
       locked: node?.locked ?? false,

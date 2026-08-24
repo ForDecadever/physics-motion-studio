@@ -22,6 +22,13 @@ export interface RuntimeBodyState {
   translationalKineticEnergyJ: number
   rotationalKineticEnergyJ: number
   kineticEnergyJ: number
+  contactSources?: RuntimeContactSource[]
+}
+
+export interface RuntimeContactSource {
+  sourceEntityId: EntityId
+  sourceKind: 'ground' | 'body' | 'connector'
+  direction: Vec2
 }
 
 export interface RuntimeConnectorState {
@@ -30,12 +37,16 @@ export interface RuntimeConnectorState {
 }
 
 export interface RuntimeIonState {
+  id: number
   t: number
+  bornAt: number
+  continuous: boolean
   position: Vec2
 }
 
 export interface RuntimeParticleSourceState {
   entityId: EntityId
+  continuousEmission: boolean
   ions: RuntimeIonState[]
 }
 
@@ -52,6 +63,9 @@ export type GifHistoryStatus =
       sampleCount: number
       startTime: number
       endTime: number
+      telemetryBudgetBytes: number
+      allocatedBytes: number
+      historyTruncated: boolean
     }
   | {
       kind: 'blocked'
@@ -65,12 +79,6 @@ export type GifHistoryStatus =
       pointCount: number
       maxPoints: number
     }
-  | {
-      kind: 'blocked'
-      reason: 'particle-ion-limit'
-      ionCount: number
-      maxIons: number
-    }
 
 export interface GifHistorySnapshot {
   requestId: number
@@ -82,8 +90,13 @@ export interface GifHistorySnapshot {
   connectorIds: EntityId[]
   connectorPointOffsets: Uint32Array
   connectorValues: Float32Array
-  particleIonCount: number
+  particleSourceIds: EntityId[]
+  particleFrameOffsets: Uint32Array
+  particleSourceIndexes: Uint32Array
+  particleIonIds: Uint32Array
   particleIonTs: Float32Array
+  particleIonBornTimes: Float32Array
+  particleIonContinuous: Uint8Array
   particleValues: Float32Array
 }
 

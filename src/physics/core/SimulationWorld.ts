@@ -5,7 +5,9 @@ import type {
   ConnectorEndpoint,
   ConnectorEntity,
   EntityId,
+  FieldDefinition,
   FieldEntity,
+  ForceEntity,
   GroundEntity,
   GroundJointEntity,
   Material2D,
@@ -13,6 +15,15 @@ import type {
   SceneDocument,
   Vec2,
 } from '../../scene/model/types'
+import {
+  compileScalarExpression,
+  type CompiledScalarExpression,
+} from '../../scene/expressions/scalarExpression'
+import {
+  evaluateFieldDefinition,
+  type CompiledFieldDefinitionExpressions,
+} from '../../scene/model/fieldExpressions'
+import { globalVariableValues } from '../../scene/model/propertyExpressions'
 import {
   pointInBooleanGeometry,
   resolveBezierPathBody,
@@ -26,6 +37,7 @@ import { MIN_COLLIDING_ROPE_MASS_KG } from '../../scene/model/connectorRules'
 import type {
   RuntimeBodyState,
   RuntimeConnectorState,
+  RuntimeContactSource,
   RuntimeParticleSourceState,
 } from '../worker/messages'
 import {
@@ -36,6 +48,7 @@ import {
 } from '../../scene/model/groundPath'
 import { regionContainsPoint } from './fieldRegions'
 import {
+  advancePointInMagneticField,
   addForce,
   coulombForceOnFirst,
   electricForce,
@@ -44,6 +57,7 @@ import {
   springForceOnFirst,
 } from './forces'
 import { flattenGroundPoints } from './groundSampling'
+import { particleEmissionSamples, type ParticleEmissionSample } from './particleEmission'
 import {
   applyCoulombPathFriction,
   combinedMaterialRestitution,
@@ -64,10 +78,9 @@ await RAPIER.init()
 
 const MIN_FIXED_TIME_STEP = 1 / 1000
 const MAX_FIXED_TIME_STEP = 1 / 30
-const LINE_ION_SPACING_M = 0.05
-const MIN_LINE_SOURCE_IONS = 2
-const MAX_LINE_SOURCE_IONS = 128
 const PARTICLE_COULOMB_MIN_DISTANCE_M = 1e-6
+const PARTICLE_MAGNETIC_BOUNDARY_SUBSTEPS = 16
+const PARTICLE_EMISSION_TIME_TOLERANCE_SECONDS = 1e-9
 const ROD_SOLVER_ITERATIONS = 8
 const ROD_POSITION_TOLERANCE_M = 1e-6
 const ROD_VELOCITY_TOLERANCE_MPS = 1e-6
@@ -183,6 +196,12 @@ interface DynamicBodyRecord {
   ccdEnabled: boolean
 }
 
+interface RuntimeForceRecord {
+  entity: ForceEntity
+  magnitudeExpression: CompiledScalarExpression | null
+  directionDegreesExpression: CompiledScalarExpression | null
+}
+
 interface BooleanBoundaryColliderDescription {
   desc: RAPIER.ColliderDesc
   material: Material2D
@@ -234,11 +253,19 @@ interface GroundColliderRecord {
 }
 
 interface BlockGroundColliderRecord {
+  collider: RAPIER.Collider
   colliderHandle: number
   start: Vec2
   end: Vec2
   collisionStart: Vec2
   collisionEnd: Vec2
+}
+
+interface ConveyorGroundColliderRecord {
+  collider: RAPIER.Collider
+  tangent: Vec2
+  speedMps: number
+  material: Material2D
 }
 
 interface BlockGroundColliderChain {
@@ -1251,14 +1278,31 @@ function bodyBoundingRadius(entity: BodyEntity): number {
 }
 
 interface RuntimeParticleIon {
+  id: number
   t: number
+  bornAt: number
+  continuous: boolean
   position: Vec2
   velocity: Vec2
 }
 
 interface RuntimeParticleSource {
   entity: ParticleSourceEntity
+  samples: ParticleEmissionSample[]
   ions: RuntimeParticleIon[]
+  nextIonId: number
+  nextSampleIndex: number
+  nextEmissionIndex: number
+  nextEmissionTime: number
+}
+
+export interface SimulationRuntimeDiagnostics {
+  warningCount: number
+  connectorBodyContactManifoldCount: number
+  persistentGroundContactCount: number
+  persistentBooleanCircleContactCount: number
+  releasedGroundContactPairCount: number
+  releasedBooleanCircleContactCount: number
 }
 
 export class SimulationWorld {
@@ -1284,10 +1328,20 @@ export class SimulationWorld {
   private readonly dynamicColliders = new Map<number, DynamicBodyRecord>()
   private readonly fields: FieldEntity[] = []
   private readonly booleanFields: ResolvedBooleanField[] = []
+  private readonly forces: RuntimeForceRecord[] = []
+  private readonly scalarVariables: Readonly<Record<string, number>>
+  private readonly fieldExpressionCompilers = new Map<
+    FieldDefinition,
+    CompiledFieldDefinitionExpressions
+  >()
+  private readonly fieldEvaluationCache = new Map<FieldDefinition, FieldDefinition | null>()
+  private readonly expressionWarningKeys = new Set<string>()
   private readonly particleSources: RuntimeParticleSource[] = []
+  private currentSubstepStartTime = 0
   private readonly rods: RodConnectorRecord[] = []
   private readonly springs: SpringConnectorRecord[] = []
   private readonly springBumpers: SpringBumperRecord[] = []
+  private readonly connectorRuntimeRecords = new Map<EntityId, ConnectorRecord>()
   private readonly connectorMassBodies: ConnectorMassBodyRecord[] = []
   private readonly flexibleConnectors: FlexibleConnectorRecord[] = []
   private readonly flexibleConnectorsById = new Map<EntityId, FlexibleConnectorRecord>()
@@ -1315,6 +1369,7 @@ export class SimulationWorld {
   private readonly groundsByCollider = new Map<number, GroundColliderRecord>()
   private readonly groundCollidersByPieceId = new Map<string, GroundColliderRecord>()
   private readonly blockGroundColliderChains: BlockGroundColliderChain[] = []
+  private readonly conveyorGroundColliders: ConveyorGroundColliderRecord[] = []
   private groundPathNetwork!: GroundPathNetwork
   private hasFrictionlessFullyElasticGroundImpactPairs = false
   private readonly persistentGroundContacts = new Map<EntityId, PersistentGroundPathContact>()
@@ -1327,6 +1382,7 @@ export class SimulationWorld {
   constructor(private readonly scene: SceneDocument) {
     this.fixedTimeStep = validatedTimeStep(scene.settings.fixedTimeStep)
     this.currentTimeStep = this.fixedTimeStep
+    this.scalarVariables = globalVariableValues(scene)
     this.world = new RAPIER.World({ x: 0, y: 0 })
     this.world.timestep = this.fixedTimeStep
     try {
@@ -1339,6 +1395,17 @@ export class SimulationWorld {
 
   get simulationTime(): number {
     return this.simulationTimeValue
+  }
+
+  getRuntimeDiagnostics(): SimulationRuntimeDiagnostics {
+    return {
+      warningCount: this.warnings.length,
+      connectorBodyContactManifoldCount: this.connectorBodyContactManifolds.size,
+      persistentGroundContactCount: this.persistentGroundContacts.size,
+      persistentBooleanCircleContactCount: this.persistentBooleanCircleContacts.size,
+      releasedGroundContactPairCount: this.releasedContactPairs.size,
+      releasedBooleanCircleContactCount: this.releasedBooleanCircleContacts.size,
+    }
   }
 
   getConfiguredSpringSubstepCount(): number {
@@ -1711,6 +1778,7 @@ export class SimulationWorld {
 
     try {
       for (let index = 0; index < count; index += 1) {
+        this.fieldEvaluationCache.clear()
         const internalSubstepCount = Math.max(
           this.springSubstepCount,
           this.requiredPathSubstepCount(),
@@ -1719,11 +1787,13 @@ export class SimulationWorld {
         this.world.timestep = this.currentTimeStep
         const logicalPreviousBodyStates = this.captureBodyStates()
         for (let substep = 0; substep < internalSubstepCount; substep += 1) {
+          this.currentSubstepStartTime = this.simulationTimeValue + substep * this.currentTimeStep
           const previousBodyStates = this.captureBodyStates()
           this.captureSpringBumperCapStarts()
           this.beginSpringBumperSimulation()
           this.resetExternalForces()
           this.applyFieldForces()
+          this.applyForces()
           this.applyPairwiseElectrostatics()
           this.stepParticleSources()
           this.recordSpringConstraintForces()
@@ -1738,6 +1808,7 @@ export class SimulationWorld {
           this.preparePersistentBooleanCircleContacts()
           const solverInputBodyStates = this.captureBodyStates()
           this.world.step(this.eventQueue, this.physicsHooks)
+          this.applyConveyorGroundImpulses()
           this.resolveSpringBumperContacts()
           this.updateMasslessRopeShapes()
           this.resolveFrictionlessFullyElasticGroundImpacts(
@@ -1795,6 +1866,130 @@ export class SimulationWorld {
         translationalKineticEnergyJ,
         rotationalKineticEnergyJ,
         kineticEnergyJ: translationalKineticEnergyJ + rotationalKineticEnergyJ,
+        contactSources: this.runtimeContactSources(entityId, record),
+      }
+    })
+  }
+
+  private runtimeContactSources(
+    entityId: EntityId,
+    record: DynamicBodyRecord,
+  ): RuntimeContactSource[] {
+    const accumulated = new Map<
+      string,
+      { sourceEntityId: EntityId; sourceKind: RuntimeContactSource['sourceKind']; direction: Vec2 }
+    >()
+    const add = (
+      sourceEntityId: EntityId | null | undefined,
+      sourceKind: RuntimeContactSource['sourceKind'],
+      direction: Vec2,
+    ) => {
+      if (!sourceEntityId || sourceEntityId === entityId) return
+      const magnitude = Math.hypot(direction.x, direction.y)
+      if (magnitude <= Number.EPSILON) return
+      const key = `${sourceKind}:${sourceEntityId}`
+      const current = accumulated.get(key)
+      const normalized = { x: direction.x / magnitude, y: direction.y / magnitude }
+      if (current) {
+        current.direction.x += normalized.x
+        current.direction.y += normalized.y
+      } else {
+        accumulated.set(key, { sourceEntityId, sourceKind, direction: normalized })
+      }
+    }
+
+    const persistentGroundContact = this.persistentGroundContacts.get(entityId)
+    if (persistentGroundContact) {
+      const frame = resolveGroundPathContactFrame(this.groundPathNetwork, persistentGroundContact)
+      if (frame) {
+        add(frame.segment.sourceGroundId ?? frame.segment.jointId, 'ground', frame.contactNormal)
+      }
+    }
+
+    for (const contact of this.connectorBodyContactManifolds.values()) {
+      if (contact.bodyId === entityId) {
+        add(contact.record.entity.id, 'connector', contact.normal)
+      }
+    }
+    for (const bumper of this.springBumpers) {
+      for (const contact of this.collectSpringBumperContacts(bumper)) {
+        if (contact.kind === 'body' && contact.bodyId === entityId) {
+          add(bumper.entity.id, 'connector', contact.cap.outward)
+        }
+      }
+    }
+
+    const bodyPosition = record.rigidBody.translation()
+    const nearestGroundDirection = (): { sourceEntityId: EntityId; direction: Vec2 } | null => {
+      let nearest: { sourceEntityId: EntityId; direction: Vec2; distance: number } | null = null
+      for (const { ground, path } of this.groundPathNetwork.groundPaths.values()) {
+        const closest = path.closestPoint(bodyPosition)
+        const point = path.pointAt(closest.s)
+        const offset = { x: bodyPosition.x - point.x, y: bodyPosition.y - point.y }
+        const distance = Math.hypot(offset.x, offset.y)
+        const direction =
+          distance > Number.EPSILON
+            ? { x: offset.x / distance, y: offset.y / distance }
+            : path.normalAt(closest.s)
+        if (!nearest || distance < nearest.distance) {
+          nearest = { sourceEntityId: ground.id, direction, distance }
+        }
+      }
+      return nearest
+    }
+
+    for (const collider of this.activeBodyColliders(record)) {
+      this.world.contactPairsWith(collider, (other) => {
+        if (!this.hasValidSolverContact(collider, other)) return
+        const ground = this.groundsByCollider.get(other.handle)
+        if (ground) {
+          const closest = ground.piece.path.closestPoint(bodyPosition)
+          const point = ground.piece.path.pointAt(closest.s)
+          add(ground.ground.entity.id, 'ground', {
+            x: bodyPosition.x - point.x,
+            y: bodyPosition.y - point.y,
+          })
+          return
+        }
+        if (
+          other.collisionGroups() === BOX_GROUND_COLLISION_GROUPS ||
+          other.collisionGroups() === BOOLEAN_GROUND_COLLISION_GROUPS
+        ) {
+          const nearest = nearestGroundDirection()
+          if (nearest) add(nearest.sourceEntityId, 'ground', nearest.direction)
+          return
+        }
+        const otherBody = this.dynamicColliders.get(other.handle)
+        if (otherBody && otherBody !== record) {
+          const otherPosition = otherBody.rigidBody.translation()
+          add(otherBody.entity.id, 'body', {
+            x: bodyPosition.x - otherPosition.x,
+            y: bodyPosition.y - otherPosition.y,
+          })
+          return
+        }
+        const connector = this.connectorMassBodies.find(
+          (candidate) => candidate.collider?.handle === other.handle,
+        )
+        if (connector) {
+          const otherPosition = connector.rigidBody.translation()
+          add(connector.entity.id, 'connector', {
+            x: bodyPosition.x - otherPosition.x,
+            y: bodyPosition.y - otherPosition.y,
+          })
+        }
+      })
+    }
+
+    return [...accumulated.values()].map((source) => {
+      const magnitude = Math.hypot(source.direction.x, source.direction.y)
+      return {
+        sourceEntityId: source.sourceEntityId,
+        sourceKind: source.sourceKind,
+        direction:
+          magnitude > Number.EPSILON
+            ? { x: source.direction.x / magnitude, y: source.direction.y / magnitude }
+            : { x: 0, y: 0 },
       }
     })
   }
@@ -1848,6 +2043,17 @@ export class SimulationWorld {
       })
       recorded.add(record.entity.id)
     }
+    for (const record of this.connectorRuntimeRecords.values()) {
+      if (recorded.has(record.entity.id)) continue
+      states.push({
+        entityId: record.entity.id,
+        points: [
+          this.connectorEndpointState(record.first).position,
+          this.connectorEndpointState(record.second).position,
+        ],
+      })
+      recorded.add(record.entity.id)
+    }
     return states
   }
 
@@ -1859,9 +2065,14 @@ export class SimulationWorld {
     this.booleanCcdProxyFailureIds.clear()
     this.fields.length = 0
     this.booleanFields.length = 0
+    this.forces.length = 0
+    this.fieldExpressionCompilers.clear()
+    this.fieldEvaluationCache.clear()
+    this.expressionWarningKeys.clear()
     this.rods.length = 0
     this.springs.length = 0
     this.springBumpers.length = 0
+    this.connectorRuntimeRecords.clear()
     this.connectorMassBodies.length = 0
     this.flexibleConnectors.length = 0
     this.flexibleConnectorsById.clear()
@@ -1873,6 +2084,7 @@ export class SimulationWorld {
     this.groundsByCollider.clear()
     this.groundCollidersByPieceId.clear()
     this.blockGroundColliderChains.length = 0
+    this.conveyorGroundColliders.length = 0
     this.persistentGroundContacts.clear()
     this.persistentBooleanCircleContacts.clear()
     this.releasedBooleanCircleContacts.clear()
@@ -1941,6 +2153,7 @@ export class SimulationWorld {
     )
 
     const connectors: ConnectorEntity[] = []
+    const forces: ForceEntity[] = []
     const groundJoints: GroundJointEntity[] = []
     for (const entity of enabledEntities) {
       if (entity.kind !== 'ground') continue
@@ -1957,7 +2170,7 @@ export class SimulationWorld {
           const collider = this.world.createCollider(
             applyMaterial(
               RAPIER.ColliderDesc.polyline(flattenGroundPoints(points)),
-              piece.material,
+              ground.entity.conveyor.enabled ? { ...piece.material, friction: 0 } : piece.material,
             ).setCollisionGroups(CIRCLE_GROUND_COLLISION_GROUPS),
           )
           const linearEndpoints =
@@ -2052,16 +2265,25 @@ export class SimulationWorld {
                   (extendedStart.y + extendedEnd.y) / 2,
                 )
                 .setRotation(Math.atan2(dy, dx)),
-              chain.material,
+              chain.conveyor.enabled ? { ...chain.material, friction: 0 } : chain.material,
             ).setCollisionGroups(BOX_GROUND_COLLISION_GROUPS),
           )
           chainColliders.push({
+            collider,
             colliderHandle: collider.handle,
             start,
             end,
             collisionStart: extendedStart,
             collisionEnd: extendedEnd,
           })
+          if (chain.conveyor.enabled) {
+            this.conveyorGroundColliders.push({
+              collider,
+              tangent: { x: tangentX, y: tangentY },
+              speedMps: chain.conveyorSpeedAlongPointsMps,
+              material: chain.material,
+            })
+          }
         }
         if (chainColliders.length > 3) {
           const collisionPoints = chainColliders.flatMap((record) => [
@@ -2106,7 +2328,7 @@ export class SimulationWorld {
             x: end.x + tangent.x * endExtension,
             y: end.y + tangent.y * endExtension,
           }
-          this.world.createCollider(
+          const collider = this.world.createCollider(
             applyMaterial(
               RAPIER.ColliderDesc.cuboid(
                 (length + startExtension + endExtension) / 2,
@@ -2117,9 +2339,17 @@ export class SimulationWorld {
                   (collisionStart.y + collisionEnd.y) / 2,
                 )
                 .setRotation(Math.atan2(dy, dx)),
-              chain.material,
+              chain.conveyor.enabled ? { ...chain.material, friction: 0 } : chain.material,
             ).setCollisionGroups(BOOLEAN_GROUND_COLLISION_GROUPS),
           )
+          if (chain.conveyor.enabled) {
+            this.conveyorGroundColliders.push({
+              collider,
+              tangent,
+              speedMps: chain.conveyorSpeedAlongPointsMps,
+              material: chain.material,
+            })
+          }
         }
       }
     }
@@ -2139,12 +2369,15 @@ export class SimulationWorld {
         this.fields.push(entity)
       } else if (entity.kind === 'particleSource') {
         this.particleSources.push(this.emitIonGeneration(entity))
+      } else if (entity.kind === 'force') {
+        forces.push(entity)
       } else if (entity.kind === 'connector') {
         connectors.push(entity)
       }
     }
 
     for (const connector of connectors) this.createConnector(connector)
+    for (const force of forces) this.createForce(force)
     this.configureSpringIntegration()
     this.validateGroundJoints(enabledEntities, groundJoints)
   }
@@ -2259,6 +2492,7 @@ export class SimulationWorld {
       id: result.resultId,
       kind: 'body',
       preset: 'block',
+      color: '#725bd8',
       name: '布尔复合物体',
       visible: true,
       locked: false,
@@ -2437,6 +2671,11 @@ export class SimulationWorld {
       this.warnings.push({ message: '连接器端点无效，已忽略。', entityId: effectiveEntity.id })
       return
     }
+    this.connectorRuntimeRecords.set(effectiveEntity.id, {
+      entity: effectiveEntity,
+      first,
+      second,
+    })
 
     if (effectiveEntity.massKg > 0) {
       if (effectiveEntity.connector.type === 'rod') {
@@ -5166,6 +5405,104 @@ export class SimulationWorld {
     }
   }
 
+  private warnExpressionOnce(key: string, message: string, entityId: EntityId): void {
+    if (this.expressionWarningKeys.has(key)) return
+    this.expressionWarningKeys.add(key)
+    this.warnings.push({ message, entityId })
+  }
+
+  private compileTimeExpression(
+    expression: string | undefined,
+    entityId: EntityId,
+    role: string,
+  ): CompiledScalarExpression | null {
+    if (!expression) return null
+    try {
+      return compileScalarExpression(expression, {
+        allowTime: true,
+        variableNames: new Set(Object.keys(this.scalarVariables)),
+      })
+    } catch (error) {
+      this.warnExpressionOnce(
+        `${entityId}:${role}:compile`,
+        `${role}无效，本次模拟已停用：${error instanceof Error ? error.message : '无法解析。'}`,
+        entityId,
+      )
+      return null
+    }
+  }
+
+  private createForce(entity: ForceEntity): void {
+    if (!this.dynamicBodies.has(entity.bodyId)) {
+      this.warnings.push({ message: '外加力引用的刚体不存在，已忽略。', entityId: entity.id })
+      return
+    }
+    this.forces.push({
+      entity,
+      magnitudeExpression: this.compileTimeExpression(
+        entity.magnitudeExpression?.expression,
+        entity.id,
+        '力大小表达式',
+      ),
+      directionDegreesExpression: this.compileTimeExpression(
+        entity.directionDegreesExpression?.expression,
+        entity.id,
+        '力方向（度）表达式',
+      ),
+    })
+  }
+
+  private evaluateForceScalar(
+    record: RuntimeForceRecord,
+    property: 'magnitude' | 'direction',
+  ): number | null {
+    const definition =
+      property === 'magnitude'
+        ? record.entity.magnitudeExpression
+        : record.entity.directionDegreesExpression
+    if (!definition) {
+      return property === 'magnitude' ? record.entity.magnitudeN : record.entity.directionRad
+    }
+    const compiled =
+      property === 'magnitude' ? record.magnitudeExpression : record.directionDegreesExpression
+    const value = compiled?.evaluate({
+      time: this.simulationTimeValue,
+      variables: this.scalarVariables,
+    })
+    if (value !== null && value !== undefined) {
+      return property === 'direction' ? (value * Math.PI) / 180 : value
+    }
+    this.warnExpressionOnce(
+      `${record.entity.id}:${property}:runtime`,
+      `${property === 'magnitude' ? '力大小' : '力方向'}表达式在 t=${this.simulationTimeValue.toPrecision(6)} s 没有有限结果，该步未施加此力。`,
+      record.entity.id,
+    )
+    return null
+  }
+
+  private applyForces(): void {
+    for (const record of this.forces) {
+      const body = this.dynamicBodies.get(record.entity.bodyId)
+      if (!body) continue
+      const magnitude = this.evaluateForceScalar(record, 'magnitude')
+      const direction = this.evaluateForceScalar(record, 'direction')
+      if (magnitude === null || direction === null) continue
+      const angle = body.rigidBody.rotation()
+      const cosine = Math.cos(angle)
+      const sine = Math.sin(angle)
+      const center = body.rigidBody.translation()
+      const anchor = {
+        x: center.x + record.entity.localAnchor.x * cosine - record.entity.localAnchor.y * sine,
+        y: center.y + record.entity.localAnchor.x * sine + record.entity.localAnchor.y * cosine,
+      }
+      this.applyForceToBody(
+        body,
+        { x: Math.cos(direction) * magnitude, y: Math.sin(direction) * magnitude },
+        anchor,
+      )
+    }
+  }
+
   private applyForceToBody(record: DynamicBodyRecord, force: Vec2, point?: Vec2): void {
     record.netForce = addForce(record.netForce, force)
     record.pathForce = addForce(record.pathForce, force)
@@ -5189,16 +5526,113 @@ export class SimulationWorld {
     }
   }
 
-  private fieldDefinitionsAtPoint(point: Vec2): FieldEntity['field'][] {
-    const definitions = this.fields.flatMap((field) =>
-      regionContainsPoint(field.region, point) ? [field.field] : [],
+  private evaluatedFieldDefinition(
+    field: FieldDefinition,
+    entityId: EntityId,
+  ): FieldDefinition | null {
+    const hasExpression =
+      field.type === 'uniformElectric'
+        ? Boolean(field.componentExpressions?.x || field.componentExpressions?.y)
+        : Boolean(field.magnitudeExpression)
+    if (!hasExpression) return field
+    if (this.fieldEvaluationCache.has(field)) {
+      return this.fieldEvaluationCache.get(field) ?? null
+    }
+    let compiled = this.fieldExpressionCompilers.get(field)
+    if (compiled === undefined) {
+      compiled =
+        field.type === 'uniformElectric'
+          ? {
+              magnitude: null,
+              x: this.compileTimeExpression(
+                field.componentExpressions?.x?.expression,
+                entityId,
+                '电场强度 X 表达式',
+              ),
+              y: this.compileTimeExpression(
+                field.componentExpressions?.y?.expression,
+                entityId,
+                '电场强度 Y 表达式',
+              ),
+            }
+          : {
+              magnitude: this.compileTimeExpression(
+                field.magnitudeExpression?.expression,
+                entityId,
+                '场强表达式',
+              ),
+              x: null,
+              y: null,
+            }
+      this.fieldExpressionCompilers.set(field, compiled)
+    }
+    const evaluated = evaluateFieldDefinition(
+      field,
+      this.simulationTimeValue,
+      this.scalarVariables,
+      compiled,
     )
+    if (!evaluated) {
+      this.warnExpressionOnce(
+        `${entityId}:field:runtime`,
+        `场强表达式在 t=${this.simulationTimeValue.toPrecision(6)} s 没有有限结果，该步未施加此场。`,
+        entityId,
+      )
+    }
+    this.fieldEvaluationCache.set(field, evaluated)
+    return evaluated
+  }
+
+  private fieldDefinitionsAtPoint(point: Vec2): FieldDefinition[] {
+    const definitions = this.fields.flatMap((field) => {
+      if (!regionContainsPoint(field.region, point)) return []
+      const evaluated = this.evaluatedFieldDefinition(field.field, field.id)
+      return evaluated ? [evaluated] : []
+    })
     for (const field of this.booleanFields) {
       for (const region of field.regions) {
-        if (pointInBooleanGeometry(point, region.geometry)) definitions.push(region.field)
+        if (!pointInBooleanGeometry(point, region.geometry)) continue
+        const evaluated = this.evaluatedFieldDefinition(region.field, field.resultId)
+        if (evaluated) definitions.push(evaluated)
       }
     }
     return definitions
+  }
+
+  private magneticFieldTeslaAtPoint(point: Vec2): number {
+    let bzTesla = 0
+    for (const field of this.fieldDefinitionsAtPoint(point)) {
+      if (field.type === 'uniformMagnetic') bzTesla += field.bzTesla
+    }
+    return bzTesla
+  }
+
+  private particleCrossesMagneticFieldBoundary(
+    ion: RuntimeParticleIon,
+    entity: ParticleSourceEntity,
+    timeStep: number,
+  ): boolean {
+    if (entity.chargeC === 0) return false
+    const startBz = this.magneticFieldTeslaAtPoint(ion.position)
+    const midpoint = advancePointInMagneticField(
+      ion.position,
+      ion.velocity,
+      entity.chargeC,
+      startBz,
+      entity.massKg,
+      timeStep / 2,
+    ).position
+    const endpoint = advancePointInMagneticField(
+      ion.position,
+      ion.velocity,
+      entity.chargeC,
+      startBz,
+      entity.massKg,
+      timeStep,
+    ).position
+    const midpointBz = this.magneticFieldTeslaAtPoint(midpoint)
+    const endpointBz = this.magneticFieldTeslaAtPoint(endpoint)
+    return midpointBz !== startBz || endpointBz !== startBz
   }
 
   private bodyMassPatches(record: DynamicBodyRecord): Array<{
@@ -5371,47 +5805,114 @@ export class SimulationWorld {
   }
 
   private emitIonGeneration(source: ParticleSourceEntity): RuntimeParticleSource {
-    const ions: RuntimeParticleIon[] = []
-    if (source.shape.type === 'point') {
-      ions.push({
-        t: 0,
-        position: { ...source.shape.position },
-        velocity: {
-          x: Math.cos(source.directionRad) * source.speedMps,
-          y: Math.sin(source.directionRad) * source.speedMps,
-        },
-      })
-    } else {
-      const { start, end } = source.shape
-      const dx = end.x - start.x
-      const dy = end.y - start.y
-      const length = Math.hypot(dx, dy)
-      if (length <= Number.EPSILON) {
-        const side = source.flipEmission ? -1 : 1
-        ions.push({
-          t: 0,
-          position: { ...start },
-          velocity: { x: 0, y: side * source.speedMps },
-        })
-      } else {
-        const count = Math.max(
-          MIN_LINE_SOURCE_IONS,
-          Math.min(MAX_LINE_SOURCE_IONS, Math.round(length / LINE_ION_SPACING_M)),
-        )
-        const side = source.flipEmission ? -1 : 1
-        const normalX = (-dy / length) * side
-        const normalY = (dx / length) * side
-        for (let index = 0; index < count; index += 1) {
-          const t = count === 1 ? 0 : index / (count - 1)
-          ions.push({
-            t,
-            position: { x: start.x + dx * t, y: start.y + dy * t },
-            velocity: { x: normalX * source.speedMps, y: normalY * source.speedMps },
-          })
+    const samples = particleEmissionSamples(source)
+    const createIon = (
+      sample: ParticleEmissionSample,
+      id: number,
+      bornAt = 0,
+    ): RuntimeParticleIon => ({
+      id,
+      t: sample.t,
+      bornAt,
+      continuous: source.continuousEmission.enabled,
+      position: { ...sample.position },
+      velocity: {
+        x: sample.direction.x * source.speedMps,
+        y: sample.direction.y * source.speedMps,
+      },
+    })
+    const initialSamples = source.continuousEmission.enabled
+      ? source.continuousEmission.simultaneous
+        ? samples
+        : samples.slice(0, 1)
+      : samples
+    const ions = initialSamples.map((sample, index) => createIon(sample, index))
+    return {
+      entity: source,
+      samples,
+      ions,
+      nextIonId: ions.length,
+      nextSampleIndex:
+        source.continuousEmission.enabled &&
+        !source.continuousEmission.simultaneous &&
+        samples.length > 0
+          ? 1
+          : 0,
+      nextEmissionIndex: 1,
+      nextEmissionTime: source.continuousEmission.enabled
+        ? source.continuousEmission.intervalSeconds
+        : Number.POSITIVE_INFINITY,
+    }
+  }
+
+  private advanceParticleIon(
+    ion: RuntimeParticleIon,
+    entity: ParticleSourceEntity,
+    timeStep: number,
+    chargedPatches: readonly { position: Vec2; chargeC: number; area: number }[],
+  ): void {
+    if (timeStep <= 0) return
+    const chargeOverMass = entity.chargeC / entity.massKg
+    const substepCount = this.particleCrossesMagneticFieldBoundary(ion, entity, timeStep)
+      ? PARTICLE_MAGNETIC_BOUNDARY_SUBSTEPS
+      : 1
+    const particleTimeStep = timeStep / substepCount
+    for (let substep = 0; substep < substepCount; substep += 1) {
+      let electricX = 0
+      let electricY = 0
+      let magneticBz = 0
+      for (const field of this.fieldDefinitionsAtPoint(ion.position)) {
+        if (field.type === 'uniformElectric') {
+          electricX += field.strength.x
+          electricY += field.strength.y
+        } else if (field.type === 'uniformMagnetic') {
+          magneticBz += field.bzTesla
         }
       }
+
+      if (entity.chargeC !== 0) {
+        ion.velocity.x += chargeOverMass * electricX * particleTimeStep
+        ion.velocity.y += chargeOverMass * electricY * particleTimeStep
+      }
+      const magneticAdvance = advancePointInMagneticField(
+        ion.position,
+        ion.velocity,
+        entity.chargeC,
+        magneticBz,
+        entity.massKg,
+        particleTimeStep,
+      )
+      ion.position = magneticAdvance.position
+      ion.velocity = magneticAdvance.velocity
+
+      if (entity.chargeC !== 0 && entity.coulombEnabled && chargedPatches.length > 0) {
+        let coulombX = 0
+        let coulombY = 0
+        for (const patch of chargedPatches) {
+          const minimumDistance = Math.max(
+            PARTICLE_COULOMB_MIN_DISTANCE_M,
+            Math.sqrt(patch.area / Math.PI) * 0.1,
+          )
+          const force = coulombForceOnFirst(
+            entity.chargeC,
+            patch.chargeC,
+            ion.position,
+            patch.position,
+            minimumDistance,
+          )
+          coulombX += force.x
+          coulombY += force.y
+        }
+        const deltaVelocity = {
+          x: (coulombX / entity.massKg) * particleTimeStep,
+          y: (coulombY / entity.massKg) * particleTimeStep,
+        }
+        ion.velocity.x += deltaVelocity.x
+        ion.velocity.y += deltaVelocity.y
+        ion.position.x += deltaVelocity.x * particleTimeStep
+        ion.position.y += deltaVelocity.y * particleTimeStep
+      }
     }
-    return { entity: source, ions }
   }
 
   private stepParticleSources(): void {
@@ -5423,60 +5924,55 @@ export class SimulationWorld {
       }
     }
     const dt = this.currentTimeStep
+    const stepEndTime = this.currentSubstepStartTime + dt
 
     for (const source of this.particleSources) {
       const entity = source.entity
-      const chargeOverMass = entity.chargeC / entity.massKg
       for (const ion of source.ions) {
-        let electricX = 0
-        let electricY = 0
-        let magneticBz = 0
-        for (const field of this.fieldDefinitionsAtPoint(ion.position)) {
-          if (field.type === 'uniformElectric') {
-            electricX += field.strength.x
-            electricY += field.strength.y
-          } else if (field.type === 'uniformMagnetic') {
-            magneticBz += field.bzTesla
+        this.advanceParticleIon(ion, entity, dt, chargedPatches)
+      }
+      while (
+        entity.continuousEmission.enabled &&
+        source.samples.length > 0 &&
+        source.nextEmissionTime <= stepEndTime + PARTICLE_EMISSION_TIME_TOLERANCE_SECONDS
+      ) {
+        const emissionSamples = entity.continuousEmission.simultaneous
+          ? source.samples
+          : [source.samples[source.nextSampleIndex % source.samples.length]!]
+        for (const sample of emissionSamples) {
+          const ion: RuntimeParticleIon = {
+            id: source.nextIonId,
+            t: sample.t,
+            bornAt: source.nextEmissionTime,
+            continuous: true,
+            position: { ...sample.position },
+            velocity: {
+              x: sample.direction.x * entity.speedMps,
+              y: sample.direction.y * entity.speedMps,
+            },
           }
+          this.advanceParticleIon(
+            ion,
+            entity,
+            Math.max(0, stepEndTime - source.nextEmissionTime),
+            chargedPatches,
+          )
+          source.ions.push(ion)
+          source.nextIonId += 1
         }
-
-        if (entity.chargeC !== 0) {
-          ion.velocity.x += chargeOverMass * electricX * dt
-          ion.velocity.y += chargeOverMass * electricY * dt
-          if (magneticBz !== 0) {
-            ion.velocity = rotateVelocityInMagneticField(
-              ion.velocity,
-              entity.chargeC,
-              magneticBz,
-              entity.massKg,
-              dt,
-            )
-          }
-          if (entity.coulombEnabled && chargedPatches.length > 0) {
-            let coulombX = 0
-            let coulombY = 0
-            for (const patch of chargedPatches) {
-              const minimumDistance = Math.max(
-                PARTICLE_COULOMB_MIN_DISTANCE_M,
-                Math.sqrt(patch.area / Math.PI) * 0.1,
-              )
-              const force = coulombForceOnFirst(
-                entity.chargeC,
-                patch.chargeC,
-                ion.position,
-                patch.position,
-                minimumDistance,
-              )
-              coulombX += force.x
-              coulombY += force.y
-            }
-            ion.velocity.x += (coulombX / entity.massKg) * dt
-            ion.velocity.y += (coulombY / entity.massKg) * dt
-          }
+        if (!entity.continuousEmission.simultaneous) {
+          source.nextSampleIndex = (source.nextSampleIndex + 1) % source.samples.length
         }
-
-        ion.position.x += ion.velocity.x * dt
-        ion.position.y += ion.velocity.y * dt
+        source.nextEmissionIndex += 1
+        source.nextEmissionTime =
+          source.nextEmissionIndex * entity.continuousEmission.intervalSeconds
+      }
+      if (entity.continuousEmission.enabled) {
+        source.ions = source.ions.filter(
+          (ion) =>
+            stepEndTime - ion.bornAt <
+            entity.continuousEmission.lifetimeSeconds - PARTICLE_EMISSION_TIME_TOLERANCE_SECONDS,
+        )
       }
     }
   }
@@ -5484,7 +5980,14 @@ export class SimulationWorld {
   getParticleSourceStates(): RuntimeParticleSourceState[] {
     return this.particleSources.map((source) => ({
       entityId: source.entity.id,
-      ions: source.ions.map((ion) => ({ t: ion.t, position: { ...ion.position } })),
+      continuousEmission: source.entity.continuousEmission.enabled,
+      ions: source.ions.map((ion) => ({
+        id: ion.id,
+        t: ion.t,
+        bornAt: ion.bornAt,
+        continuous: ion.continuous,
+        position: { ...ion.position },
+      })),
     }))
   }
 
@@ -5923,6 +6426,54 @@ export class SimulationWorld {
     }
   }
 
+  private applyConveyorGroundImpulses(): void {
+    if (this.conveyorGroundColliders.length === 0) return
+    for (const record of this.dynamicBodies.values()) {
+      if (!record.collider || (record.entity.shape.type === 'circle' && !record.booleanResult)) {
+        continue
+      }
+      for (const bodyCollider of record.colliders) {
+        for (const conveyor of this.conveyorGroundColliders) {
+          this.world.contactPair(bodyCollider, conveyor.collider, (manifold) => {
+            let normalImpulseNs = 0
+            for (let index = 0; index < manifold.numContacts(); index += 1) {
+              normalImpulseNs += Math.abs(manifold.contactImpulse(index))
+            }
+            const pointCount = manifold.numSolverContacts()
+            if (normalImpulseNs <= Number.EPSILON || pointCount === 0) return
+            const contactPoint = { x: 0, y: 0 }
+            for (let index = 0; index < pointCount; index += 1) {
+              const point = manifold.solverContactPoint(index)
+              contactPoint.x += point.x / pointCount
+              contactPoint.y += point.y / pointCount
+            }
+            const friction = combinedPathFriction(record.entity.material, conveyor.material)
+            if (friction <= Number.EPSILON) return
+            const inverseMass = this.bodyDirectionalInverseMassAtPoint(
+              record,
+              contactPoint,
+              conveyor.tangent,
+            )
+            if (inverseMass <= Number.EPSILON) return
+            const velocity = this.bodyVelocityAtPoint(record, contactPoint)
+            const slipSpeed = dotVectors(velocity, conveyor.tangent) - conveyor.speedMps
+            const maximumImpulse = friction * normalImpulseNs
+            const impulseMagnitude = Math.max(
+              -maximumImpulse,
+              Math.min(maximumImpulse, -slipSpeed / inverseMass),
+            )
+            if (Math.abs(impulseMagnitude) <= Number.EPSILON) return
+            record.rigidBody.applyImpulseAtPoint(
+              scaleVector(conveyor.tangent, impulseMagnitude),
+              contactPoint,
+              true,
+            )
+          })
+        }
+      }
+    }
+  }
+
   private springBumperCapVelocity(record: SpringBumperRecord, cap: SpringBumperCap): Vec2 {
     if (record.mode === 'double' || !record.attached) return { x: 0, y: 0 }
     const anchor = this.connectorEndpointState(record.attached)
@@ -6115,13 +6666,53 @@ export class SimulationWorld {
     return contacts
   }
 
+  private synchronizeDoubleSpringBumperToContacts(
+    record: SpringBumperRecord,
+    contacts: SpringBumperContact[],
+  ): boolean {
+    if (record.mode !== 'double') return false
+    const axis = this.springBumperAxis(record)
+    let first: SpringBumperContact | null = null
+    let second: SpringBumperContact | null = null
+    for (const contact of contacts) {
+      if (dotVectors(contact.cap.outward, axis) < 0) {
+        if (!first || contact.inwardTravelM > first.inwardTravelM) first = contact
+      } else if (!second || contact.inwardTravelM > second.inwardTravelM) {
+        second = contact
+      }
+    }
+    if (!first || !second) return false
+
+    const separationM = Math.min(
+      record.initialLengthM,
+      Math.max(
+        0,
+        dotVectors(
+          {
+            x: second.contactPoint.x - first.contactPoint.x,
+            y: second.contactPoint.y - first.contactPoint.y,
+          },
+          axis,
+        ),
+      ),
+    )
+    record.center = {
+      x: (first.contactPoint.x + second.contactPoint.x) / 2,
+      y: (first.contactPoint.y + second.contactPoint.y) / 2,
+    }
+    record.inwardTravelM = record.initialLengthM - separationM
+    return true
+  }
+
   private resolveSpringBumperContacts(): void {
     for (const record of this.springBumpers) {
       const contacts = this.collectSpringBumperContacts(record)
-      record.inwardTravelM = Math.min(
-        record.initialLengthM,
-        Math.max(0, ...contacts.map((contact) => contact.inwardTravelM)),
-      )
+      if (!this.synchronizeDoubleSpringBumperToContacts(record, contacts)) {
+        record.inwardTravelM = Math.min(
+          record.initialLengthM,
+          Math.max(0, ...contacts.map((contact) => contact.inwardTravelM)),
+        )
+      }
       if (record.inwardTravelM < record.initialLengthM - FLEXIBLE_POSITION_TOLERANCE_M) continue
 
       for (const contact of this.collectSpringBumperContacts(record)) {
@@ -6228,10 +6819,12 @@ export class SimulationWorld {
   private refreshSpringBumperCompression(): void {
     for (const record of this.springBumpers) {
       const contacts = this.collectSpringBumperContacts(record)
-      record.inwardTravelM = Math.min(
-        record.initialLengthM,
-        Math.max(0, ...contacts.map((contact) => contact.inwardTravelM)),
-      )
+      if (!this.synchronizeDoubleSpringBumperToContacts(record, contacts)) {
+        record.inwardTravelM = Math.min(
+          record.initialLengthM,
+          Math.max(0, ...contacts.map((contact) => contact.inwardTravelM)),
+        )
+      }
     }
   }
 
@@ -6244,13 +6837,27 @@ export class SimulationWorld {
           Math.abs(contact.inwardTravelM - record.inwardTravelM) <= CONNECTOR_CONTACT_TOLERANCE_M,
       )
       if (contacts.length === 0) continue
+      if (record.mode === 'double') {
+        const axis = this.springBumperAxis(record)
+        const hasFirstCapContact = contacts.some(
+          (contact) => dotVectors(contact.cap.outward, axis) < 0,
+        )
+        const hasSecondCapContact = contacts.some(
+          (contact) => dotVectors(contact.cap.outward, axis) > 0,
+        )
+        if (!hasFirstCapContact || !hasSecondCapContact) continue
+      }
       const compressionRate = Math.max(...contacts.map((contact) => contact.compressionRateMps))
       const generalizedForce = Math.max(
         0,
         record.effectiveStiffness * compressionM + record.damping * compressionRate,
       )
-      const forceScale = (record.mode === 'double' ? 2 : 1) / contacts.length
+      const contactsPerCap = new Map<SpringBumperCap, number>()
       for (const contact of contacts) {
+        contactsPerCap.set(contact.cap, (contactsPerCap.get(contact.cap) ?? 0) + 1)
+      }
+      for (const contact of contacts) {
+        const forceScale = 1 / (contactsPerCap.get(contact.cap) ?? 1)
         const impulse = scaleVector(
           contact.cap.outward,
           generalizedForce * forceScale * durationSeconds,
@@ -8296,6 +8903,28 @@ export class SimulationWorld {
     return scaleVector(record.constraintForce, 1 / record.entity.massKg)
   }
 
+  private bodyUsesMasslessRopeConstraint(entityId: EntityId): boolean {
+    for (const record of this.connectorRuntimeRecords.values()) {
+      if (record.entity.connector.type !== 'rope' || record.entity.massKg > Number.EPSILON) {
+        continue
+      }
+      if (record.first.body?.entity.id === entityId || record.second.body?.entity.id === entityId) {
+        return true
+      }
+    }
+    return false
+  }
+
+  private shouldKeepNativeStraightGroundConstraint(
+    entityId: EntityId,
+    frame: GroundPathContactFrame,
+  ): boolean {
+    const sourceGround = frame.segment.sourceGroundId
+      ? this.groundsById.get(frame.segment.sourceGroundId)?.entity
+      : null
+    return sourceGround?.geometry.type === 'line' && this.bodyUsesMasslessRopeConstraint(entityId)
+  }
+
   private reversedPathContact(contact: PersistentGroundPathContact): PersistentGroundPathContact {
     return {
       ...contact,
@@ -8435,6 +9064,39 @@ export class SimulationWorld {
     }
   }
 
+  private groundConveyorSpeedMps(
+    frame: GroundPathContactFrame,
+    contact: PersistentGroundPathContact,
+  ): number {
+    let sourceGroundId = frame.segment.sourceGroundId
+    let segmentDirectionMatchesGround: 1 | -1 = 1
+    if (!sourceGroundId && frame.segment.kind === 'transition') {
+      const piece = frame.segment.collisionPieces.find(
+        (candidate) =>
+          contact.location.s >= candidate.startS - 1e-9 &&
+          contact.location.s <= candidate.endS + 1e-9,
+      )
+      sourceGroundId = piece?.sourceGroundId ?? null
+      const joint = frame.segment.jointId
+        ? this.scene.entities.find(
+            (entity): entity is GroundJointEntity =>
+              entity.kind === 'groundJoint' && entity.id === frame.segment.jointId,
+          )
+        : null
+      if (sourceGroundId && joint) {
+        const reference = joint.a.groundId === sourceGroundId ? joint.a : joint.b
+        segmentDirectionMatchesGround = reference.endpoint === 'end' ? 1 : -1
+      }
+    }
+    if (!sourceGroundId) return 0
+    const conveyor = this.groundsById.get(sourceGroundId)?.entity.conveyor
+    if (!conveyor?.enabled) return 0
+    const directionSign = conveyor.direction === 'forward' ? 1 : -1
+    return (
+      conveyor.speedMps * directionSign * segmentDirectionMatchesGround * contact.location.direction
+    )
+  }
+
   private advancePersistentGroundContacts(
     previousBodyStates: Map<EntityId, PreviousBodyState>,
   ): void {
@@ -8534,6 +9196,7 @@ export class SimulationWorld {
           Math.max(0, supportForceN),
           combinedPathFriction(record.entity.material, afterFrame.material),
           timeToEndpoint,
+          this.groundConveyorSpeedMps(afterFrame, contact),
         )
         endpointSpeed = friction.tangentialSpeedMps
         const postFrictionSupportForceN = requiredGroundSupportForceN(
@@ -8617,6 +9280,7 @@ export class SimulationWorld {
         Math.max(0, supportForceN),
         combinedPathFriction(record.entity.material, afterFrame.material),
         this.currentTimeStep,
+        this.groundConveyorSpeedMps(afterFrame, contact),
       )
       speedAfter = friction.tangentialSpeedMps
       if (speedAfter < 0) {
@@ -8904,6 +9568,7 @@ export class SimulationWorld {
       )
       const selected = qualified[0]
       if (!selected) continue
+      if (this.shouldKeepNativeStraightGroundConstraint(entityId, selected.frame)) continue
 
       record.rigidBody.setTranslation(selected.frame.position, true)
       record.rigidBody.setLinvel(

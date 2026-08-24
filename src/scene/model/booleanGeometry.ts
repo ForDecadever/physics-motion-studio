@@ -64,6 +64,7 @@ export interface ResolvedMaterialRegion {
   area: number
   centroid: Vec2
   material: Material2D
+  color: string
 }
 
 export interface ResolvedFieldRegion {
@@ -293,6 +294,7 @@ function bodyNonTransformEquals(first: BodyEntity, second: BodyEntity): boolean 
     first.locked === second.locked &&
     first.simulationEnabled === second.simulationEnabled &&
     first.preset === second.preset &&
+    first.color === second.color &&
     sameBodyShape(first.shape, second.shape) &&
     first.massKg === second.massKg &&
     first.chargeC === second.chargeC &&
@@ -320,6 +322,12 @@ function sameBooleanNodeSettings(first: BooleanNode, second: BooleanNode): boole
     (first.chargeDistribution.mode === 'source' ||
       (second.chargeDistribution.mode === 'uniform' &&
         first.chargeDistribution.totalChargeC === second.chargeDistribution.totalChargeC))
+  const sameField =
+    first.fieldDistribution.mode === second.fieldDistribution.mode &&
+    (first.fieldDistribution.mode === 'source' ||
+      (second.fieldDistribution.mode === 'uniform' &&
+        JSON.stringify(first.fieldDistribution.field) ===
+          JSON.stringify(second.fieldDistribution.field)))
   const sameScalarDistribution = (
     firstDistribution: BooleanNode['frictionDistribution'],
     secondDistribution: BooleanNode['frictionDistribution'],
@@ -348,6 +356,7 @@ function sameBooleanNodeSettings(first: BooleanNode, second: BooleanNode): boole
     first.continuousCollisionDetection === second.continuousCollisionDetection &&
     sameMass &&
     sameCharge &&
+    sameField &&
     sameScalarDistribution(first.frictionDistribution, second.frictionDistribution) &&
     sameScalarDistribution(first.restitutionDistribution, second.restitutionDistribution) &&
     sameVelocity &&
@@ -517,6 +526,14 @@ function differenceGeometry(
   if (subject.length === 0) return []
   if (clip.length === 0) return subject
   return normalizedGeometry(polygonClipping.difference(subject, clip))
+}
+
+function intersectionGeometry(
+  first: BooleanMultiPolygon,
+  second: BooleanMultiPolygon,
+): BooleanMultiPolygon {
+  if (first.length === 0 || second.length === 0) return []
+  return normalizedGeometry(polygonClipping.intersection(first, second))
 }
 
 function featureTolerance(featureSize: number): number {
@@ -944,14 +961,18 @@ function resolveNode(
   const geometry =
     layer.operation === 'union'
       ? unionGeometry(upper.geometry, lower.geometry)
-      : differenceGeometry(upper.geometry, lower.geometry)
+      : layer.operation === 'intersection'
+        ? intersectionGeometry(upper.geometry, lower.geometry)
+        : differenceGeometry(upper.geometry, lower.geometry)
   const resultArea = polygonMetrics(geometry).area
   const uppermostSource = uppermostSourceForLayer(layer, upper)
   if (resultArea <= 0) {
     diagnostics.push(
       layer.operation === 'difference'
         ? '上方输入已被下方完全覆盖；减法按上方减下方执行。'
-        : '布尔运算结果为空。',
+        : layer.operation === 'intersection'
+          ? '两个输入没有共同覆盖区域。'
+          : '布尔运算结果为空。',
     )
     const emptyResult: OperandResolution = {
       revision: nextBooleanRevision++,
@@ -985,10 +1006,26 @@ function resolveNode(
       : upper.regions
           .map((region) => ({
             ...region,
-            geometry: differenceGeometry(region.geometry, lower.geometry),
+            geometry:
+              layer.operation === 'intersection'
+                ? intersectionGeometry(region.geometry, lower.geometry)
+                : differenceGeometry(region.geometry, lower.geometry),
           }))
           .filter((region) => polygonMetrics(region.geometry).area > 0)
-  const regions = sourceRegions.map((region): SourceRegion => {
+  const distributedRegions: SourceRegion[] =
+    layer.fieldDistribution.mode === 'uniform' && upper.operandClass.kind === 'field'
+      ? [
+          {
+            source: {
+              ...upper.uppermostSource,
+              kind: 'field',
+              field: layer.fieldDistribution.field,
+            } as FieldEntity,
+            geometry,
+          },
+        ]
+      : sourceRegions
+  const regions = distributedRegions.map((region): SourceRegion => {
     if (region.source.kind !== 'body') return region
     return {
       ...region,
@@ -1024,7 +1061,10 @@ function resolveNode(
       : upperRegions
           .map((region) => ({
             ...region,
-            geometry: differenceGeometry(region.geometry, lower.geometry),
+            geometry:
+              layer.operation === 'intersection'
+                ? intersectionGeometry(region.geometry, lower.geometry)
+                : differenceGeometry(region.geometry, lower.geometry),
           }))
           .filter((region) => polygonMetrics(region.geometry).area > 0)
   const sourceMassRegions = combineDensityRegions(upper.massRegions, lower.massRegions)
@@ -1358,6 +1398,7 @@ function resolveBody(
       area: retained.area,
       centroid: retained.centroid,
       material: region.source.material,
+      color: region.source.color,
     })
   }
   for (const region of node.massRegions) {
@@ -1530,6 +1571,7 @@ export function resolveBezierPathBody(
     continuousCollisionDetection: entity.continuousCollisionDetection,
     massDistribution: { mode: 'source' },
     chargeDistribution: { mode: 'source' },
+    fieldDistribution: { mode: 'source' },
     frictionDistribution: { mode: 'source' },
     restitutionDistribution: { mode: 'source' },
     initialVelocity: { mode: 'source' },
@@ -1548,6 +1590,13 @@ function resolveField(
   const upper = node.uppermostSource
   const diagnostics = [...node.diagnostics]
   if (upper.kind !== 'field') diagnostics.push('布尔场树只能包含同一种有限场。')
+  if (
+    upper.kind === 'field' &&
+    layer.fieldDistribution.mode === 'uniform' &&
+    layer.fieldDistribution.field.type !== upper.field.type
+  ) {
+    diagnostics.push('布尔统一场强必须与来源场保持同一类型。')
+  }
   const regions: ResolvedFieldRegion[] = node.regions.flatMap((region) => {
     if (region.source.kind !== 'field') return []
     const metrics = polygonMetrics(region.geometry)
@@ -1871,11 +1920,12 @@ export function transformBooleanBodyGeometry(
   result: ResolvedBooleanBody,
   position: Vec2 = result.centerOfMass,
   angleRad: number = result.angleRad,
+  geometry: BooleanMultiPolygon = result.geometry,
 ): BooleanMultiPolygon {
   const deltaAngle = angleRad - result.angleRad
   const cosine = Math.cos(deltaAngle)
   const sine = Math.sin(deltaAngle)
-  return result.geometry.map((polygon) =>
+  return geometry.map((polygon) =>
     polygon.map((ring) =>
       ring.map(([x, y]) => {
         const localX = x - result.centerOfMass.x

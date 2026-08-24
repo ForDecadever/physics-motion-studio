@@ -1,4 +1,4 @@
-import type { RuntimeBodyState } from '../../physics/worker/messages'
+import type { RuntimeBodyState, RuntimeConnectorState } from '../../physics/worker/messages'
 import {
   resolveBooleanScene,
   transformBooleanBodyGeometry,
@@ -15,6 +15,7 @@ import {
   getEntityBounds,
   getEntityTransform,
   isScalableEntity,
+  resolveConnectorEndpoint,
   type EntityBounds,
 } from './entityGeometry'
 
@@ -34,6 +35,27 @@ function geometryBounds(geometry: BooleanMultiPolygon): EntityBounds | null {
     minY: Math.min(...points.map((point) => point[1])),
     maxX: Math.max(...points.map((point) => point[0])),
     maxY: Math.max(...points.map((point) => point[1])),
+  }
+}
+
+function connectorBounds(
+  entity: Extract<SceneEntity, { kind: 'connector' }>,
+  entities: readonly SceneEntity[],
+  runtimeConnector: RuntimeConnectorState | undefined,
+): EntityBounds | null {
+  const points = runtimeConnector?.points.length
+    ? runtimeConnector.points
+    : [
+        resolveConnectorEndpoint(entities, entity.a),
+        resolveConnectorEndpoint(entities, entity.b),
+      ].filter((point): point is Vec2 => point !== null)
+  if (points.length === 0) return null
+  const padding = Math.max(0, entity.radiusM)
+  return {
+    minX: Math.min(...points.map((point) => point.x)) - padding,
+    minY: Math.min(...points.map((point) => point.y)) - padding,
+    maxX: Math.max(...points.map((point) => point.x)) + padding,
+    maxY: Math.max(...points.map((point) => point.y)) + padding,
   }
 }
 
@@ -109,6 +131,7 @@ export function listEditingSelectionTargets(
   runtimeBodies: Record<EntityId, RuntimeBodyState> = {},
   previewEntityIds: ReadonlySet<EntityId> = new Set(),
   explicitSourceIds: ReadonlySet<EntityId> = new Set(),
+  runtimeConnectors: Record<EntityId, RuntimeConnectorState> = {},
 ): EditingSelectionTarget[] {
   const booleanScene = resolveBooleanScene(scene)
   const booleanSourceIds = new Set(booleanScene.roots.flatMap((result) => result.sourceEntityIds))
@@ -128,7 +151,10 @@ export function listEditingSelectionTargets(
         isTreeItemEffectivelyLocked(scene.rootItems, entity.id)
       )
         continue
-      const bounds = getEntityBounds(entity)
+      const bounds =
+        entity.kind === 'connector'
+          ? connectorBounds(entity, renderedEntities, runtimeConnectors[entity.id])
+          : getEntityBounds(entity)
       if (!bounds) continue
       targets.push({
         id: entity.id,
@@ -175,7 +201,10 @@ export function listEditingSelectionTargets(
     ) {
       continue
     }
-    const bounds = getEntityBounds(entity)
+    const bounds =
+      entity.kind === 'connector'
+        ? connectorBounds(entity, renderedEntities, runtimeConnectors[entity.id])
+        : getEntityBounds(entity)
     if (!bounds) continue
     targets.push({
       id: sourceId,

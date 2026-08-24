@@ -22,14 +22,17 @@ import { validateSceneDocument } from '../../scene/validation/sceneSchema'
 import {
   createScaleHandleGeometry,
   bodyLocalAnchorIsInside,
+  canScaleEntitiesByAxis,
   clampBodyLocalAnchor,
   createBodyCenterConnectorEndpoint,
   distance,
   dot,
   getEntityTransform,
   getScalableSelectionBounds,
+  rectangleFromCorners,
   resolveConnectorEndpoint,
   scaleEntitiesAroundPivot,
+  scaleEntitiesAroundPivotByAxes,
   snapBodyToGround,
   snapBodyToSurfaces,
   snapBooleanBodyToSurfaces,
@@ -41,6 +44,23 @@ import { findTopEntity } from './hitTest'
 const layerId = '00000000-0000-4000-8000-000000000001'
 
 describe('实体几何变换', () => {
+  it('矩形物块由按下角和对角确定中心与尺寸', () => {
+    const cases = [
+      { end: { x: 5, y: 7 }, center: { x: 3, y: 4 }, width: 4, height: 6 },
+      { end: { x: -3, y: 7 }, center: { x: -1, y: 4 }, width: 4, height: 6 },
+      { end: { x: 5, y: -5 }, center: { x: 3, y: -2 }, width: 4, height: 6 },
+      { end: { x: -3, y: -5 }, center: { x: -1, y: -2 }, width: 4, height: 6 },
+    ]
+
+    for (const testCase of cases) {
+      expect(rectangleFromCorners({ x: 1, y: 1 }, testCase.end, 0.2)).toEqual({
+        center: testCase.center,
+        width: testCase.width,
+        height: testCase.height,
+      })
+    }
+  })
+
   it('移动和旋转直线地面时保持长度', () => {
     const ground = createLineGround(layerId, { x: -1, y: 0 }, { x: 1, y: 0 }, 1)
     const transformed = withEntityTransform(ground, {
@@ -518,6 +538,47 @@ describe('实体几何变换', () => {
     }
   })
 
+  it('边中点手柄只缩放对应轴并同步物体连接锚点', () => {
+    const block = createBlock(layerId, { x: 2, y: 1 }, 2, 4, 1)
+    const anchorTarget = createBlock(layerId, { x: 8, y: 1 }, 1, 1, 2)
+    const line = createLineGround(layerId, { x: 1, y: -2 }, { x: 3, y: -1 }, 1)
+    const rope = createRope(layerId, block.id, anchorTarget.id, 10, 1)
+    rope.a = { type: 'body', bodyId: block.id, localAnchor: { x: 0.5, y: 0.25 } }
+    const entities = [block, anchorTarget, line, rope]
+
+    expect(canScaleEntitiesByAxis(entities, [block.id, line.id])).toBe(true)
+    const { factors, replacements } = scaleEntitiesAroundPivotByAxes(
+      entities,
+      [block.id, line.id],
+      { x: 0, y: 0 },
+      { x: 2, y: 1 },
+    )
+    const scaled = new Map(replacements.map((entity) => [entity.id, entity]))
+    expect(factors).toEqual({ x: 2, y: 1 })
+    const scaledBlock = scaled.get(block.id)
+    expect(scaledBlock?.kind).toBe('body')
+    if (scaledBlock?.kind === 'body' && scaledBlock.shape.type === 'box') {
+      expect(scaledBlock.transform.position).toEqual({ x: 4, y: 1 })
+      expect(scaledBlock.shape.width).toBe(4)
+      expect(scaledBlock.shape.height).toBe(4)
+    }
+    const scaledLine = scaled.get(line.id)
+    if (scaledLine?.kind === 'ground' && scaledLine.geometry.type === 'line') {
+      expect(scaledLine.geometry.start).toEqual({ x: 2, y: -2 })
+      expect(scaledLine.geometry.end).toEqual({ x: 6, y: -1 })
+    }
+    const scaledRope = scaled.get(rope.id)
+    if (scaledRope?.kind === 'connector' && scaledRope.a.type === 'body') {
+      expect(scaledRope.a.localAnchor).toEqual({ x: 1, y: 0.25 })
+    }
+
+    const ball = createBall(layerId, { x: 0, y: 0 }, 1, 3)
+    const arc = createArcGround(layerId, { x: 0, y: 0 }, 2, 0, Math.PI, 2)
+    expect(canScaleEntitiesByAxis([ball], [ball.id])).toBe(false)
+    expect(canScaleEntitiesByAxis([arc], [arc.id])).toBe(false)
+    expect(canScaleEntitiesByAxis([block, ball], [block.id, ball.id])).toBe(false)
+  })
+
   it('缩放有限场范围但保持场强、方向和角度', () => {
     const rectangle = createGravityField(layerId, { x: 2, y: 2 }, 4, 2, 1)
     const sector: FieldEntity = {
@@ -685,6 +746,13 @@ describe('实体几何变换', () => {
       { x: -1.25, y: 1.25 },
       { x: 1.25, y: -1.25 },
       { x: 1.25, y: 1.25 },
+    ])
+    const handlesWithSides = createScaleHandleGeometry(bounds!, 0.25, true)
+    expect(handlesWithSides.handles.slice(4).map((handle) => handle.position)).toEqual([
+      { x: -1.25, y: 0 },
+      { x: 1.25, y: 0 },
+      { x: 0, y: -1.25 },
+      { x: 0, y: 1.25 },
     ])
   })
 

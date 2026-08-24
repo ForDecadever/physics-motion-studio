@@ -1,5 +1,5 @@
-export const CURRENT_SCHEMA_VERSION = 16 as const
-export const CURRENT_APP_VERSION = '1.5.4'
+export const CURRENT_SCHEMA_VERSION = 22 as const
+export const CURRENT_APP_VERSION = '1.6.2'
 
 export type EntityId = string
 export type ChartId = string
@@ -8,6 +8,99 @@ export type ChartSeriesId = string
 export interface Vec2 {
   x: number
   y: number
+}
+
+export interface ScalarExpressionDefinition {
+  expression: string
+  fallbackValue: number
+}
+
+export interface GlobalVariableDefinition {
+  name: string
+  expression: string
+  value: number
+}
+
+export type EntityNumericProperty =
+  | 'transform.position.x'
+  | 'transform.position.y'
+  | 'transform.angleDegrees'
+  | 'groundJoint.transition.lengthM'
+  | 'body.shape.radius'
+  | 'body.shape.width'
+  | 'body.shape.height'
+  | 'body.massKg'
+  | 'body.chargeC'
+  | 'body.material.friction'
+  | 'body.material.restitution'
+  | 'body.initialVelocity.x'
+  | 'body.initialVelocity.y'
+  | 'body.initialAngularVelocityRad'
+  | 'ground.geometry.radius'
+  | 'ground.geometry.startDegrees'
+  | 'ground.geometry.endDegrees'
+  | `ground.geometry.${'p0' | 'p1' | 'p2' | 'p3'}.${'x' | 'y'}`
+  | 'ground.material.friction'
+  | 'ground.material.restitution'
+  | 'ground.conveyor.speedMps'
+  | 'field.region.width'
+  | 'field.region.height'
+  | 'field.region.radius'
+  | 'field.region.startDegrees'
+  | 'field.region.sweepDegrees'
+  | 'field.gravity.x'
+  | 'field.gravity.y'
+  | 'force.localAnchor.x'
+  | 'force.localAnchor.y'
+  | 'measurement.marker.lineWidthM'
+  | 'particleSource.directionDegrees'
+  | 'particleSource.spreadDegrees'
+  | 'particleSource.densityPerDegree'
+  | 'particleSource.continuous.intervalSeconds'
+  | 'particleSource.continuous.lifetimeSeconds'
+  | 'particleSource.speedMps'
+  | 'particleSource.chargeC'
+  | 'particleSource.massKg'
+  | 'connector.length'
+  | 'connector.stiffness'
+  | 'connector.damping'
+  | 'connector.radiusM'
+  | 'connector.massKg'
+  | 'connector.material.friction'
+  | 'connector.material.restitution'
+  | `connector.endpoint.${'a' | 'b'}.${'localAnchor' | 'position'}.${'x' | 'y'}`
+  | `connector.endpoint.${'a' | 'b'}.pathPercent`
+
+export type BooleanNumericProperty =
+  | 'boolean.totalMassKg'
+  | 'boolean.totalChargeC'
+  | 'boolean.friction'
+  | 'boolean.restitution'
+  | 'boolean.transform.position.x'
+  | 'boolean.transform.position.y'
+  | 'boolean.transform.angleDegrees'
+  | 'boolean.initialVelocity.x'
+  | 'boolean.initialVelocity.y'
+  | 'boolean.initialAngularVelocityRad'
+  | 'boolean.field.gravity.x'
+  | 'boolean.field.gravity.y'
+
+export type SceneNumericProperty =
+  | 'settings.gridStep'
+  | 'settings.snapStep'
+  | 'settings.recordingSampleRate'
+  | 'settings.recordingDurationSeconds'
+
+export type PropertyExpressionTarget =
+  | { type: 'entity'; entityId: EntityId; property: EntityNumericProperty }
+  | { type: 'boolean'; nodeId: string; property: BooleanNumericProperty }
+  | { type: 'scene'; property: SceneNumericProperty }
+
+export interface PropertyExpressionBinding {
+  id: string
+  target: PropertyExpressionTarget
+  expression: string
+  fallbackValue: number
 }
 
 export interface Transform2D {
@@ -30,7 +123,7 @@ export interface BezierPathNode {
   }
 }
 
-export type BooleanOperation = 'union' | 'difference'
+export type BooleanOperation = 'union' | 'intersection' | 'difference'
 
 export interface EntityTreeItem {
   kind: 'entity'
@@ -43,6 +136,9 @@ export type BooleanChargeDistribution =
   { mode: 'source' } | { mode: 'uniform'; totalChargeC: number }
 
 export type BooleanScalarDistribution = { mode: 'source' } | { mode: 'uniform'; value: number }
+
+export type BooleanFieldDistribution =
+  { mode: 'source' } | { mode: 'uniform'; field: FieldDefinition }
 
 export type BooleanInitialVelocity = { mode: 'source' } | { mode: 'override'; value: Vec2 }
 
@@ -63,6 +159,7 @@ export interface BooleanNode {
   continuousCollisionDetection: boolean
   massDistribution: BooleanMassDistribution
   chargeDistribution: BooleanChargeDistribution
+  fieldDistribution: BooleanFieldDistribution
   frictionDistribution: BooleanScalarDistribution
   restitutionDistribution: BooleanScalarDistribution
   initialVelocity: BooleanInitialVelocity
@@ -96,10 +193,17 @@ export type GroundGeometry =
       p3: Vec2
     }
 
+export interface GroundConveyor {
+  enabled: boolean
+  direction: 'forward' | 'reverse'
+  speedMps: number
+}
+
 export interface GroundEntity extends BaseEntity {
   kind: 'ground'
   geometry: GroundGeometry
   material: Material2D
+  conveyor: GroundConveyor
   collisionSide: 'both'
   normalFlipped: false
 }
@@ -130,6 +234,7 @@ export type BodyShape =
 export interface BodyEntity extends BaseEntity {
   kind: 'body'
   preset: 'ball' | 'block'
+  color: string
   shape: BodyShape
   transform: Transform2D
   massKg: number
@@ -161,9 +266,24 @@ export type FieldRegion =
   | { type: 'bezierPath'; nodes: BezierPathNode[] }
 
 export type FieldDefinition =
-  | { type: 'uniformGravity'; acceleration: Vec2 }
-  | { type: 'uniformElectric'; strength: Vec2 }
-  | { type: 'uniformMagnetic'; bzTesla: number }
+  | {
+      type: 'uniformGravity'
+      acceleration: Vec2
+      magnitudeExpression?: ScalarExpressionDefinition
+    }
+  | {
+      type: 'uniformElectric'
+      strength: Vec2
+      componentExpressions?: {
+        x?: ScalarExpressionDefinition
+        y?: ScalarExpressionDefinition
+      }
+    }
+  | {
+      type: 'uniformMagnetic'
+      bzTesla: number
+      magnitudeExpression?: ScalarExpressionDefinition
+    }
 
 export interface FieldEntity extends BaseEntity {
   kind: 'field'
@@ -240,11 +360,39 @@ export interface ParticleSourceEntity extends BaseEntity {
   kind: 'particleSource'
   shape: ParticleSourceShape
   directionRad: number
+  spreadRad: number
+  densityPerDegree: number
   flipEmission: boolean
+  continuousEmission: {
+    enabled: boolean
+    simultaneous: boolean
+    intervalSeconds: number
+    lifetimeSeconds: number
+  }
   speedMps: number
   chargeC: number
   massKg: number
   coulombEnabled: boolean
+}
+
+export interface ForceEntity extends BaseEntity {
+  kind: 'force'
+  bodyId: EntityId
+  localAnchor: Vec2
+  magnitudeN: number
+  directionRad: number
+  magnitudeExpression?: ScalarExpressionDefinition
+  directionDegreesExpression?: ScalarExpressionDefinition
+}
+
+export type MeasurementDefinition =
+  | { type: 'marker'; points: Vec2[]; color: string; lineWidthM: number }
+  | { type: 'ruler'; a: Vec2; b: Vec2 }
+  | { type: 'protractor'; a: Vec2; vertex: Vec2; b: Vec2 }
+
+export interface MeasurementEntity extends BaseEntity {
+  kind: 'measurement'
+  measurement: MeasurementDefinition
 }
 
 export type SceneEntity =
@@ -254,6 +402,8 @@ export type SceneEntity =
   | FieldEntity
   | ConnectorEntity
   | ParticleSourceEntity
+  | ForceEntity
+  | MeasurementEntity
 
 export interface SceneMetadata {
   name: string
@@ -319,6 +469,8 @@ export interface SceneDocument {
   appVersion: string
   metadata: SceneMetadata
   settings: SceneSettings
+  globalVariables: GlobalVariableDefinition[]
+  propertyExpressions: PropertyExpressionBinding[]
   rootItems: SceneTreeItem[]
   entities: SceneEntity[]
   charts: ChartDefinition[]

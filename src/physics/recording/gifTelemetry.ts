@@ -11,7 +11,7 @@ export const GIF_RECORDING_SAMPLE_RATE = 30
 export const GIF_RECORDING_DURATION_SECONDS = 300
 export const GIF_RECORDING_MAX_BODIES = 200
 export const GIF_RECORDING_MAX_CONNECTOR_POINTS = 512
-export const GIF_RECORDING_MAX_PARTICLE_IONS = 512
+export const GIF_RECORDING_TELEMETRY_BUDGET_BYTES = 512 * 1024 * 1024
 export const GIF_BODY_CHANNEL_COUNT = 7
 
 const X = 0
@@ -22,50 +22,106 @@ const VELOCITY_Y = 4
 const FORCE_X = 5
 const FORCE_Y = 6
 
+interface ParticleTelemetryFrame {
+  sourceIndexes: Uint32Array
+  ionIds: Uint32Array
+  ts: Float32Array
+  bornTimes: Float32Array
+  continuous: Uint8Array
+  values: Float32Array
+  byteLength: number
+}
+
+function particleFrame(
+  sources: readonly RuntimeParticleSourceState[],
+  sourceIndex: ReadonlyMap<EntityId, number>,
+): ParticleTelemetryFrame {
+  let count = 0
+  for (const source of sources) count += source.ions.length
+  const sourceIndexes = new Uint32Array(count)
+  const ionIds = new Uint32Array(count)
+  const ts = new Float32Array(count)
+  const bornTimes = new Float32Array(count)
+  const continuous = new Uint8Array(count)
+  const values = new Float32Array(count * 2)
+  let index = 0
+  for (const source of sources) {
+    const runtimeSourceIndex = sourceIndex.get(source.entityId) ?? 0
+    for (const ion of source.ions) {
+      sourceIndexes[index] = runtimeSourceIndex
+      ionIds[index] = ion.id
+      ts[index] = ion.t
+      bornTimes[index] = ion.bornAt
+      continuous[index] = ion.continuous ? 1 : 0
+      values[index * 2] = ion.position.x
+      values[index * 2 + 1] = ion.position.y
+      index += 1
+    }
+  }
+  return {
+    sourceIndexes,
+    ionIds,
+    ts,
+    bornTimes,
+    continuous,
+    values,
+    byteLength:
+      sourceIndexes.byteLength +
+      ionIds.byteLength +
+      ts.byteLength +
+      bornTimes.byteLength +
+      continuous.byteLength +
+      values.byteLength,
+  }
+}
+
 export class GifTelemetryBuffer {
   readonly bodyIds: EntityId[]
   readonly connectorIds: EntityId[]
+  readonly particleSourceIds: EntityId[]
   readonly capacity: number
   readonly status: GifHistoryStatus
 
   private readonly bodyIndex = new Map<EntityId, number>()
   private readonly connectorIndex = new Map<EntityId, number>()
+  private readonly particleSourceIndex = new Map<EntityId, number>()
   private readonly connectorPointOffsets: Uint32Array
   private readonly times: Float32Array | null
   private readonly values: Float32Array | null
   private readonly connectorValues: Float32Array | null
-  private readonly particleIonCount: number
-  private readonly particleIonTs: Float32Array | null
-  private readonly particleValues: Float32Array | null
-  private writeIndex = 0
+  private readonly particleFrames: Array<ParticleTelemetryFrame | null>
+  private startIndex = 0
   private sampleCount = 0
+  private particleAllocatedBytes = 0
+  private historyTruncated = false
 
   constructor(
     bodyIds: readonly EntityId[],
     connectors: readonly RuntimeConnectorState[] = [],
     particleSources: readonly RuntimeParticleSourceState[] = [],
+    private readonly telemetryBudgetBytes = GIF_RECORDING_TELEMETRY_BUDGET_BYTES,
   ) {
     this.bodyIds = [...bodyIds]
     this.connectorIds = connectors.map((connector) => connector.entityId)
+    this.particleSourceIds = particleSources.map((source) => source.entityId)
     this.capacity = GIF_RECORDING_SAMPLE_RATE * GIF_RECORDING_DURATION_SECONDS
+    this.particleFrames = Array.from({ length: this.capacity }, () => null)
     this.connectorPointOffsets = new Uint32Array(connectors.length + 1)
     for (const [index, connector] of connectors.entries()) {
       this.connectorIndex.set(connector.entityId, index)
       this.connectorPointOffsets[index + 1] =
         this.connectorPointOffsets[index]! + connector.points.length
     }
+    for (const [index, entityId] of this.particleSourceIds.entries()) {
+      this.particleSourceIndex.set(entityId, index)
+    }
     const connectorPointCount =
       this.connectorPointOffsets[this.connectorPointOffsets.length - 1] ?? 0
-
-    const particleIons = particleSources.flatMap((source) => source.ions)
-    this.particleIonCount = particleIons.length
-    this.particleIonTs = new Float32Array(particleIons.map((ion) => ion.t))
 
     if (bodyIds.length > GIF_RECORDING_MAX_BODIES) {
       this.times = null
       this.values = null
       this.connectorValues = null
-      this.particleValues = null
       this.status = {
         kind: 'blocked',
         reason: 'body-limit',
@@ -74,12 +130,10 @@ export class GifTelemetryBuffer {
       }
       return
     }
-
     if (connectorPointCount > GIF_RECORDING_MAX_CONNECTOR_POINTS) {
       this.times = null
       this.values = null
       this.connectorValues = null
-      this.particleValues = null
       this.status = {
         kind: 'blocked',
         reason: 'connector-point-limit',
@@ -89,27 +143,10 @@ export class GifTelemetryBuffer {
       return
     }
 
-    if (this.particleIonCount > GIF_RECORDING_MAX_PARTICLE_IONS) {
-      this.times = null
-      this.values = null
-      this.connectorValues = null
-      this.particleValues = null
-      this.status = {
-        kind: 'blocked',
-        reason: 'particle-ion-limit',
-        ionCount: this.particleIonCount,
-        maxIons: GIF_RECORDING_MAX_PARTICLE_IONS,
-      }
-      return
-    }
-
-    for (const [index, entityId] of this.bodyIds.entries()) {
-      this.bodyIndex.set(entityId, index)
-    }
+    for (const [index, entityId] of this.bodyIds.entries()) this.bodyIndex.set(entityId, index)
     this.times = new Float32Array(this.capacity)
     this.values = new Float32Array(this.capacity * this.bodyIds.length * GIF_BODY_CHANNEL_COUNT)
     this.connectorValues = new Float32Array(this.capacity * connectorPointCount * 2)
-    this.particleValues = new Float32Array(this.capacity * this.particleIonCount * 2)
     this.status = {
       kind: 'ready',
       bodyCount: bodyIds.length,
@@ -117,6 +154,9 @@ export class GifTelemetryBuffer {
       sampleCount: 0,
       startTime: 0,
       endTime: 0,
+      telemetryBudgetBytes: this.telemetryBudgetBytes,
+      allocatedBytes: this.allocatedBytes,
+      historyTruncated: false,
     }
   }
 
@@ -124,10 +164,36 @@ export class GifTelemetryBuffer {
     return this.sampleCount
   }
 
+  private get fixedAllocatedBytes(): number {
+    return (
+      this.connectorPointOffsets.byteLength +
+      (this.times?.byteLength ?? 0) +
+      (this.values?.byteLength ?? 0) +
+      (this.connectorValues?.byteLength ?? 0)
+    )
+  }
+
+  get allocatedBytes(): number {
+    return this.fixedAllocatedBytes + this.particleAllocatedBytes
+  }
+
   clear(): void {
-    this.writeIndex = 0
+    this.startIndex = 0
     this.sampleCount = 0
+    this.particleAllocatedBytes = 0
+    this.historyTruncated = false
     this.times?.fill(0)
+    this.particleFrames.fill(null)
+  }
+
+  private evictOldest(markTruncated: boolean): void {
+    if (this.sampleCount === 0) return
+    const frame = this.particleFrames[this.startIndex]
+    if (frame) this.particleAllocatedBytes -= frame.byteLength
+    this.particleFrames[this.startIndex] = null
+    this.startIndex = (this.startIndex + 1) % this.capacity
+    this.sampleCount -= 1
+    if (markTruncated) this.historyTruncated = true
   }
 
   append(
@@ -136,20 +202,23 @@ export class GifTelemetryBuffer {
     connectors: readonly RuntimeConnectorState[] = [],
     particleSources: readonly RuntimeParticleSourceState[] = [],
   ): boolean {
-    if (
-      !this.times ||
-      !this.values ||
-      !this.connectorValues ||
-      !this.particleValues ||
-      !Number.isFinite(simulationTime)
-    ) {
+    if (!this.times || !this.values || !this.connectorValues || !Number.isFinite(simulationTime)) {
       return false
     }
 
-    const bodyStride = this.bodyIds.length * GIF_BODY_CHANNEL_COUNT
-    const frameOffset = this.writeIndex * bodyStride
-    this.values.fill(Number.NaN, frameOffset, frameOffset + bodyStride)
+    const particles = particleFrame(particleSources, this.particleSourceIndex)
+    if (this.sampleCount === this.capacity) this.evictOldest(false)
+    while (
+      this.sampleCount > 0 &&
+      this.allocatedBytes + particles.byteLength > this.telemetryBudgetBytes
+    ) {
+      this.evictOldest(true)
+    }
 
+    const writeIndex = (this.startIndex + this.sampleCount) % this.capacity
+    const bodyStride = this.bodyIds.length * GIF_BODY_CHANNEL_COUNT
+    const frameOffset = writeIndex * bodyStride
+    this.values.fill(Number.NaN, frameOffset, frameOffset + bodyStride)
     for (const body of bodies) {
       const bodyIndex = this.bodyIndex.get(body.entityId)
       if (bodyIndex === undefined) continue
@@ -166,7 +235,7 @@ export class GifTelemetryBuffer {
     const connectorPointCount =
       this.connectorPointOffsets[this.connectorPointOffsets.length - 1] ?? 0
     const connectorStride = connectorPointCount * 2
-    const connectorFrameOffset = this.writeIndex * connectorStride
+    const connectorFrameOffset = writeIndex * connectorStride
     this.connectorValues.fill(
       Number.NaN,
       connectorFrameOffset,
@@ -185,47 +254,29 @@ export class GifTelemetryBuffer {
       }
     }
 
-    const particleStride = this.particleIonCount * 2
-    const particleFrameOffset = this.writeIndex * particleStride
-    this.particleValues.fill(Number.NaN, particleFrameOffset, particleFrameOffset + particleStride)
-    let particleIonIndex = 0
-    for (const source of particleSources) {
-      for (const ion of source.ions) {
-        const offset = particleFrameOffset + particleIonIndex * 2
-        this.particleValues[offset] = ion.position.x
-        this.particleValues[offset + 1] = ion.position.y
-        particleIonIndex += 1
-      }
-    }
-
-    this.times[this.writeIndex] = simulationTime
-    this.writeIndex = (this.writeIndex + 1) % this.capacity
-    this.sampleCount = Math.min(this.sampleCount + 1, this.capacity)
+    this.particleFrames[writeIndex] = particles
+    this.particleAllocatedBytes += particles.byteLength
+    this.times[writeIndex] = simulationTime
+    this.sampleCount += 1
     return true
   }
 
   getStatus(): GifHistoryStatus {
     if (this.status.kind === 'blocked') return this.status
-    const firstIndex =
-      this.sampleCount < this.capacity ? 0 : (this.writeIndex + this.capacity) % this.capacity
-    const lastIndex = (this.writeIndex - 1 + this.capacity) % this.capacity
+    const lastIndex = (this.startIndex + this.sampleCount - 1 + this.capacity) % this.capacity
     return {
       ...this.status,
       sampleCount: this.sampleCount,
-      startTime: this.sampleCount > 0 && this.times ? this.times[firstIndex]! : 0,
+      startTime: this.sampleCount > 0 && this.times ? this.times[this.startIndex]! : 0,
       endTime: this.sampleCount > 0 && this.times ? this.times[lastIndex]! : 0,
+      allocatedBytes: this.allocatedBytes,
+      historyTruncated: this.historyTruncated,
     }
   }
 
   snapshot(requestId: number): GifHistorySnapshot {
     const status = this.getStatus()
-    if (
-      !this.times ||
-      !this.values ||
-      !this.connectorValues ||
-      !this.particleValues ||
-      status.kind === 'blocked'
-    ) {
+    if (!this.times || !this.values || !this.connectorValues || status.kind === 'blocked') {
       return {
         requestId,
         status,
@@ -236,8 +287,13 @@ export class GifTelemetryBuffer {
         connectorIds: [...this.connectorIds],
         connectorPointOffsets: this.connectorPointOffsets.slice(),
         connectorValues: new Float32Array(),
-        particleIonCount: this.particleIonCount,
-        particleIonTs: (this.particleIonTs ?? new Float32Array()).slice(),
+        particleSourceIds: [...this.particleSourceIds],
+        particleFrameOffsets: new Uint32Array([0]),
+        particleSourceIndexes: new Uint32Array(),
+        particleIonIds: new Uint32Array(),
+        particleIonTs: new Float32Array(),
+        particleIonBornTimes: new Float32Array(),
+        particleIonContinuous: new Uint8Array(),
         particleValues: new Float32Array(),
       }
     }
@@ -249,12 +305,23 @@ export class GifTelemetryBuffer {
       this.connectorPointOffsets[this.connectorPointOffsets.length - 1] ?? 0
     const connectorStride = connectorPointCount * 2
     const connectorValues = new Float32Array(this.sampleCount * connectorStride)
-    const particleStride = this.particleIonCount * 2
-    const particleValues = new Float32Array(this.sampleCount * particleStride)
-    const oldest = this.sampleCount < this.capacity ? 0 : this.writeIndex
+    const particleFrameOffsets = new Uint32Array(this.sampleCount + 1)
+    for (let targetIndex = 0; targetIndex < this.sampleCount; targetIndex += 1) {
+      const sourceIndex = (this.startIndex + targetIndex) % this.capacity
+      const frame = this.particleFrames[sourceIndex]
+      particleFrameOffsets[targetIndex + 1] =
+        particleFrameOffsets[targetIndex]! + (frame?.ionIds.length ?? 0)
+    }
+    const particleCount = particleFrameOffsets[this.sampleCount] ?? 0
+    const particleSourceIndexes = new Uint32Array(particleCount)
+    const particleIonIds = new Uint32Array(particleCount)
+    const particleIonTs = new Float32Array(particleCount)
+    const particleIonBornTimes = new Float32Array(particleCount)
+    const particleIonContinuous = new Uint8Array(particleCount)
+    const particleValues = new Float32Array(particleCount * 2)
 
     for (let targetIndex = 0; targetIndex < this.sampleCount; targetIndex += 1) {
-      const sourceIndex = (oldest + targetIndex) % this.capacity
+      const sourceIndex = (this.startIndex + targetIndex) % this.capacity
       times[targetIndex] = this.times[sourceIndex]!
       const sourceOffset = sourceIndex * bodyStride
       values.set(
@@ -269,11 +336,15 @@ export class GifTelemetryBuffer {
         ),
         targetIndex * connectorStride,
       )
-      const particleSourceOffset = sourceIndex * particleStride
-      particleValues.set(
-        this.particleValues.subarray(particleSourceOffset, particleSourceOffset + particleStride),
-        targetIndex * particleStride,
-      )
+      const particleOffset = particleFrameOffsets[targetIndex]!
+      const frame = this.particleFrames[sourceIndex]
+      if (!frame) continue
+      particleSourceIndexes.set(frame.sourceIndexes, particleOffset)
+      particleIonIds.set(frame.ionIds, particleOffset)
+      particleIonTs.set(frame.ts, particleOffset)
+      particleIonBornTimes.set(frame.bornTimes, particleOffset)
+      particleIonContinuous.set(frame.continuous, particleOffset)
+      particleValues.set(frame.values, particleOffset * 2)
     }
 
     return {
@@ -286,8 +357,13 @@ export class GifTelemetryBuffer {
       connectorIds: [...this.connectorIds],
       connectorPointOffsets: this.connectorPointOffsets.slice(),
       connectorValues,
-      particleIonCount: this.particleIonCount,
-      particleIonTs: this.particleIonTs!.slice(),
+      particleSourceIds: [...this.particleSourceIds],
+      particleFrameOffsets,
+      particleSourceIndexes,
+      particleIonIds,
+      particleIonTs,
+      particleIonBornTimes,
+      particleIonContinuous,
       particleValues,
     }
   }

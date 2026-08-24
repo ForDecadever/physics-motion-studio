@@ -21,6 +21,11 @@ export type EditorTool =
   | 'field'
   | 'connector'
   | 'particleSource'
+  | 'force'
+  | 'marker'
+  | 'ruler'
+  | 'protractor'
+  | 'forceMeter'
 export type BodyToolPreset = 'ball' | 'block'
 export type BlockToolShape =
   'rectangle' | 'freeform' | 'quarterRamp' | 'semicircleCutout' | 'quarterCircleCutout' | 'triangle'
@@ -28,6 +33,7 @@ export type FieldToolPreset = 'uniformGravity' | 'uniformElectric' | 'uniformMag
 export type FieldRegionToolShape = 'rectangle' | 'circle' | 'freeform' | 'infinite'
 export type ConnectorToolPreset = 'rope' | 'rod' | 'spring'
 export type ParticleSourceToolShape = 'point' | 'line'
+export type MeasurementTool = 'marker' | 'ruler' | 'protractor' | 'forceMeter'
 
 interface EditorState {
   activeTool: EditorTool
@@ -39,6 +45,7 @@ interface EditorState {
   fieldRegionToolShape: FieldRegionToolShape
   connectorToolPreset: ConnectorToolPreset
   particleSourceToolShape: ParticleSourceToolShape
+  measurementTool: MeasurementTool
   gridVisible: boolean
   snapEnabled: boolean
   wallSnapEnabled: boolean
@@ -55,6 +62,8 @@ interface EditorState {
   groundJointHover: GroundEndpointRef | null
   pendingGroundEndpoint: GroundEndpointRef | null
   groundJointMessage: string | null
+  measurementPoints: Vec2[]
+  forceProbe: { bodyId: EntityId; localPoint: Vec2 } | null
   setActiveTool: (tool: EditorTool) => void
   setGroundToolShape: (shape: 'line' | 'arc' | 'cubicBezier') => void
   setBodyToolPreset: (preset: BodyToolPreset) => void
@@ -64,6 +73,7 @@ interface EditorState {
   setFieldRegionToolShape: (shape: FieldRegionToolShape) => void
   setConnectorToolPreset: (preset: ConnectorToolPreset) => void
   setParticleSourceToolShape: (shape: ParticleSourceToolShape) => void
+  setMeasurementTool: (tool: MeasurementTool) => void
   toggleGrid: () => void
   toggleSnap: () => void
   toggleWallSnap: () => void
@@ -83,6 +93,8 @@ interface EditorState {
   setGroundJointHover: (endpoint: GroundEndpointRef | null) => void
   setPendingGroundEndpoint: (endpoint: GroundEndpointRef | null) => void
   setGroundJointMessage: (message: string | null) => void
+  setMeasurementPoints: (points: Vec2[]) => void
+  setForceProbe: (probe: { bodyId: EntityId; localPoint: Vec2 } | null) => void
   resetForDocument: () => void
 }
 
@@ -96,6 +108,7 @@ export const useEditorStore = create<EditorState>((set) => ({
   fieldRegionToolShape: 'rectangle',
   connectorToolPreset: 'rope',
   particleSourceToolShape: 'point',
+  measurementTool: 'marker',
   gridVisible: true,
   snapEnabled: true,
   wallSnapEnabled: true,
@@ -112,14 +125,26 @@ export const useEditorStore = create<EditorState>((set) => ({
   groundJointHover: null,
   pendingGroundEndpoint: null,
   groundJointMessage: null,
+  measurementPoints: [],
+  forceProbe: null,
   setActiveTool: (activeTool) =>
     set((state) => ({
       activeTool,
+      measurementTool:
+        activeTool === 'marker' ||
+        activeTool === 'ruler' ||
+        activeTool === 'protractor' ||
+        activeTool === 'forceMeter'
+          ? activeTool
+          : state.measurementTool,
       connectorStartEndpoint: activeTool === 'connector' ? state.connectorStartEndpoint : null,
       groundJointStart: activeTool === 'groundJoint' ? state.groundJointStart : null,
       groundJointHover: activeTool === 'groundJoint' ? state.groundJointHover : null,
       pendingGroundEndpoint: null,
       groundJointMessage: activeTool === 'groundJoint' ? state.groundJointMessage : null,
+      measurementPoints:
+        activeTool === 'ruler' || activeTool === 'protractor' ? state.measurementPoints : [],
+      forceProbe: activeTool === 'forceMeter' ? state.forceProbe : null,
       draftEntity: null,
       marquee: null,
       previewEntities: {},
@@ -133,6 +158,7 @@ export const useEditorStore = create<EditorState>((set) => ({
   setFieldRegionToolShape: (fieldRegionToolShape) => set({ fieldRegionToolShape }),
   setConnectorToolPreset: (connectorToolPreset) => set({ connectorToolPreset }),
   setParticleSourceToolShape: (particleSourceToolShape) => set({ particleSourceToolShape }),
+  setMeasurementTool: (measurementTool) => set({ measurementTool, activeTool: measurementTool }),
   toggleGrid: () => set((state) => ({ gridVisible: !state.gridVisible })),
   toggleSnap: () => set((state) => ({ snapEnabled: !state.snapEnabled })),
   toggleWallSnap: () => set((state) => ({ wallSnapEnabled: !state.wallSnapEnabled })),
@@ -159,6 +185,8 @@ export const useEditorStore = create<EditorState>((set) => ({
   setGroundJointHover: (groundJointHover) => set({ groundJointHover }),
   setPendingGroundEndpoint: (pendingGroundEndpoint) => set({ pendingGroundEndpoint }),
   setGroundJointMessage: (groundJointMessage) => set({ groundJointMessage }),
+  setMeasurementPoints: (measurementPoints) => set({ measurementPoints }),
+  setForceProbe: (forceProbe) => set({ forceProbe }),
   resetForDocument: () =>
     set({
       camera: defaultCamera,
@@ -172,5 +200,7 @@ export const useEditorStore = create<EditorState>((set) => ({
       groundJointHover: null,
       pendingGroundEndpoint: null,
       groundJointMessage: null,
+      measurementPoints: [],
+      forceProbe: null,
     }),
 }))

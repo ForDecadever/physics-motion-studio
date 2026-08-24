@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
-import type { RuntimeBodyState, RuntimeConnectorState } from '../worker/messages'
+import type {
+  RuntimeBodyState,
+  RuntimeConnectorState,
+  RuntimeParticleSourceState,
+} from '../worker/messages'
 import {
   GIF_BODY_CHANNEL_COUNT,
   GIF_RECORDING_MAX_BODIES,
@@ -30,6 +34,24 @@ function runtimeConnector(entityId: string, value: number): RuntimeConnectorStat
       { x: value, y: value + 1 },
       { x: value + 2, y: value + 3 },
     ],
+  }
+}
+
+function runtimeParticles(
+  count: number,
+  frame: number,
+  continuousEmission = false,
+): RuntimeParticleSourceState {
+  return {
+    entityId: 'source',
+    continuousEmission,
+    ions: Array.from({ length: count }, (_, index) => ({
+      id: index,
+      t: count <= 1 ? 0.5 : index / (count - 1),
+      bornAt: continuousEmission ? index : 0,
+      continuous: continuousEmission,
+      position: { x: frame + index / 10, y: index / 20 },
+    })),
   }
 }
 
@@ -78,6 +100,10 @@ describe('GifTelemetryBuffer', () => {
     expect(snapshot.times).toHaveLength(buffer.capacity)
     expect(snapshot.times[0]).toBeCloseTo(1 / 30)
     expect(snapshot.times.at(-1)).toBeCloseTo(buffer.capacity / 30)
+    expect(buffer.length).toBe(buffer.capacity)
+
+    buffer.append((buffer.capacity + 1) / 30, [])
+    expect(buffer.length).toBe(buffer.capacity)
   })
 
   it('blocks recording instead of silently dropping bodies above the limit', () => {
@@ -122,5 +148,54 @@ describe('GifTelemetryBuffer', () => {
     const snapshot = buffer.snapshot(3)
     expect([...snapshot.times]).toEqual([5])
     expect(snapshot.values[0]).toBe(3)
+  })
+
+  it.each([1080, 3600])('records %i static particles without a particle-count limit', (count) => {
+    const source = runtimeParticles(count, 0)
+    const buffer = new GifTelemetryBuffer([], [], [source])
+
+    expect(buffer.append(0, [], [], [source])).toBe(true)
+    const snapshot = buffer.snapshot(count)
+
+    expect(snapshot.status.kind).toBe('ready')
+    expect(snapshot.particleSourceIds).toEqual(['source'])
+    expect([...snapshot.particleFrameOffsets]).toEqual([0, count])
+    expect(snapshot.particleIonIds).toHaveLength(count)
+    expect(snapshot.particleValues).toHaveLength(count * 2)
+  })
+
+  it('stores variable particle births and expirations with stable ids', () => {
+    const initial = runtimeParticles(1, 0, true)
+    const second = runtimeParticles(2, 1, true)
+    second.ions[0]!.id = 0
+    second.ions[1]!.id = 1
+    const third = runtimeParticles(1, 2, true)
+    third.ions[0]!.id = 1
+    const buffer = new GifTelemetryBuffer([], [], [initial])
+
+    buffer.append(0, [], [], [initial])
+    buffer.append(1, [], [], [second])
+    buffer.append(2, [], [], [third])
+    const snapshot = buffer.snapshot(9)
+
+    expect([...snapshot.particleFrameOffsets]).toEqual([0, 1, 3, 4])
+    expect([...snapshot.particleIonIds]).toEqual([0, 0, 1, 1])
+    expect([...snapshot.particleIonBornTimes]).toEqual([0, 0, 1, 0])
+    expect([...snapshot.particleIonContinuous]).toEqual([1, 1, 1, 1])
+  })
+
+  it('evicts the oldest samples when the public telemetry budget is reached', () => {
+    const source = runtimeParticles(100, 0, true)
+    const buffer = new GifTelemetryBuffer([], [], [source], 45_000)
+    for (let frame = 0; frame < 10; frame += 1) {
+      buffer.append(frame, [], [], [runtimeParticles(100, frame, true)])
+    }
+
+    const status = buffer.getStatus()
+    expect(status).toMatchObject({ kind: 'ready', historyTruncated: true, endTime: 9 })
+    if (status.kind === 'ready') {
+      expect(status.startTime).toBeGreaterThan(0)
+      expect(status.allocatedBytes).toBeLessThanOrEqual(status.telemetryBudgetBytes)
+    }
   })
 })

@@ -58,6 +58,273 @@
   box-shadow: var(--shadow-float);
 }
 
+.wideModal {
+  width: min(760px, 100%);
+}
+
+.variableTable {
+  display: grid;
+  gap: 6px;
+  max-height: min(52vh, 480px);
+  overflow: auto;
+}
+
+.variableHeader,
+.variableRow {
+  display: grid;
+  grid-template-columns: minmax(80px, 0.7fr) minmax(180px, 2fr) minmax(100px, 0.9fr) 116px;
+  gap: 8px;
+  align-items: center;
+}
+
+.variableHeader {
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.variableRow input {
+  min-width: 0;
+  height: 31px;
+  padding: 0 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-app);
+  color: var(--color-text);
+}
+
+.variableRow output {
+  overflow: hidden;
+  color: var(--color-text);
+  text-overflow: ellipsis;
+}
+
+.variableActions {
+  display: flex;
+  gap: 4px;
+}
+
+.variableActions button {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-hover);
+  color: var(--color-text-muted);
+}
+
+.settingsModal {
+  width: min(1040px, calc(100vw - 40px));
+  max-height: min(820px, calc(100vh - 40px));
+}
+
+.manualModal {
+  width: min(960px, calc(100vw - 40px));
+  max-height: min(860px, calc(100vh - 40px));
+}
+
+.manualHeader {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.manualHeader h2,
+.manualHeader p {
+  margin: 0;
+}
+
+.manualHeader p,
+.manualHeader > span {
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.manualHeader > span {
+  padding: 4px 7px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.manualContent {
+  display: grid;
+  gap: 18px;
+  max-height: min(680px, calc(100vh - 190px));
+  padding-right: 7px;
+  overflow: auto;
+}
+
+.manualContent h3 {
+  margin: 0 0 8px;
+  color: var(--color-text);
+  font-size: 14px;
+}
+
+.manualContent ol,
+.manualContent ul {
+  margin: 0;
+}
+
+.manualToolGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.manualToolGrid article {
+  display: flex;
+  gap: 9px;
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-app);
+}
+
+.manualToolGrid article > svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  color: var(--color-accent);
+}
+
+.manualToolGrid h4,
+.manualToolGrid p {
+  margin: 0;
+}
+
+.manualToolGrid h4 {
+  color: var(--color-text);
+  font-size: 12px;
+}
+
+.manualToolGrid kbd {
+  color: var(--color-text-muted);
+  font: inherit;
+}
+
+.manualToolGrid p {
+  margin-top: 3px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.manualFaq {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 7px 12px;
+  margin: 0;
+  font-size: 12px;
+}
+
+.manualFaq dt {
+  color: var(--color-text);
+  font-weight: 650;
+}
+
+.manualFaq dd {
+  margin: 0;
+  color: var(--color-text-muted);
+}
+
+.settingsHeader h2,
+.settingsHeader p {
+  margin: 0;
+}
+
+.settingsHeader p {
+  margin-top: 5px;
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.settingsGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  max-height: min(640px, calc(100vh - 210px));
+  padding: 2px;
+  overflow: auto;
+}
+
+.settingsGroup {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  min-width: 0;
+  margin: 0;
+  padding: 11px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.settingsGroup legend {
+  padding: 0 5px;
+  color: var(--color-text);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.settingsField,
+.settingsToggle {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--color-text-muted);
+  font-size: 11px;
+}
+
+.settingsField > span:last-child {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.settingsField input[type='number'],
+.settingsField select {
+  width: 150px;
+}
+
+.settingsField input[type='color'] {
+  width: 42px;
+  height: 26px;
+  padding: 2px;
+}
+
+.settingsField small {
+  min-width: 30px;
+  color: var(--color-text-dim);
+}
+
+.settingsToggle {
+  justify-content: flex-start;
+}
+
+@media (width <= 760px) {
+  .settingsGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .manualToolGrid,
+  .manualFaq {
+    grid-template-columns: 1fr;
+  }
+}
+
+.emptyModalState {
+  padding: 18px;
+  text-align: center;
+}
+
+.modalError {
+  color: var(--color-danger) !important;
+}
+
 .modal h2 {
   margin: 0 0 10px;
   font-size: 17px;
@@ -80,16 +347,21 @@
   margin-top: 18px;
 }
 
-.modalActions button {
+.modalActions button,
+.modalActionLink {
+  display: inline-flex;
   min-height: 31px;
+  align-items: center;
   padding: 0 12px;
   border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-sm);
   background: var(--color-bg-hover);
   color: var(--color-text);
+  text-decoration: none;
 }
 
-.modalActions button:first-child {
+.modalActions button:first-child,
+.modalActionPrimary {
   border-color: rgb(88 166 255 / 45%);
   background: var(--color-accent-strong);
   color: white;

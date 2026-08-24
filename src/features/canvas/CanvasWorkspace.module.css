@@ -154,3 +154,65 @@
 .vectorLegend span[data-tone='force']::before {
   background: #ffb45e;
 }
+
+.forceProbePanel {
+  position: absolute;
+  z-index: 6;
+  top: 10px;
+  left: 10px;
+  display: grid;
+  width: min(390px, calc(100% - 20px));
+  max-height: calc(100% - 50px);
+  gap: 5px;
+  padding: 9px 11px;
+  overflow: auto;
+  border: 1px solid rgb(114 214 160 / 30%);
+  border-radius: var(--radius-md);
+  background: rgb(25 28 32 / 94%);
+  box-shadow: var(--shadow-float);
+  color: var(--color-text-muted);
+  font-size: 10px;
+  pointer-events: auto;
+}
+
+.forceProbePanel strong {
+  color: #9be8bd;
+  font-size: 11px;
+}
+
+.forceProbePanel div {
+  display: grid;
+  grid-template-columns: 115px minmax(0, 1fr);
+  gap: 2px 8px;
+}
+
+.forceProbePanel div[data-total='true'] {
+  padding-top: 5px;
+  border-top: 1px solid rgb(255 255 255 / 10%);
+  color: var(--color-text);
+  font-weight: 600;
+}
+
+.forceProbePanel output {
+  text-align: right;
+}
+
+.forceProbeLabel {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+}
+
+.forceProbeLabel i {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 18%);
+}
+
+.forceProbePanel small {
+  grid-column: 1 / -1;
+  color: var(--color-text-dim);
+}

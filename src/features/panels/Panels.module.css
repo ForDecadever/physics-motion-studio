@@ -550,6 +550,116 @@
   opacity: 0.48;
 }
 
+.expressionValueWrap {
+  display: grid;
+  min-width: 0;
+  padding: 3px 0;
+  gap: 2px;
+}
+
+.expressionInputWrap {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) 14px;
+}
+
+.expressionInputWrap input {
+  width: 100%;
+  min-width: 0;
+  height: 24px;
+  padding: 0 6px;
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: 3px 0 0 3px;
+  background: #17191d;
+  color: var(--color-text);
+  font-size: 10px;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.expressionInputWrap input:focus {
+  position: relative;
+  z-index: 1;
+  border-color: var(--color-accent);
+  outline: none;
+}
+
+.expressionInputWrap input:disabled {
+  opacity: 0.48;
+}
+
+.expressionStepper {
+  display: grid;
+  grid-template-rows: 1fr 1fr;
+}
+
+.expressionStepper button {
+  display: grid;
+  min-width: 14px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid var(--color-border);
+  border-left: 0;
+  background: #1d2025;
+  color: var(--color-text-dim);
+  font-size: 6px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.expressionStepper button:first-child {
+  border-radius: 0 3px 0 0;
+  border-bottom: 0;
+}
+
+.expressionStepper button:last-child {
+  border-radius: 0 0 3px;
+}
+
+.expressionStepper button:hover:not(:disabled) {
+  color: var(--color-text);
+  background: var(--color-accent-soft);
+}
+
+.expressionStepper button:disabled {
+  opacity: 0.48;
+  cursor: default;
+}
+
+.expressionMeta {
+  display: flex;
+  min-width: 0;
+  justify-content: space-between;
+  gap: 5px;
+  color: var(--color-text-dim);
+  font-size: 8px;
+  line-height: 1.2;
+}
+
+.expressionMeta small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.colorInput {
+  width: 42px;
+  height: 26px;
+  padding: 2px;
+  border: 1px solid var(--color-border);
+  border-radius: 3px;
+  background: #17191d;
+  cursor: pointer;
+  justify-self: end;
+}
+
+.colorInput:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
 .togglePropertyRow input {
   justify-self: end;
   accent-color: var(--color-accent);

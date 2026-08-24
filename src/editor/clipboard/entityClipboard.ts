@@ -39,6 +39,9 @@ export function collectClipboardEntities(
     return null
   }
   return entities.filter((entity) => {
+    if (entity.kind === 'force') {
+      return selected.has(entity.id) || selected.has(entity.bodyId)
+    }
     if (entity.kind === 'connector') {
       const targetIds = [endpointEntityId(entity.a), endpointEntityId(entity.b)].filter(
         (id): id is EntityId => id !== null,
@@ -138,6 +141,30 @@ function offsetEntity(entity: SceneEntity, offset: Vec2): SceneEntity {
     }
     return { ...entity, region: { ...region, center: offsetPoint(region.center, offset) } }
   }
+  if (entity.kind === 'measurement') {
+    const measurement = entity.measurement
+    return {
+      ...entity,
+      measurement:
+        measurement.type === 'marker'
+          ? {
+              ...measurement,
+              points: measurement.points.map((point) => offsetPoint(point, offset)),
+            }
+          : measurement.type === 'ruler'
+            ? {
+                ...measurement,
+                a: offsetPoint(measurement.a, offset),
+                b: offsetPoint(measurement.b, offset),
+              }
+            : {
+                ...measurement,
+                a: offsetPoint(measurement.a, offset),
+                vertex: offsetPoint(measurement.vertex, offset),
+                b: offsetPoint(measurement.b, offset),
+              },
+    }
+  }
   return entity
 }
 
@@ -209,6 +236,12 @@ export function duplicateSceneClipboard(
       const b = remapEndpoint(original.b)
       if (!a || !b) continue
       entities.push({ ...structuredClone(original), id, name: `${original.name} 副本`, a, b })
+      continue
+    }
+    if (original.kind === 'force') {
+      const bodyId = targetIdMap.get(original.bodyId)
+      if (!bodyId) continue
+      entities.push({ ...structuredClone(original), id, name: `${original.name} 副本`, bodyId })
       continue
     }
     entities.push(

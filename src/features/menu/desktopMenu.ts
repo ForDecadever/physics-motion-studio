@@ -24,6 +24,8 @@ export type AppCommand =
   | 'edit:paste'
   | 'edit:delete'
   | 'edit:select-all'
+  | 'edit:global-variables'
+  | 'edit:settings'
   | 'view:toggle-grid'
   | 'view:toggle-snap'
   | `view:toggle-panel:${WorkspacePanelId}`
@@ -32,7 +34,7 @@ export type AppCommand =
   | 'simulation:step'
   | 'simulation:reset'
   | 'simulation:clear-records'
-  | 'help:shortcuts'
+  | 'help:manual'
   | 'help:physics'
   | 'help:about'
 
@@ -64,6 +66,7 @@ export interface DesktopMenuState {
   hasChartData: boolean
   simulationLocked: boolean
   modalLocked: boolean
+  globalVariablesDisabled: boolean
   gridVisible: boolean
   snapEnabled: boolean
   panelVisibility: Record<WorkspacePanelId, boolean>
@@ -173,6 +176,11 @@ export function createDesktopMenuModel(state: DesktopMenuState): MenuModel[] {
           enabled: state.hasSelection && !state.simulationLocked,
         }),
         item('edit-select-all', '全选', 'edit:select-all'),
+        { kind: 'separator', id: 'edit-separator-dialogs' },
+        item('edit-global-variables', '全局变量…', 'edit:global-variables', {
+          enabled: !state.globalVariablesDisabled,
+        }),
+        item('edit-settings', '设置…', 'edit:settings'),
       ],
     },
     {
@@ -236,7 +244,7 @@ export function createDesktopMenuModel(state: DesktopMenuState): MenuModel[] {
       id: 'help',
       text: '帮助',
       items: [
-        item('help-shortcuts', '快捷键与教程', 'help:shortcuts'),
+        item('help-manual', '软件说明', 'help:manual'),
         item('help-physics', '物理模型说明', 'help:physics'),
         { kind: 'separator', id: 'help-separator-about' },
         item('help-about', '关于 Motion Studio', 'help:about'),

@@ -12,6 +12,7 @@ import type {
   ConnectorDefinition,
   FieldDefinition,
   FieldEntity,
+  ForceEntity,
   GroundEntity,
   GroundJointEntity,
   SceneDocument,
@@ -1339,6 +1340,61 @@ describe('格式 8 连接器端点与杆端约束', () => {
     expect(stateOf(world, right.id).linearVelocity.x).toBeGreaterThan(0)
   })
 
+  it('双自由端预压弹簧对不同质量小球施加相同力而产生不同加速度', () => {
+    const scene = baseScene()
+    const spring: ConnectorEntity = makeConnector(
+      scene,
+      'unequal-mass-double-free-bumper',
+      'unused-a',
+      'unused-b',
+      {
+        type: 'spring',
+        restLength: 4,
+        stiffness: 100,
+        damping: 0,
+      },
+    )
+    spring.a = { type: 'free', position: { x: -1, y: 0 } }
+    spring.b = { type: 'free', position: { x: 1, y: 0 } }
+    const light = makeBody(
+      scene,
+      'light-projectile',
+      { x: -1.5, y: 0 },
+      { x: 0, y: 0 },
+      {
+        massKg: 1,
+      },
+    )
+    const heavy = makeBody(
+      scene,
+      'heavy-projectile',
+      { x: 1.5, y: 0 },
+      { x: 0, y: 0 },
+      {
+        massKg: 5,
+      },
+    )
+    scene.entities = [spring, light, heavy]
+    const world = createWorld(scene)
+
+    world.step()
+    const lightFirstStep = stateOf(world, light.id)
+    const heavyFirstStep = stateOf(world, heavy.id)
+    expect(Math.abs(lightFirstStep.netForce.x)).toBeCloseTo(Math.abs(heavyFirstStep.netForce.x), 3)
+    expect(Math.abs(lightFirstStep.acceleration.x)).toBeCloseTo(
+      Math.abs(heavyFirstStep.acceleration.x) * 5,
+      3,
+    )
+
+    world.step(119)
+    const lightFinalVelocity = stateOf(world, light.id).linearVelocity.x
+    const heavyFinalVelocity = stateOf(world, heavy.id).linearVelocity.x
+    const lightFinalSpeed = Math.abs(lightFinalVelocity)
+    const heavyFinalSpeed = Math.abs(heavyFinalVelocity)
+    expect(lightFinalSpeed).toBeGreaterThan(heavyFinalSpeed * 1.5)
+    expect(lightFinalVelocity + heavyFinalVelocity * 5).toBeCloseTo(0, 3)
+  })
+
   it('自由端弹簧不阻挡侧向经过的物体', () => {
     const scene = baseScene()
     const spring: ConnectorEntity = makeConnector(
@@ -1683,6 +1739,7 @@ function makeBody(
     simulationEnabled: true,
     kind: 'body',
     preset: 'ball',
+    color: '#e45d68',
     shape: { type: 'circle', radius: 0.5, collisionEnabled: true },
     transform: { position, angleRad: 0 },
     massKg: 1,
@@ -1766,6 +1823,7 @@ function makeGround(
     kind: 'ground',
     geometry,
     material,
+    conveyor: { enabled: false, direction: 'forward', speedMps: 1 },
     collisionSide: 'both',
     normalFlipped: false,
   }
@@ -2225,6 +2283,91 @@ describe('SimulationWorld 物理规律验证', () => {
     world.step(60)
 
     expect(stateOf(world, 'block').linearVelocity.x).toBeCloseTo(4 - friction * 9.80665 * time, 1)
+  })
+
+  it.each([
+    ['forward', 2],
+    ['reverse', -2],
+  ] as const)('传送带按 %s 方向通过摩擦把静止物块带到表面速度', (direction, expectedSpeed) => {
+    const scene = baseScene()
+    const ground = makeGround(
+      scene,
+      { type: 'line', start: { x: -10, y: 0 }, end: { x: 10, y: 0 } },
+      { friction: 1, restitution: 0 },
+    )
+    ground.conveyor = { enabled: true, direction, speedMps: 2 }
+    const block = makeBody(
+      scene,
+      `conveyor-${direction}`,
+      { x: 0, y: 0.5 },
+      { x: 0, y: 0 },
+      {
+        preset: 'block',
+        shape: { type: 'box', width: 1, height: 1 },
+        material: { friction: 1, restitution: 0 },
+        rotationEnabled: false,
+      },
+    )
+    scene.entities = [ground, block, makeGravity(scene, { x: 0, y: -9.80665 })]
+    const world = createWorld(scene)
+
+    world.step(120)
+
+    expect(stateOf(world, block.id).linearVelocity.x).toBeCloseTo(expectedSpeed, 1)
+  })
+
+  it('传送带与物体之间无摩擦时不改变切向速度', () => {
+    const scene = baseScene()
+    const ground = makeGround(
+      scene,
+      { type: 'line', start: { x: -10, y: 0 }, end: { x: 10, y: 0 } },
+      { friction: 0, restitution: 0 },
+    )
+    ground.conveyor = { enabled: true, direction: 'forward', speedMps: 3 }
+    const block = makeBody(
+      scene,
+      'frictionless-conveyor-block',
+      { x: 0, y: 0.5 },
+      { x: 0, y: 0 },
+      {
+        preset: 'block',
+        shape: { type: 'box', width: 1, height: 1 },
+        material: { friction: 1, restitution: 0 },
+        rotationEnabled: false,
+      },
+    )
+    scene.entities = [ground, block, makeGravity(scene, { x: 0, y: -9.80665 })]
+    const world = createWorld(scene)
+
+    world.step(120)
+
+    expect(stateOf(world, block.id).linearVelocity.x).toBeCloseTo(0, 5)
+  })
+
+  it('传送带对关闭旋转的小球使用同一表面速度口径', () => {
+    const scene = baseScene()
+    const ground = makeGround(
+      scene,
+      { type: 'line', start: { x: -10, y: 0 }, end: { x: 10, y: 0 } },
+      { friction: 1, restitution: 0 },
+    )
+    ground.conveyor = { enabled: true, direction: 'forward', speedMps: 1.5 }
+    const ball = makeBody(
+      scene,
+      'conveyor-ball',
+      { x: 0, y: 0.5 },
+      { x: 0, y: 0 },
+      {
+        material: { friction: 1, restitution: 0 },
+        rotationEnabled: false,
+      },
+    )
+    scene.entities = [ground, ball, makeGravity(scene, { x: 0, y: -9.80665 })]
+    const world = createWorld(scene)
+
+    world.step(120)
+
+    expect(stateOf(world, ball.id).linearVelocity.x).toBeCloseTo(1.5, 1)
   })
 
   it('圆形物体的库仑摩擦按转动惯量从滑动过渡到纯滚动', () => {
@@ -6373,4 +6516,196 @@ describe('碰撞绳与自由端弹簧接触回归', () => {
       `最大能量发生在第 ${maximumEnergyStep} 步：${JSON.stringify(maximumEnergyState)}`,
     ).toBeLessThan(initialEnergy * 1.005)
   }, 30_000)
+})
+
+describe('格式 21 时变场与外加力', () => {
+  function makeForce(bodyId: string, overrides: Partial<ForceEntity> = {}): ForceEntity {
+    return {
+      id: `force-${bodyId}`,
+      name: '测试力',
+      visible: true,
+      locked: false,
+      simulationEnabled: true,
+      kind: 'force',
+      bodyId,
+      localAnchor: { x: 0, y: 0 },
+      magnitudeN: 10,
+      directionRad: 0,
+      ...overrides,
+    }
+  }
+
+  it('场强表达式使用固定步模拟时间和全局变量', () => {
+    const scene = baseScene()
+    scene.globalVariables = [{ name: 'a', expression: '2', value: 2 }]
+    const body = makeBody(
+      scene,
+      'time-field-body',
+      { x: 0, y: 0 },
+      { x: 0, y: 0 },
+      { shape: { type: 'circle', radius: 0.1, collisionEnabled: false } },
+    )
+    const field = makeGravity(scene, { x: 0, y: -2 })
+    if (field.field.type !== 'uniformGravity') throw new Error('测试重力场无效')
+    field.field.magnitudeExpression = { expression: 'a+t', fallbackValue: 2 }
+    scene.entities = [body, field]
+    const world = createWorld(scene)
+
+    world.step(120)
+
+    const expectedSpeed =
+      scene.settings.fixedTimeStep *
+      Array.from({ length: 120 }, (_, index) => 2 + index * scene.settings.fixedTimeStep).reduce(
+        (sum, value) => sum + value,
+        0,
+      )
+    expect(world.simulationTime).toBeCloseTo(1, 12)
+    expect(stateOf(world, body.id).linearVelocity.y).toBeCloseTo(-expectedSpeed, 5)
+  })
+
+  it('电场 X/Y 分量分别使用固定步时间和全局变量', () => {
+    const scene = baseScene()
+    scene.globalVariables = [{ name: 'a', expression: '2', value: 2 }]
+    const body = makeBody(
+      scene,
+      'electric-component-body',
+      { x: 0, y: 0 },
+      { x: 0, y: 0 },
+      {
+        chargeC: 2,
+        shape: { type: 'circle', radius: 0.1, collisionEnabled: false },
+      },
+    )
+    const field = makeField(scene, 'electric-components', {
+      type: 'uniformElectric',
+      strength: { x: 0, y: 0 },
+      componentExpressions: {
+        x: { expression: 'a+t', fallbackValue: 2 },
+        y: { expression: '2*a-t', fallbackValue: 4 },
+      },
+    })
+    scene.entities = [body, field]
+    const world = createWorld(scene)
+
+    world.step()
+
+    expect(stateOf(world, body.id).netForce.x).toBeCloseTo(4, 6)
+    expect(stateOf(world, body.id).netForce.y).toBeCloseTo(8, 6)
+  })
+
+  it('电场任一分量非有限时跳过该步并去重警告', () => {
+    const scene = baseScene()
+    const body = makeBody(
+      scene,
+      'invalid-electric-body',
+      { x: 0, y: 0 },
+      { x: 0, y: 0 },
+      {
+        chargeC: 1,
+        shape: { type: 'circle', radius: 0.1, collisionEnabled: false },
+      },
+    )
+    const field = makeField(scene, 'invalid-electric', {
+      type: 'uniformElectric',
+      strength: { x: 1, y: 2 },
+      componentExpressions: { x: { expression: '1/t', fallbackValue: 1 } },
+    })
+    scene.entities = [body, field]
+    const world = createWorld(scene)
+
+    world.step(240)
+
+    expect(world.warnings.filter((warning) => warning.entityId === field.id)).toHaveLength(1)
+    expect(Number.isFinite(stateOf(world, body.id).linearVelocity.x)).toBe(true)
+  })
+
+  it('质心恒力按质量产生加速度，方向表达式可使用 t', () => {
+    const scene = baseScene()
+    const body = makeBody(
+      scene,
+      'center-force-body',
+      { x: 0, y: 0 },
+      { x: 0, y: 0 },
+      { massKg: 2, shape: { type: 'circle', radius: 0.1, collisionEnabled: false } },
+    )
+    const force = makeForce(body.id, {
+      magnitudeExpression: { expression: '10+t', fallbackValue: 10 },
+      directionDegreesExpression: { expression: '90+180*t/pi', fallbackValue: 90 },
+    })
+    scene.entities = [body, force]
+    const world = createWorld(scene)
+
+    world.step()
+    const state = stateOf(world, body.id)
+
+    expect(state.netForce.x).toBeCloseTo(0, 8)
+    expect(state.netForce.y).toBeCloseTo(10, 6)
+    expect(state.linearVelocity.y).toBeCloseTo((10 / 2) * scene.settings.fixedTimeStep, 8)
+  })
+
+  it('偏心力产生真实力矩，关闭旋转时只保留平动', () => {
+    const scene = baseScene()
+    const rotating = makeBody(
+      scene,
+      'rotating-force-body',
+      { x: -3, y: 0 },
+      { x: 0, y: 0 },
+      {
+        preset: 'block',
+        shape: { type: 'box', width: 2, height: 2 },
+        massKg: 2,
+      },
+    )
+    const locked = makeBody(
+      scene,
+      'locked-force-body',
+      { x: 3, y: 0 },
+      { x: 0, y: 0 },
+      {
+        preset: 'block',
+        shape: { type: 'box', width: 2, height: 2 },
+        massKg: 2,
+        rotationEnabled: false,
+      },
+    )
+    scene.entities = [
+      rotating,
+      locked,
+      makeForce(rotating.id, { id: 'offset-force-rotating', localAnchor: { x: 0, y: 0.75 } }),
+      makeForce(locked.id, { id: 'offset-force-locked', localAnchor: { x: 0, y: 0.75 } }),
+    ]
+    const world = createWorld(scene)
+
+    world.step(30)
+
+    expect(stateOf(world, rotating.id).angularVelocityRad).toBeLessThan(-0.1)
+    expect(stateOf(world, locked.id).angularVelocityRad).toBe(0)
+    expect(stateOf(world, rotating.id).linearVelocity.x).toBeCloseTo(
+      stateOf(world, locked.id).linearVelocity.x,
+      8,
+    )
+  })
+
+  it('运行时非有限结果只跳过对应步并去重警告', () => {
+    const scene = baseScene()
+    const body = makeBody(
+      scene,
+      'invalid-force-body',
+      { x: 0, y: 0 },
+      { x: 0, y: 0 },
+      {
+        shape: { type: 'circle', radius: 0.1, collisionEnabled: false },
+      },
+    )
+    const force = makeForce(body.id, {
+      magnitudeExpression: { expression: '1/t', fallbackValue: 1 },
+    })
+    scene.entities = [body, force]
+    const world = createWorld(scene)
+
+    world.step(240)
+
+    expect(world.warnings.filter((warning) => warning.entityId === force.id)).toHaveLength(1)
+    expect(Number.isFinite(stateOf(world, body.id).linearVelocity.x)).toBe(true)
+  })
 })

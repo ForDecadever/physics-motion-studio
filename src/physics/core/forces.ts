@@ -38,6 +38,48 @@ export function rotateVelocityInMagneticField(
   }
 }
 
+export function advancePointInMagneticField(
+  position: Vec2,
+  velocity: Vec2,
+  chargeC: number,
+  bzTesla: number,
+  massKg: number,
+  timeStep: number,
+): { position: Vec2; velocity: Vec2 } {
+  if (chargeC === 0 || bzTesla === 0 || timeStep === 0) {
+    return {
+      position: {
+        x: position.x + velocity.x * timeStep,
+        y: position.y + velocity.y * timeStep,
+      },
+      velocity: { ...velocity },
+    }
+  }
+  const angularVelocity = (-chargeC * bzTesla) / massKg
+  const angle = angularVelocity * timeStep
+  if (Math.abs(angle) <= 1e-8) {
+    return {
+      position: {
+        x: position.x + velocity.x * timeStep,
+        y: position.y + velocity.y * timeStep,
+      },
+      velocity: rotateVelocityInMagneticField(velocity, chargeC, bzTesla, massKg, timeStep),
+    }
+  }
+  const cosine = Math.cos(angle)
+  const sine = Math.sin(angle)
+  return {
+    position: {
+      x: position.x + (sine * velocity.x + (cosine - 1) * velocity.y) / angularVelocity,
+      y: position.y + ((1 - cosine) * velocity.x + sine * velocity.y) / angularVelocity,
+    },
+    velocity: {
+      x: cosine * velocity.x - sine * velocity.y,
+      y: sine * velocity.x + cosine * velocity.y,
+    },
+  }
+}
+
 export function coulombForceOnFirst(
   firstChargeC: number,
   secondChargeC: number,

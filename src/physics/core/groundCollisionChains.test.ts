@@ -35,6 +35,18 @@ describe('物块地面碰撞链', () => {
     ])
   })
 
+  it('保留传送带方向和速度，使物块碰撞体使用同一表面运动口径', () => {
+    const ground = createLineGround(layerId, { x: -10, y: 0 }, { x: 10, y: 0 }, 1)
+    ground.conveyor = { enabled: true, direction: 'reverse', speedMps: 2.5 }
+    const chains = buildGroundCollisionChains(buildGroundPathNetwork([ground]))
+
+    expect(chains).toHaveLength(1)
+    expect(chains[0]).toMatchObject({
+      conveyor: { enabled: true, direction: 'reverse', speedMps: 2.5 },
+      conveyorSpeedAlongPointsMps: -2.5,
+    })
+  })
+
   it('把相同材质的地面与过渡拼成一个连续碰撞链', () => {
     const { first, second, joint } = connectedRightAngle()
     const network = buildGroundPathNetwork([first, second, joint])

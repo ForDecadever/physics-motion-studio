@@ -20,6 +20,7 @@ import {
 } from '../../editor/ground/autoGroundJoint'
 import {
   createScaleHandleGeometry,
+  canScaleEntitiesByAxis,
   clampBodyLocalAnchor,
   createBodyCenterConnectorEndpoint,
   connectorEndpointTargetId,
@@ -27,9 +28,12 @@ import {
   dot,
   getEntityTransform,
   isScalableEntity,
+  rectangleFromCorners,
   resolveConnectorEndpoint,
   rotateVector,
+  scaleEntitiesAroundPivotByAxes,
   scaleEntitiesAroundPivot,
+  scaleHandlePivot,
   snapBodyToSurfaces,
   snapBooleanBodyToSurfaces,
   subtract,
@@ -52,6 +56,8 @@ import {
   selectionTargetsInsideBounds,
 } from '../../editor/geometry/selectionTargets'
 import { PixiSceneRenderer } from '../../renderer/pixi/PixiSceneRenderer'
+import { analyzeBodyForces } from '../measurements/forceAnalysis'
+import { forceColorNumber } from '../measurements/forcePresentation'
 import {
   resolveBooleanBodyRenderTransform,
   resolveRenderedEntity,
@@ -63,13 +69,17 @@ import {
   createBezierBlock,
   createBlock,
   createElectricField,
+  createForce,
   createGravityField,
   createGroundJoint,
   createLineGround,
   createMagneticField,
+  createMarkerMeasurement,
   createParticleSource,
+  createProtractorMeasurement,
   createRod,
   createRope,
+  createRulerMeasurement,
   createSpring,
 } from '../../scene/model/entityFactories'
 import {
@@ -112,6 +122,7 @@ import type {
   FieldEntity,
   GroundEndpointRef,
   GroundEntity,
+  MeasurementEntity,
   SceneEntity,
   Vec2,
 } from '../../scene/model/types'
@@ -132,6 +143,8 @@ type Interaction =
   | { type: 'idle' }
   | { type: 'pan'; startScreen: Vec2; startCamera: Camera2D }
   | { type: 'marquee'; startWorld: Vec2 }
+  | { type: 'marker'; entity: MeasurementEntity }
+  | { type: 'measurementMove'; startWorld: Vec2; originals: MeasurementEntity[] }
   | {
       type: 'move'
       startWorld: Vec2
@@ -167,7 +180,8 @@ type Interaction =
       originals: SceneEntity[]
       targetIds: EntityId[]
       booleanResultIds: EntityId[]
-      cursor: 'nwse-resize' | 'nesw-resize'
+      axis: ScaleHandle['axis']
+      cursor: ScaleHandle['cursor']
     }
   | {
       type: 'booleanScale'
@@ -176,6 +190,7 @@ type Interaction =
       resultId: EntityId
       sourceIds: EntityId[]
       originals: SceneEntity[]
+      axis: ScaleHandle['axis']
     }
   | {
       type: 'create'
@@ -256,7 +271,7 @@ function localPoint(event: PointerEvent | WheelEvent, canvas: HTMLCanvasElement)
 function toolCursor(tool: EditorTool): string {
   if (tool === 'hand') return 'grab'
   if (tool === 'zoom') return 'zoom-in'
-  if (['rotate', 'ground', 'groundJoint', 'body', 'field', 'connector'].includes(tool))
+  if (['rotate', 'ground', 'groundJoint', 'body', 'field', 'connector', 'force'].includes(tool))
     return 'crosshair'
   return 'default'
 }
@@ -522,13 +537,13 @@ function getDraft(
         )
         if (body) return { ...body, id: draftId, name: `物块 ${index}` }
       }
-      const defaultEnd = { x: start.x + 0.5, y: start.y + 0.5 }
-      const resolvedEnd = useDefaultSize && distance(start, end) < 0.05 ? defaultEnd : end
       if (
         interaction.blockShape === 'quarterRamp' ||
         interaction.blockShape === 'semicircleCutout' ||
         interaction.blockShape === 'quarterCircleCutout'
       ) {
+        const defaultEnd = { x: start.x + 0.5, y: start.y + 0.5 }
+        const resolvedEnd = useDefaultSize && distance(start, end) < 0.05 ? defaultEnd : end
         const body = createBezierBlock(
           layerId,
           createCurvedBlockPresetNodes(
@@ -541,14 +556,12 @@ function getDraft(
         )
         if (body) return { ...body, id: draftId, name: `物块 ${index}` }
       }
+      const rectangle =
+        useDefaultSize && distance(start, end) < 0.05
+          ? { center: start, width: 1, height: 1 }
+          : rectangleFromCorners(start, end, 0.2)
       return {
-        ...createBlock(
-          layerId,
-          start,
-          Math.max(0.2, Math.abs(resolvedEnd.x - start.x) * 2),
-          Math.max(0.2, Math.abs(resolvedEnd.y - start.y) * 2),
-          index,
-        ),
+        ...createBlock(layerId, rectangle.center, rectangle.width, rectangle.height, index),
         id: draftId,
       }
     }
@@ -774,17 +787,25 @@ function findScaleHandle(
     true,
   )
   if (!bounds) return null
-  const geometry = createScaleHandleGeometry(bounds, 5 / pixelsPerMeter)
+  const targets = listEditingSelectionTargets(
+    scene,
+    entities,
+    useSimulationStore.getState().runtimeBodies,
+    new Set(Object.keys(editor.previewEntities)),
+    new Set(selectedIds),
+  ).filter((target) => selectedIds.includes(target.id) && target.scalable)
+  const sourceIds = [...new Set(targets.flatMap((target) => target.sourceEntityIds))]
+  const geometry = createScaleHandleGeometry(
+    bounds,
+    5 / pixelsPerMeter,
+    canScaleEntitiesByAxis(scene.entities, sourceIds),
+  )
   const tolerance = 9 / pixelsPerMeter
   const handle = geometry.handles.find(
     (candidate) => distance(candidate.position, point) <= tolerance,
   )
   if (!handle) return null
-  const pivot = {
-    x: handle.id.startsWith('min') ? geometry.bounds.maxX : geometry.bounds.minX,
-    y: handle.id.endsWith('min') ? geometry.bounds.maxY : geometry.bounds.minY,
-  }
-  return { handle, pivot }
+  return { handle, pivot: scaleHandlePivot(geometry, handle) }
 }
 
 function findEditableHandle(
@@ -885,6 +906,32 @@ function movableEntitiesForSelection(selectedIds: readonly EntityId[]): SceneEnt
   return scene.entities.filter((entity) => sourceIds.has(entity.id) && getEntityTransform(entity))
 }
 
+function translateMeasurement(entity: MeasurementEntity, delta: Vec2): MeasurementEntity {
+  const translate = (point: Vec2): Vec2 => ({ x: point.x + delta.x, y: point.y + delta.y })
+  const measurement = entity.measurement
+  if (measurement.type === 'marker') {
+    return {
+      ...entity,
+      measurement: { ...measurement, points: measurement.points.map(translate) },
+    }
+  }
+  if (measurement.type === 'ruler') {
+    return {
+      ...entity,
+      measurement: { ...measurement, a: translate(measurement.a), b: translate(measurement.b) },
+    }
+  }
+  return {
+    ...entity,
+    measurement: {
+      ...measurement,
+      a: translate(measurement.a),
+      vertex: translate(measurement.vertex),
+      b: translate(measurement.b),
+    },
+  }
+}
+
 function renderEntities(): SceneEntity[] {
   const { scene } = useDocumentStore.getState()
   const { previewEntities } = useEditorStore.getState()
@@ -916,12 +963,17 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
   const groundJointStart = useEditorStore((state) => state.groundJointStart)
   const groundJointHover = useEditorStore((state) => state.groundJointHover)
   const pendingGroundEndpoint = useEditorStore((state) => state.pendingGroundEndpoint)
+  const measurementPoints = useEditorStore((state) => state.measurementPoints)
+  const forceProbe = useEditorStore((state) => state.forceProbe)
+  const cursorWorld = useEditorStore((state) => state.cursorWorld)
   const runtimeBodies = useSimulationStore((state) => state.runtimeBodies)
   const runtimeConnectors = useSimulationStore((state) => state.runtimeConnectors)
   const runtimeTrajectories = useSimulationStore((state) => state.runtimeTrajectories)
   const runtimeParticleTrajectories = useSimulationStore(
     (state) => state.runtimeParticleTrajectories,
   )
+  const runtimeParticleSources = useSimulationStore((state) => state.runtimeParticleSources)
+  const simulationTime = useSimulationStore((state) => state.simulationTime)
   const runtimeLocked = useSimulationStore(isSimulationRuntimeLocked)
 
   useEffect(() => {
@@ -1013,10 +1065,24 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
       groundJointStart,
       groundJointHover,
       pendingGroundEndpoint,
+      measurementPoints,
+      measurementCursor: cursorWorld,
+      forceProbe,
+      forceAnalysis: forceProbe
+        ? (analyzeBodyForces(
+            scene,
+            forceProbe.bodyId,
+            runtimeBodies,
+            simulationTime,
+            runtimeConnectors,
+          )?.map((entry) => ({ ...entry, color: forceColorNumber(entry) })) ?? undefined)
+        : undefined,
       runtimeBodies,
       runtimeConnectors,
       runtimeTrajectories,
       particleTrajectories: runtimeParticleTrajectories,
+      particleSources: runtimeParticleSources,
+      simulationTime,
       runtimeLocked,
     })
     if (canvasRef.current && interactionRef.current.type === 'idle' && !spacePressedRef.current) {
@@ -1031,6 +1097,9 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
     groundJointHover,
     groundJointStart,
     pendingGroundEndpoint,
+    measurementPoints,
+    cursorWorld,
+    forceProbe,
     marquee,
     previewEntities,
     ready,
@@ -1038,9 +1107,11 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
     runtimeConnectors,
     runtimeLocked,
     runtimeParticleTrajectories,
+    runtimeParticleSources,
     runtimeTrajectories,
     scene,
     selectedIds,
+    simulationTime,
     size,
   ])
 
@@ -1060,7 +1131,19 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
       } else if (tool === 'rotate') {
         canvas.style.cursor = 'crosshair'
       } else if (
-        ['ground', 'groundJoint', 'body', 'field', 'connector', 'particleSource'].includes(tool)
+        [
+          'ground',
+          'groundJoint',
+          'body',
+          'field',
+          'connector',
+          'particleSource',
+          'force',
+          'marker',
+          'ruler',
+          'protractor',
+          'forceMeter',
+        ].includes(tool)
       ) {
         canvas.style.cursor = 'crosshair'
       } else {
@@ -1301,6 +1384,112 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
             )
       const hit = entityHit
 
+      const measurementPoint = (): Vec2 => {
+        if (event.altKey) return rawWorld
+        const tolerance = 10 / editor.camera.pixelsPerMeter
+        if (hit?.kind === 'body') {
+          const position = hit.transform.position
+          if (distance(rawWorld, position) <= tolerance) return position
+        }
+        if (booleanHit?.valid && booleanHit.kind === 'body') {
+          const position =
+            useSimulationStore.getState().runtimeBodies[booleanHit.resultId]?.position ??
+            booleanHit.centerOfMass
+          if (distance(rawWorld, position) <= tolerance) return position
+        }
+        return world
+      }
+
+      if (tool === 'marker' && event.button === 0) {
+        const point = measurementPoint()
+        const entity = createMarkerMeasurement(
+          entityFactoryContextId(),
+          [point, point],
+          nextEntityIndex('measurement'),
+        )
+        interactionRef.current = { type: 'marker', entity }
+        editor.setDraftEntity(entity)
+        return
+      }
+
+      if ((tool === 'ruler' || tool === 'protractor') && event.button === 0) {
+        const points = [...editor.measurementPoints, measurementPoint()]
+        const required = tool === 'ruler' ? 2 : 3
+        if (points.length < required) {
+          editor.setMeasurementPoints(points)
+          return
+        }
+        const entity =
+          tool === 'ruler'
+            ? createRulerMeasurement(
+                entityFactoryContextId(),
+                points[0]!,
+                points[1]!,
+                nextEntityIndex('measurement'),
+              )
+            : createProtractorMeasurement(
+                entityFactoryContextId(),
+                points[0]!,
+                points[1]!,
+                points[2]!,
+                nextEntityIndex('measurement'),
+              )
+        const document = useDocumentStore.getState()
+        document.executeCommand(createAddEntityCommand(document.scene, entity))
+        editor.setMeasurementPoints([])
+        editor.setSelectedIds([entity.id])
+        return
+      }
+
+      if (tool === 'forceMeter' && event.button === 0) {
+        const point = measurementPoint()
+        const targetId =
+          booleanHit?.valid && booleanHit.kind === 'body'
+            ? booleanHit.resultId
+            : hit?.kind === 'body'
+              ? hit.id
+              : null
+        const localPoint =
+          targetId && booleanHit?.valid && booleanHit.kind === 'body'
+            ? booleanBodyWorldToLocal(
+                booleanHit,
+                point,
+                useSimulationStore.getState().runtimeBodies[booleanHit.resultId]?.position,
+                useSimulationStore.getState().runtimeBodies[booleanHit.resultId]?.angleRad,
+              )
+            : targetId && hit?.kind === 'body'
+              ? worldToLocalAnchor(hit, point)
+              : null
+        editor.setForceProbe(targetId && localPoint ? { bodyId: targetId, localPoint } : null)
+        if (!targetId) useSimulationStore.getState().addWarning('测力计需要点击一个物体。')
+        return
+      }
+
+      if (tool === 'select' && hit?.kind === 'measurement' && event.button === 0) {
+        const nextSelection = event.shiftKey
+          ? editor.selectedIds.includes(hit.id)
+            ? editor.selectedIds.filter((id) => id !== hit.id)
+            : [...editor.selectedIds, hit.id]
+          : editor.selectedIds.includes(hit.id)
+            ? editor.selectedIds
+            : [hit.id]
+        editor.setSelectedIds(nextSelection)
+        if (nextSelection.includes(hit.id)) {
+          const originals = useDocumentStore
+            .getState()
+            .scene.entities.filter(
+              (entity): entity is MeasurementEntity =>
+                entity.kind === 'measurement' && nextSelection.includes(entity.id),
+            )
+          interactionRef.current = {
+            type: 'measurementMove',
+            startWorld: event.altKey ? rawWorld : world,
+            originals,
+          }
+        }
+        return
+      }
+
       if (isSimulationRuntimeLocked(useSimulationStore.getState())) {
         const hitId = booleanHit?.resultId ?? hit?.id
         if (!hitId) {
@@ -1341,6 +1530,7 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
               resultId: booleanTarget.id,
               sourceIds: booleanTarget.sourceEntityIds,
               originals: useDocumentStore.getState().scene.entities,
+              axis: scaleHandle.handle.axis,
             }
             updateCursor(tool, true)
             return
@@ -1365,6 +1555,7 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
               originals: useDocumentStore.getState().scene.entities,
               targetIds: ordinaryTargetIds,
               booleanResultIds: booleanTargets.map((target) => target.id),
+              axis: scaleHandle.handle.axis,
               cursor: scaleHandle.handle.cursor,
             }
             updateCursor(tool, true)
@@ -1547,6 +1738,40 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
         editor.setGroundJointStart(null)
         editor.setGroundJointHover(null)
         editor.setGroundJointMessage('地面连接点已创建。')
+        return
+      }
+
+      if (tool === 'force') {
+        const document = useDocumentStore.getState()
+        const booleanTarget = findTopBooleanResult(
+          document.scene,
+          rawWorld,
+          useSimulationStore.getState().runtimeBodies,
+        )
+        const validBooleanTarget =
+          booleanTarget?.valid && booleanTarget.kind === 'body' ? booleanTarget : null
+        const ordinaryTarget = hit?.kind === 'body' ? hit : null
+        if (!validBooleanTarget && !ordinaryTarget) {
+          useSimulationStore.getState().addWarning('力工具需要点击普通物体或根布尔物体。')
+          return
+        }
+        const bodyId = validBooleanTarget?.resultId ?? ordinaryTarget!.id
+        const localAnchor = validBooleanTarget
+          ? booleanBodyWorldToLocal(
+              validBooleanTarget,
+              rawWorld,
+              useSimulationStore.getState().runtimeBodies[validBooleanTarget.resultId]?.position,
+              useSimulationStore.getState().runtimeBodies[validBooleanTarget.resultId]?.angleRad,
+            )
+          : worldToLocalAnchor(ordinaryTarget!, rawWorld)
+        const force = createForce(
+          entityFactoryContextId(),
+          bodyId,
+          localAnchor,
+          nextEntityIndex('force'),
+        )
+        document.executeCommand(createAddEntityCommand(document.scene, force))
+        editor.setSelectedIds([force.id])
         return
       }
 
@@ -1847,6 +2072,22 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
         )
       } else if (interaction.type === 'marquee') {
         editor.setMarquee({ start: interaction.startWorld, end: unsnappedWorld })
+      } else if (interaction.type === 'marker') {
+        if (interaction.entity.measurement.type !== 'marker') return
+        const points = interaction.entity.measurement.points
+        const last = points.at(-1)!
+        if (distance(last, world) >= 2 / editor.camera.pixelsPerMeter && points.length < 4096) {
+          interaction.entity = {
+            ...interaction.entity,
+            measurement: { ...interaction.entity.measurement, points: [...points, world] },
+          }
+          editor.setDraftEntity(interaction.entity)
+        }
+      } else if (interaction.type === 'measurementMove') {
+        const delta = subtract(event.altKey ? unsnappedWorld : world, interaction.startWorld)
+        editor.setPreviewEntities(
+          interaction.originals.map((entity) => translateMeasurement(entity, delta)),
+        )
       } else if (interaction.type === 'create') {
         editor.setDraftEntity(applySurfaceSnap(getDraft(interaction, world), event.altKey))
       } else if (interaction.type === 'groundPen') {
@@ -2036,12 +2277,26 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
           unsnappedWorld,
           snapStep,
         )
-        const scaled = scaleEntitiesAroundPivot(
-          interaction.originals,
-          interaction.targetIds,
-          interaction.pivot,
-          factor,
-        )
+        const scaled =
+          interaction.axis === 'uniform'
+            ? (() => {
+                const result = scaleEntitiesAroundPivot(
+                  interaction.originals,
+                  interaction.targetIds,
+                  interaction.pivot,
+                  factor,
+                )
+                return {
+                  factors: { x: result.factor, y: result.factor },
+                  replacements: result.replacements,
+                }
+              })()
+            : scaleEntitiesAroundPivotByAxes(
+                interaction.originals,
+                interaction.targetIds,
+                interaction.pivot,
+                interaction.axis === 'x' ? { x: factor, y: 1 } : { x: 1, y: factor },
+              )
         const resultIds = new Set(interaction.booleanResultIds)
         const externalConnectors = interaction.originals.flatMap((entity): SceneEntity[] => {
           if (entity.kind !== 'connector') return []
@@ -2050,8 +2305,8 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
               ? {
                   ...endpoint,
                   localAnchor: {
-                    x: endpoint.localAnchor.x * scaled.factor,
-                    y: endpoint.localAnchor.y * scaled.factor,
+                    x: endpoint.localAnchor.x * scaled.factors.x,
+                    y: endpoint.localAnchor.y * scaled.factors.y,
                   },
                 }
               : endpoint
@@ -2074,12 +2329,28 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
           unsnappedWorld,
           snapStep,
         )
-        const scaled = scaleEntitiesAroundPivot(
-          interaction.originals,
-          interaction.sourceIds,
-          interaction.pivot,
-          requestedFactor,
-        )
+        const scaled =
+          interaction.axis === 'uniform'
+            ? (() => {
+                const result = scaleEntitiesAroundPivot(
+                  interaction.originals,
+                  interaction.sourceIds,
+                  interaction.pivot,
+                  requestedFactor,
+                )
+                return {
+                  factors: { x: result.factor, y: result.factor },
+                  replacements: result.replacements,
+                }
+              })()
+            : scaleEntitiesAroundPivotByAxes(
+                interaction.originals,
+                interaction.sourceIds,
+                interaction.pivot,
+                interaction.axis === 'x'
+                  ? { x: requestedFactor, y: 1 }
+                  : { x: 1, y: requestedFactor },
+              )
         const externalConnectors = interaction.originals.flatMap((entity): SceneEntity[] => {
           if (entity.kind !== 'connector') return []
           const scaleEndpoint = (endpoint: ConnectorEndpoint): ConnectorEndpoint =>
@@ -2087,8 +2358,8 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
               ? {
                   ...endpoint,
                   localAnchor: {
-                    x: endpoint.localAnchor.x * scaled.factor,
-                    y: endpoint.localAnchor.y * scaled.factor,
+                    x: endpoint.localAnchor.x * scaled.factors.x,
+                    y: endpoint.localAnchor.y * scaled.factors.y,
                   },
                 }
               : endpoint
@@ -2205,8 +2476,29 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
       const rawWorld = rawWorldPoint(event)
       const world = resolvedWorldPoint(event)
 
+      if (interaction.type === 'marker') {
+        const marker = interaction.entity
+        if (marker.measurement.type === 'marker') {
+          const points = marker.measurement.points
+          const last = points.at(-1)!
+          const finalPoints = distance(last, world) > 1e-9 ? [...points, world] : points
+          const entity = {
+            ...marker,
+            measurement: { ...marker.measurement, points: finalPoints },
+          } satisfies MeasurementEntity
+          document.executeCommand(createAddEntityCommand(document.scene, entity))
+          editor.setSelectedIds([entity.id])
+        }
+        editor.setDraftEntity(null)
+        interactionRef.current = { type: 'idle' }
+        updateCursor(editor.activeTool)
+        if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId)
+        return
+      }
+
       if (
         interaction.type === 'move' ||
+        interaction.type === 'measurementMove' ||
         interaction.type === 'booleanMove' ||
         interaction.type === 'rotate' ||
         interaction.type === 'booleanRotate' ||
@@ -2288,31 +2580,33 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
             }
           }
           const label =
-            interaction.type === 'move'
-              ? '移动实体'
-              : interaction.type === 'booleanMove'
-                ? '整体移动布尔结果'
-                : interaction.type === 'rotate'
-                  ? '旋转实体'
-                  : interaction.type === 'booleanRotate'
-                    ? '整体旋转布尔结果'
-                    : interaction.type === 'scale'
-                      ? '缩放实体'
-                      : interaction.type === 'booleanScale'
-                        ? '整体缩放布尔结果'
-                        : interaction.type === 'editBezierPoint'
-                          ? '拖动贝塞尔控制点'
-                          : interaction.type === 'editFieldPoint'
-                            ? '拖动场范围节点'
-                            : interaction.type === 'editFieldPathPoint'
-                              ? toggledNode
-                                ? '切换场范围贝塞尔节点模式'
-                                : '拖动场范围贝塞尔控制点'
-                              : interaction.type === 'editBodyPathPoint'
+            interaction.type === 'measurementMove'
+              ? '移动测量标注'
+              : interaction.type === 'move'
+                ? '移动实体'
+                : interaction.type === 'booleanMove'
+                  ? '整体移动布尔结果'
+                  : interaction.type === 'rotate'
+                    ? '旋转实体'
+                    : interaction.type === 'booleanRotate'
+                      ? '整体旋转布尔结果'
+                      : interaction.type === 'scale'
+                        ? '缩放实体'
+                        : interaction.type === 'booleanScale'
+                          ? '整体缩放布尔结果'
+                          : interaction.type === 'editBezierPoint'
+                            ? '拖动贝塞尔控制点'
+                            : interaction.type === 'editFieldPoint'
+                              ? '拖动场范围节点'
+                              : interaction.type === 'editFieldPathPoint'
                                 ? toggledNode
-                                  ? '切换钢笔物块节点模式'
-                                  : '拖动钢笔物块控制点'
-                                : '拖动连接锚点'
+                                  ? '切换场范围贝塞尔节点模式'
+                                  : '拖动场范围贝塞尔控制点'
+                                : interaction.type === 'editBodyPathPoint'
+                                  ? toggledNode
+                                    ? '切换钢笔物块节点模式'
+                                    : '拖动钢笔物块控制点'
+                                  : '拖动连接锚点'
           document.executeCommand(
             createReplaceEntitiesCommand(
               document.scene,
@@ -2335,6 +2629,8 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
           rendered,
           useSimulationStore.getState().runtimeBodies,
           new Set(Object.keys(editor.previewEntities)),
+          new Set(),
+          useSimulationStore.getState().runtimeConnectors,
         )
         const additions = selectionTargetsInsideBounds(targets, interaction.startWorld, rawWorld)
         editor.setSelectedIds(
@@ -2373,6 +2669,7 @@ export function PixiCanvas({ size }: { size: ViewportSize }) {
       editor.setDraftEntity(null)
       editor.setPendingGroundEndpoint(null)
       editor.setMarquee(null)
+      editor.setMeasurementPoints([])
       if (editor.activeTool === 'groundJoint') {
         editor.setGroundJointStart(null)
         editor.setGroundJointHover(null)

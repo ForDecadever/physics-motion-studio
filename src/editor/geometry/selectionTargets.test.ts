@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { createEmptyScene } from '../../scene/model/createEmptyScene'
-import { createBall, createBlock } from '../../scene/model/entityFactories'
+import { createBall, createBlock, createSpring } from '../../scene/model/entityFactories'
 import { createBooleanLayer } from '../../scene/model/layerFactories'
 import {
   listEditingSelectionTargets,
@@ -110,5 +110,47 @@ describe('统一编辑选择目标', () => {
         (target) => target.id === boolean.resultId,
       ),
     ).toBe(false)
+  })
+
+  it('连接器使用运行时折线或解析端点参与完整包含框选', () => {
+    const scene = createEmptyScene()
+    const first = createBall('', { x: -2, y: 0 }, 0.5, 1)
+    const second = createBall('', { x: 2, y: 0 }, 0.5, 2)
+    const spring = createSpring('', first.id, second.id, 4, 3)
+    scene.entities = [first, second, spring]
+    scene.rootItems = [first, second, spring].map((entity) => ({
+      kind: 'entity' as const,
+      entityId: entity.id,
+    }))
+
+    const endpointTargets = listEditingSelectionTargets(scene, scene.entities)
+    expect(
+      selectionTargetsInsideBounds(endpointTargets, { x: -2.1, y: -0.1 }, { x: 2.1, y: 0.1 }).map(
+        (target) => target.id,
+      ),
+    ).toContain(spring.id)
+
+    const runtimeTargets = listEditingSelectionTargets(
+      scene,
+      scene.entities,
+      {},
+      new Set(),
+      new Set(),
+      {
+        [spring.id]: {
+          entityId: spring.id,
+          points: [
+            { x: -2, y: 0 },
+            { x: 0, y: 1 },
+            { x: 2, y: 0 },
+          ],
+        },
+      },
+    )
+    expect(
+      selectionTargetsInsideBounds(runtimeTargets, { x: -2.1, y: -0.1 }, { x: 2.1, y: 1.1 }).map(
+        (target) => target.id,
+      ),
+    ).toContain(spring.id)
   })
 })

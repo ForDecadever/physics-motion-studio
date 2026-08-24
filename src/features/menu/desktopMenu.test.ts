@@ -21,6 +21,7 @@ const baseState: DesktopMenuState = {
   hasChartData: false,
   simulationLocked: false,
   modalLocked: false,
+  globalVariablesDisabled: false,
   gridVisible: true,
   snapEnabled: false,
   panelVisibility: {

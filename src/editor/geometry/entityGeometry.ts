@@ -6,7 +6,6 @@ import type {
   EntityId,
   FieldEntity,
   GroundEntity,
-  ParticleSourceEntity,
   SceneEntity,
   Vec2,
 } from '../../scene/model/types'
@@ -19,10 +18,10 @@ import {
 } from '../../scene/model/booleanGeometry'
 import { buildGroundPathNetwork, type GroundPathNetwork } from '../../scene/model/groundPath'
 import { sampleClosedBezierPath } from '../../scene/model/bezierPath'
-import {
-  sampleAdaptiveClosedBezierPath,
-  sampleBezierBodyWorldPoints,
-} from '../../scene/model/bodyPath'
+import { sampleBezierBodyWorldPoints } from '../../scene/model/bodyPath'
+import { sceneEntityTransform, withSceneEntityTransform } from '../../scene/model/entityTransforms'
+
+export { bodyLocalAnchorIsInside, clampBodyLocalAnchor } from '../../scene/model/bodyAnchors'
 
 export interface EditableTransform {
   position: Vec2
@@ -36,12 +35,23 @@ export interface EntityBounds {
   maxY: number
 }
 
-export type ScaleHandleId = 'min-min' | 'min-max' | 'max-min' | 'max-max'
+export type ScaleHandleId =
+  | 'min-min'
+  | 'min-max'
+  | 'max-min'
+  | 'max-max'
+  | 'min-center'
+  | 'max-center'
+  | 'center-min'
+  | 'center-max'
+
+export type ScaleAxis = 'uniform' | 'x' | 'y'
 
 export interface ScaleHandle {
   id: ScaleHandleId
   position: Vec2
-  cursor: 'nwse-resize' | 'nesw-resize'
+  cursor: 'nwse-resize' | 'nesw-resize' | 'ew-resize' | 'ns-resize'
+  axis: ScaleAxis
 }
 
 export interface ScaleHandleGeometry {
@@ -55,7 +65,24 @@ export interface ScaleEntitiesResult {
   replacements: SceneEntity[]
 }
 
+export interface AxisScaleEntitiesResult {
+  factors: Vec2
+  replacements: SceneEntity[]
+}
+
 const MINIMUM_SCALABLE_SIZE_M = 0.001
+
+export function rectangleFromCorners(
+  first: Vec2,
+  opposite: Vec2,
+  minimumSizeM = MINIMUM_SCALABLE_SIZE_M,
+): { center: Vec2; width: number; height: number } {
+  return {
+    center: { x: (first.x + opposite.x) / 2, y: (first.y + opposite.y) / 2 },
+    width: Math.max(minimumSizeM, Math.abs(opposite.x - first.x)),
+    height: Math.max(minimumSizeM, Math.abs(opposite.y - first.y)),
+  }
+}
 
 export function add(a: Vec2, b: Vec2): Vec2 {
   return { x: a.x + b.x, y: a.y + b.y }
@@ -86,205 +113,15 @@ export function rotatePoint(point: Vec2, pivot: Vec2, angleRad: number): Vec2 {
   return add(pivot, rotateVector(subtract(point, pivot), angleRad))
 }
 
-function average(points: Vec2[]): Vec2 {
-  const total = points.reduce((sum, point) => add(sum, point), { x: 0, y: 0 })
-  return { x: total.x / points.length, y: total.y / points.length }
-}
-
 export function getEntityTransform(entity: SceneEntity): EditableTransform | null {
-  if (entity.kind === 'body') return entity.transform
-
-  if (entity.kind === 'ground') {
-    const geometry = entity.geometry
-    if (geometry.type === 'line') {
-      return {
-        position: average([geometry.start, geometry.end]),
-        angleRad: Math.atan2(geometry.end.y - geometry.start.y, geometry.end.x - geometry.start.x),
-      }
-    }
-    if (geometry.type === 'arc') {
-      return { position: geometry.center, angleRad: geometry.startRad }
-    }
-    return {
-      position: average([geometry.p0, geometry.p1, geometry.p2, geometry.p3]),
-      angleRad: Math.atan2(geometry.p3.y - geometry.p0.y, geometry.p3.x - geometry.p0.x),
-    }
-  }
-
-  if (entity.kind === 'field') {
-    const region = entity.region
-    if (region.type === 'infinite') return null
-    if (region.type === 'polygon' || region.type === 'bezierPath') {
-      const points =
-        region.type === 'polygon' ? region.points : region.nodes.map((node) => node.anchor)
-      return { position: average(points), angleRad: 0 }
-    }
-    return {
-      position: region.center,
-      angleRad:
-        region.type === 'rectangle'
-          ? region.angleRad
-          : region.type === 'circle'
-            ? region.startRad
-            : 0,
-    }
-  }
-
-  if (entity.kind === 'particleSource') {
-    if (entity.shape.type === 'point') {
-      return { position: entity.shape.position, angleRad: entity.directionRad }
-    }
-    const { start, end } = entity.shape
-    return {
-      position: { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 },
-      angleRad: Math.atan2(end.y - start.y, end.x - start.x),
-    }
-  }
-
-  return null
-}
-
-function moveAndRotatePoint(
-  point: Vec2,
-  before: EditableTransform,
-  after: EditableTransform,
-): Vec2 {
-  const relative = subtract(point, before.position)
-  return add(after.position, rotateVector(relative, after.angleRad - before.angleRad))
-}
-
-function transformGround(
-  entity: GroundEntity,
-  before: EditableTransform,
-  after: EditableTransform,
-): GroundEntity {
-  const geometry = entity.geometry
-  const angleDelta = after.angleRad - before.angleRad
-
-  if (geometry.type === 'line') {
-    return {
-      ...entity,
-      geometry: {
-        ...geometry,
-        start: moveAndRotatePoint(geometry.start, before, after),
-        end: moveAndRotatePoint(geometry.end, before, after),
-      },
-    }
-  }
-
-  if (geometry.type === 'arc') {
-    return {
-      ...entity,
-      geometry: {
-        ...geometry,
-        center: after.position,
-        startRad: geometry.startRad + angleDelta,
-        endRad: geometry.endRad + angleDelta,
-      },
-    }
-  }
-
-  return {
-    ...entity,
-    geometry: {
-      ...geometry,
-      p0: moveAndRotatePoint(geometry.p0, before, after),
-      p1: moveAndRotatePoint(geometry.p1, before, after),
-      p2: moveAndRotatePoint(geometry.p2, before, after),
-      p3: moveAndRotatePoint(geometry.p3, before, after),
-    },
-  }
-}
-
-function transformField(
-  entity: FieldEntity,
-  before: EditableTransform,
-  after: EditableTransform,
-): FieldEntity {
-  const region = entity.region
-  if (region.type === 'infinite') return entity
-
-  if (region.type === 'polygon') {
-    return {
-      ...entity,
-      region: {
-        ...region,
-        points: region.points.map((point) => moveAndRotatePoint(point, before, after)),
-      },
-    }
-  }
-
-  if (region.type === 'bezierPath') {
-    return {
-      ...entity,
-      region: {
-        ...region,
-        nodes: region.nodes.map((node) => ({
-          anchor: moveAndRotatePoint(node.anchor, before, after),
-          inHandle: moveAndRotatePoint(node.inHandle, before, after),
-          outHandle: moveAndRotatePoint(node.outHandle, before, after),
-        })),
-      },
-    }
-  }
-
-  return {
-    ...entity,
-    region: {
-      ...region,
-      center: after.position,
-      ...(region.type === 'rectangle'
-        ? { angleRad: after.angleRad }
-        : region.type === 'circle'
-          ? { startRad: after.angleRad }
-          : {}),
-    },
-  }
-}
-
-function transformParticleSource(
-  entity: ParticleSourceEntity,
-  before: EditableTransform,
-  after: EditableTransform,
-): ParticleSourceEntity {
-  const angleDelta = after.angleRad - before.angleRad
-  if (entity.shape.type === 'point') {
-    return {
-      ...entity,
-      shape: { type: 'point', position: after.position },
-      directionRad: entity.directionRad + angleDelta,
-    }
-  }
-  return {
-    ...entity,
-    shape: {
-      type: 'line',
-      start: moveAndRotatePoint(entity.shape.start, before, after),
-      end: moveAndRotatePoint(entity.shape.end, before, after),
-    },
-  }
+  return sceneEntityTransform(entity)
 }
 
 export function withEntityTransform(
   entity: SceneEntity,
   transform: EditableTransform,
 ): SceneEntity {
-  const before = getEntityTransform(entity)
-  if (!before) return entity
-
-  if (entity.kind === 'body') {
-    return { ...entity, transform }
-  }
-  if (entity.kind === 'ground') {
-    return transformGround(entity, before, transform)
-  }
-  if (entity.kind === 'field') {
-    return transformField(entity, before, transform)
-  }
-  if (entity.kind === 'particleSource') {
-    return transformParticleSource(entity, before, transform)
-  }
-  return entity
+  return withSceneEntityTransform(entity, transform)
 }
 
 function bodyCorners(entity: BodyEntity): Vec2[] {
@@ -419,6 +256,7 @@ export function getScalableSelectionBounds(
 export function createScaleHandleGeometry(
   bounds: EntityBounds,
   padding: number,
+  includeSideHandles = false,
 ): ScaleHandleGeometry {
   const padded = {
     minX: bounds.minX - padding,
@@ -437,23 +275,74 @@ export function createScaleHandleGeometry(
         id: 'min-min',
         position: { x: padded.minX, y: padded.minY },
         cursor: 'nesw-resize',
+        axis: 'uniform',
       },
       {
         id: 'min-max',
         position: { x: padded.minX, y: padded.maxY },
         cursor: 'nwse-resize',
+        axis: 'uniform',
       },
       {
         id: 'max-min',
         position: { x: padded.maxX, y: padded.minY },
         cursor: 'nwse-resize',
+        axis: 'uniform',
       },
       {
         id: 'max-max',
         position: { x: padded.maxX, y: padded.maxY },
         cursor: 'nesw-resize',
+        axis: 'uniform',
       },
+      ...(includeSideHandles
+        ? [
+            {
+              id: 'min-center' as const,
+              position: { x: padded.minX, y: (padded.minY + padded.maxY) / 2 },
+              cursor: 'ew-resize' as const,
+              axis: 'x' as const,
+            },
+            {
+              id: 'max-center' as const,
+              position: { x: padded.maxX, y: (padded.minY + padded.maxY) / 2 },
+              cursor: 'ew-resize' as const,
+              axis: 'x' as const,
+            },
+            {
+              id: 'center-min' as const,
+              position: { x: (padded.minX + padded.maxX) / 2, y: padded.minY },
+              cursor: 'ns-resize' as const,
+              axis: 'y' as const,
+            },
+            {
+              id: 'center-max' as const,
+              position: { x: (padded.minX + padded.maxX) / 2, y: padded.maxY },
+              cursor: 'ns-resize' as const,
+              axis: 'y' as const,
+            },
+          ]
+        : []),
     ],
+  }
+}
+
+export function scaleHandlePivot(geometry: ScaleHandleGeometry, handle: ScaleHandle): Vec2 {
+  if (handle.axis === 'x') {
+    return {
+      x: handle.id.startsWith('min') ? geometry.bounds.maxX : geometry.bounds.minX,
+      y: geometry.center.y,
+    }
+  }
+  if (handle.axis === 'y') {
+    return {
+      x: geometry.center.x,
+      y: handle.id.endsWith('min') ? geometry.bounds.maxY : geometry.bounds.minY,
+    }
+  }
+  return {
+    x: handle.id.startsWith('min') ? geometry.bounds.maxX : geometry.bounds.minX,
+    y: handle.id.endsWith('min') ? geometry.bounds.maxY : geometry.bounds.minY,
   }
 }
 
@@ -462,6 +351,166 @@ function scalePointAroundPivot(point: Vec2, pivot: Vec2, factor: number): Vec2 {
     x: pivot.x + (point.x - pivot.x) * factor,
     y: pivot.y + (point.y - pivot.y) * factor,
   }
+}
+
+function scalePointAroundPivotByAxes(point: Vec2, pivot: Vec2, factors: Vec2): Vec2 {
+  return {
+    x: pivot.x + (point.x - pivot.x) * factors.x,
+    y: pivot.y + (point.y - pivot.y) * factors.y,
+  }
+}
+
+function scaleEntitiesWithFactors(
+  entities: readonly SceneEntity[],
+  targetIds: readonly EntityId[],
+  pivot: Vec2,
+  factors: Vec2,
+): SceneEntity[] {
+  const targets = new Set(targetIds)
+  const scalable = entities.filter((entity) => targets.has(entity.id) && isScalableEntity(entity))
+  const scaledBodyIds = new Set(
+    scalable.filter((entity) => entity.kind === 'body').map((entity) => entity.id),
+  )
+  const replacements = scalable.map((entity) => scaledEntityByAxes(entity, pivot, factors))
+  for (const entity of entities) {
+    if (entity.kind !== 'connector') continue
+    const scaleEndpoint = (endpoint: ConnectorEndpoint): ConnectorEndpoint =>
+      endpoint.type === 'body' && scaledBodyIds.has(endpoint.bodyId)
+        ? {
+            ...endpoint,
+            localAnchor: {
+              x: endpoint.localAnchor.x * factors.x,
+              y: endpoint.localAnchor.y * factors.y,
+            },
+          }
+        : endpoint
+    const a = scaleEndpoint(entity.a)
+    const b = scaleEndpoint(entity.b)
+    if (a !== entity.a || b !== entity.b) replacements.push({ ...entity, a, b })
+  }
+  return replacements
+}
+
+function scaledEntityByAxes(entity: SceneEntity, pivot: Vec2, factors: Vec2): SceneEntity {
+  const uniformlyScaled = factors.x === factors.y
+  if (uniformlyScaled) return scaledEntity(entity, pivot, factors.x)
+  if (entity.kind === 'body') {
+    return {
+      ...entity,
+      transform: {
+        ...entity.transform,
+        position: scalePointAroundPivotByAxes(entity.transform.position, pivot, factors),
+      },
+      shape:
+        entity.shape.type === 'box'
+          ? {
+              ...entity.shape,
+              width: entity.shape.width * factors.x,
+              height: entity.shape.height * factors.y,
+            }
+          : entity.shape.type === 'bezierPath'
+            ? {
+                ...entity.shape,
+                nodes: entity.shape.nodes.map((node) => ({
+                  anchor: { x: node.anchor.x * factors.x, y: node.anchor.y * factors.y },
+                  inHandle: { x: node.inHandle.x * factors.x, y: node.inHandle.y * factors.y },
+                  outHandle: { x: node.outHandle.x * factors.x, y: node.outHandle.y * factors.y },
+                  ...(node.collapsedHandles
+                    ? {
+                        collapsedHandles: {
+                          inOffset: {
+                            x: node.collapsedHandles.inOffset.x * factors.x,
+                            y: node.collapsedHandles.inOffset.y * factors.y,
+                          },
+                          outOffset: {
+                            x: node.collapsedHandles.outOffset.x * factors.x,
+                            y: node.collapsedHandles.outOffset.y * factors.y,
+                          },
+                        },
+                      }
+                    : {}),
+                })),
+              }
+            : entity.shape,
+    }
+  }
+  if (entity.kind === 'ground') {
+    if (entity.geometry.type === 'line') {
+      return {
+        ...entity,
+        geometry: {
+          ...entity.geometry,
+          start: scalePointAroundPivotByAxes(entity.geometry.start, pivot, factors),
+          end: scalePointAroundPivotByAxes(entity.geometry.end, pivot, factors),
+        },
+      }
+    }
+    if (entity.geometry.type === 'cubicBezier') {
+      return {
+        ...entity,
+        geometry: {
+          ...entity.geometry,
+          p0: scalePointAroundPivotByAxes(entity.geometry.p0, pivot, factors),
+          p1: scalePointAroundPivotByAxes(entity.geometry.p1, pivot, factors),
+          p2: scalePointAroundPivotByAxes(entity.geometry.p2, pivot, factors),
+          p3: scalePointAroundPivotByAxes(entity.geometry.p3, pivot, factors),
+        },
+      }
+    }
+    return entity
+  }
+  if (entity.kind === 'field' && entity.region.type !== 'infinite') {
+    if (entity.region.type === 'rectangle') {
+      return {
+        ...entity,
+        region: {
+          ...entity.region,
+          center: scalePointAroundPivotByAxes(entity.region.center, pivot, factors),
+          width: entity.region.width * factors.x,
+          height: entity.region.height * factors.y,
+        },
+      }
+    }
+    if (entity.region.type === 'polygon') {
+      return {
+        ...entity,
+        region: {
+          ...entity.region,
+          points: entity.region.points.map((point) =>
+            scalePointAroundPivotByAxes(point, pivot, factors),
+          ),
+        },
+      }
+    }
+    if (entity.region.type === 'bezierPath') {
+      return {
+        ...entity,
+        region: {
+          ...entity.region,
+          nodes: entity.region.nodes.map((node) => ({
+            anchor: scalePointAroundPivotByAxes(node.anchor, pivot, factors),
+            inHandle: scalePointAroundPivotByAxes(node.inHandle, pivot, factors),
+            outHandle: scalePointAroundPivotByAxes(node.outHandle, pivot, factors),
+            ...(node.collapsedHandles
+              ? {
+                  collapsedHandles: {
+                    inOffset: {
+                      x: node.collapsedHandles.inOffset.x * factors.x,
+                      y: node.collapsedHandles.inOffset.y * factors.y,
+                    },
+                    outOffset: {
+                      x: node.collapsedHandles.outOffset.x * factors.x,
+                      y: node.collapsedHandles.outOffset.y * factors.y,
+                    },
+                  },
+                }
+              : {}),
+          })),
+        },
+      }
+    }
+  }
+  return entity
 }
 
 function scaledEntity(entity: SceneEntity, pivot: Vec2, factor: number): SceneEntity {
@@ -641,6 +690,98 @@ function minimumScalableMeasure(entity: SceneEntity): number | null {
   return null
 }
 
+function supportsAxisScaling(entity: SceneEntity): boolean {
+  if (!isScalableEntity(entity)) return false
+  if (entity.kind === 'body') return entity.shape.type !== 'circle'
+  if (entity.kind === 'ground') return entity.geometry.type !== 'arc'
+  return entity.region.type !== 'circle'
+}
+
+export function canScaleEntitiesByAxis(
+  entities: readonly SceneEntity[],
+  targetIds: readonly EntityId[],
+): boolean {
+  const targets = new Set(targetIds)
+  const selected = entities.filter((entity) => targets.has(entity.id) && isScalableEntity(entity))
+  return selected.length > 0 && selected.every((entity) => supportsAxisScaling(entity))
+}
+
+function minimumScalableMeasureForAxis(entity: SceneEntity, axis: 'x' | 'y'): number | null {
+  if (entity.kind === 'body') {
+    if (entity.shape.type === 'box') {
+      return axis === 'x' ? entity.shape.width : entity.shape.height
+    }
+    if (entity.shape.type === 'bezierPath') {
+      const values = entity.shape.nodes.flatMap((node) => [
+        node.anchor[axis],
+        node.inHandle[axis],
+        node.outHandle[axis],
+      ])
+      return values.length > 0 ? Math.max(...values) - Math.min(...values) : null
+    }
+    return null
+  }
+  if (entity.kind === 'ground') {
+    if (entity.geometry.type === 'line') {
+      return Math.abs(entity.geometry.end[axis] - entity.geometry.start[axis])
+    }
+    if (entity.geometry.type === 'cubicBezier') {
+      const values = [
+        entity.geometry.p0[axis],
+        entity.geometry.p1[axis],
+        entity.geometry.p2[axis],
+        entity.geometry.p3[axis],
+      ]
+      return Math.max(...values) - Math.min(...values)
+    }
+    return null
+  }
+  if (entity.kind === 'field' && entity.region.type !== 'infinite') {
+    if (entity.region.type === 'rectangle') {
+      return axis === 'x' ? entity.region.width : entity.region.height
+    }
+    if (entity.region.type === 'polygon') {
+      const values = entity.region.points.map((point) => point[axis])
+      return values.length > 0 ? Math.max(...values) - Math.min(...values) : null
+    }
+    if (entity.region.type === 'bezierPath') {
+      const values = entity.region.nodes.flatMap((node) => [
+        node.anchor[axis],
+        node.inHandle[axis],
+        node.outHandle[axis],
+      ])
+      return values.length > 0 ? Math.max(...values) - Math.min(...values) : null
+    }
+  }
+  return null
+}
+
+export function scaleEntitiesAroundPivotByAxes(
+  entities: readonly SceneEntity[],
+  targetIds: readonly EntityId[],
+  pivot: Vec2,
+  requestedFactors: Vec2,
+): AxisScaleEntitiesResult {
+  if (!canScaleEntitiesByAxis(entities, targetIds)) {
+    return { factors: { x: 1, y: 1 }, replacements: [] }
+  }
+  const targets = new Set(targetIds)
+  const scalable = entities.filter((entity) => targets.has(entity.id) && isScalableEntity(entity))
+  const minimumFactor = (axis: 'x' | 'y') =>
+    scalable.reduce((minimum, entity) => {
+      const measure = minimumScalableMeasureForAxis(entity, axis)
+      return measure && measure > 0 ? Math.max(minimum, MINIMUM_SCALABLE_SIZE_M / measure) : minimum
+    }, Number.EPSILON)
+  const factors = {
+    x: Math.max(minimumFactor('x'), Number.isFinite(requestedFactors.x) ? requestedFactors.x : 1),
+    y: Math.max(minimumFactor('y'), Number.isFinite(requestedFactors.y) ? requestedFactors.y : 1),
+  }
+  return {
+    factors,
+    replacements: scaleEntitiesWithFactors(entities, targetIds, pivot, factors),
+  }
+}
+
 export function scaleEntitiesAroundPivot(
   entities: readonly SceneEntity[],
   targetIds: readonly EntityId[],
@@ -735,78 +876,6 @@ export function createBodyCenterConnectorEndpoint(body: BodyEntity): ConnectorEn
 
 export function worldToLocalAnchor(body: BodyEntity, worldPoint: Vec2): Vec2 {
   return rotateVector(subtract(worldPoint, body.transform.position), -body.transform.angleRad)
-}
-
-export function bodyLocalAnchorIsInside(body: BodyEntity, localAnchor: Vec2): boolean {
-  if (body.shape.type === 'circle') {
-    return Math.hypot(localAnchor.x, localAnchor.y) <= body.shape.radius + 1e-9
-  }
-  if (body.shape.type === 'box') {
-    return (
-      Math.abs(localAnchor.x) <= body.shape.width / 2 + 1e-9 &&
-      Math.abs(localAnchor.y) <= body.shape.height / 2 + 1e-9
-    )
-  }
-  const points = sampleAdaptiveClosedBezierPath(body.shape.nodes)
-  if (pointInPolygon(localAnchor, points)) return true
-  return points.some(
-    (point, index) =>
-      distance(
-        localAnchor,
-        closestPointOnSegment(localAnchor, point, points[(index + 1) % points.length]!),
-      ) <= 1e-9,
-  )
-}
-
-export function clampBodyLocalAnchor(body: BodyEntity, localAnchor: Vec2): Vec2 {
-  if (body.shape.type === 'circle') {
-    const length = Math.hypot(localAnchor.x, localAnchor.y)
-    if (length <= body.shape.radius || length <= Number.EPSILON) return localAnchor
-    const scale = body.shape.radius / length
-    return { x: localAnchor.x * scale, y: localAnchor.y * scale }
-  }
-  if (body.shape.type === 'box') {
-    return {
-      x: Math.min(body.shape.width / 2, Math.max(-body.shape.width / 2, localAnchor.x)),
-      y: Math.min(body.shape.height / 2, Math.max(-body.shape.height / 2, localAnchor.y)),
-    }
-  }
-  const points = sampleAdaptiveClosedBezierPath(body.shape.nodes)
-  let closest = localAnchor
-  let closestDistance = Number.POSITIVE_INFINITY
-  for (let index = 0; index < points.length; index += 1) {
-    const candidate = closestPointOnSegment(
-      localAnchor,
-      points[index]!,
-      points[(index + 1) % points.length]!,
-    )
-    const candidateDistance = distance(localAnchor, candidate)
-    if (candidateDistance < closestDistance) {
-      closest = candidate
-      closestDistance = candidateDistance
-    }
-  }
-  return closest
-}
-
-function pointInPolygon(point: Vec2, polygon: Vec2[]): boolean {
-  let inside = false
-  for (
-    let current = 0, previous = polygon.length - 1;
-    current < polygon.length;
-    previous = current++
-  ) {
-    const first = polygon[current]
-    const second = polygon[previous]
-    if (!first || !second) continue
-    if (
-      first.y > point.y !== second.y > point.y &&
-      point.x < ((second.x - first.x) * (point.y - first.y)) / (second.y - first.y) + first.x
-    ) {
-      inside = !inside
-    }
-  }
-  return inside
 }
 
 export function closestPointOnSegment(point: Vec2, start: Vec2, end: Vec2): Vec2 {

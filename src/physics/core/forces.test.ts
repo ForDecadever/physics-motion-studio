@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  advancePointInMagneticField,
   coulombForceOnFirst,
   electricForce,
   magneticForce,
@@ -21,6 +22,22 @@ describe('阶段 3 力模型', () => {
 
     const rotated = rotateVelocityInMagneticField(velocity, 2, 0.5, 1, 0.25)
     expect(Math.hypot(rotated.x, rotated.y)).toBeCloseTo(5, 12)
+  })
+
+  it('匀强磁场按解析圆弧同时推进位置和速度', () => {
+    const advanced = advancePointInMagneticField(
+      { x: 0, y: 0 },
+      { x: 1, y: 0 },
+      1,
+      1,
+      1,
+      Math.PI / 2,
+    )
+
+    expect(advanced.position.x).toBeCloseTo(1, 12)
+    expect(advanced.position.y).toBeCloseTo(-1, 12)
+    expect(advanced.velocity.x).toBeCloseTo(0, 12)
+    expect(advanced.velocity.y).toBeCloseTo(-1, 12)
   })
 
   it('同号点电荷排斥，异号点电荷吸引', () => {

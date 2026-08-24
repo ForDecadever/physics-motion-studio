@@ -20,11 +20,16 @@ import type {
   Vec2,
 } from '../../scene/model/types'
 import { preserveBooleanConnectorWorldAnchors, SceneGraphCommand } from './entityCommands'
+import { removeChangedNumericBindings } from '../../scene/model/numericPropertyRegistry'
 
 interface BooleanCommandResult {
   command: SceneGraphCommand
   nodeId: string
   resultId: EntityId
+}
+
+function booleanOperationName(operation: BooleanOperation): string {
+  return operation === 'union' ? '布尔加法' : operation === 'intersection' ? '布尔交集' : '布尔减法'
 }
 
 interface TargetDescriptor {
@@ -102,13 +107,24 @@ function endpointWorldPosition(endpoint: ConnectorEndpoint, scene: SceneDocument
   }
 }
 
-function localAnchorForResult(world: Vec2, scene: SceneDocument, resultId: EntityId): Vec2 {
-  const result = resolveBooleanScene(scene).byResultId.get(resultId)
-  if (!result?.valid || result.kind !== 'body') return { x: 0, y: 0 }
-  const cosine = Math.cos(-result.angleRad)
-  const sine = Math.sin(-result.angleRad)
-  const x = world.x - result.centerOfMass.x
-  const y = world.y - result.centerOfMass.y
+function localAnchorForBodyTarget(world: Vec2, scene: SceneDocument, bodyId: EntityId): Vec2 {
+  const body = scene.entities.find(
+    (entity): entity is Extract<SceneEntity, { kind: 'body' }> =>
+      entity.kind === 'body' && entity.id === bodyId,
+  )
+  const transform =
+    body?.transform ??
+    (() => {
+      const result = resolveBooleanScene(scene).byResultId.get(bodyId)
+      return result?.valid && result.kind === 'body'
+        ? { position: result.centerOfMass, angleRad: result.angleRad }
+        : null
+    })()
+  if (!transform) return { x: 0, y: 0 }
+  const cosine = Math.cos(-transform.angleRad)
+  const sine = Math.sin(-transform.angleRad)
+  const x = world.x - transform.position.x
+  const y = world.y - transform.position.y
   return { x: x * cosine - y * sine, y: x * sine + y * cosine }
 }
 
@@ -124,7 +140,7 @@ function remapEndpoint(
   return {
     type: 'body',
     bodyId: resultId,
-    localAnchor: world ? localAnchorForResult(world, after, resultId) : { x: 0, y: 0 },
+    localAnchor: world ? localAnchorForBodyTarget(world, after, resultId) : { x: 0, y: 0 },
   }
 }
 
@@ -143,6 +159,27 @@ function remapConnectors(
       return []
     }
     return [{ ...entity, a, b } satisfies ConnectorEntity]
+  })
+}
+
+function remapForces(
+  entities: SceneEntity[],
+  targetIds: Set<EntityId>,
+  resultId: EntityId,
+  before: SceneDocument,
+  after: SceneDocument,
+): SceneEntity[] {
+  return entities.map((entity) => {
+    if (entity.kind !== 'force' || !targetIds.has(entity.bodyId)) return entity
+    const world = endpointWorldPosition(
+      { type: 'body', bodyId: entity.bodyId, localAnchor: entity.localAnchor },
+      before,
+    )
+    return {
+      ...entity,
+      bodyId: resultId,
+      localAnchor: world ? localAnchorForBodyTarget(world, after, resultId) : { x: 0, y: 0 },
+    }
   })
 }
 
@@ -194,9 +231,16 @@ function applyReferenceRemap(
   resultId: EntityId,
 ): SceneDocument {
   const targetSet = new Set(targetIds)
+  const connectorEntities = remapConnectors(
+    provisional.entities,
+    targetSet,
+    resultId,
+    before,
+    provisional,
+  )
   return {
     ...provisional,
-    entities: remapConnectors(provisional.entities, targetSet, resultId, before, provisional),
+    entities: remapForces(connectorEntities, targetSet, resultId, before, provisional),
     charts: remapCharts(provisional.charts, targetIds, resultId),
   }
 }
@@ -258,7 +302,7 @@ export function createBooleanLayerCommand(
   const upper = inputs[0]
   const node = createBooleanLayer(
     operation,
-    operation === 'union' ? '布尔加法' : '布尔减法',
+    booleanOperationName(operation),
     inputs.map((descriptor) => descriptor.item),
   )
   if (upper) {
@@ -280,11 +324,7 @@ export function createBooleanLayerCommand(
       )
     : provisional
   return {
-    command: new SceneGraphCommand(
-      operation === 'union' ? '新建布尔加法' : '新建布尔减法',
-      scene,
-      after,
-    ),
+    command: new SceneGraphCommand(`新建${booleanOperationName(operation)}`, scene, after),
     nodeId: node.id,
     resultId: node.resultId,
   }
@@ -397,14 +437,15 @@ export function createDissolveBooleanLayerCommand(
   let entities = scene.entities
   let charts = scene.charts
   if (replacementId) {
-    entities = entities.map((entity) => {
-      if (entity.kind !== 'connector') return entity
-      const remap = (endpoint: ConnectorEndpoint): ConnectorEndpoint =>
-        endpoint.type === 'body' && endpoint.bodyId === node.resultId
-          ? { ...endpoint, bodyId: replacementId }
-          : endpoint
-      return { ...entity, a: remap(entity.a), b: remap(entity.b) }
-    })
+    const provisional = { ...scene, rootItems }
+    const targets = new Set([node.resultId])
+    entities = remapForces(
+      remapConnectors(entities, targets, replacementId, scene, provisional),
+      targets,
+      replacementId,
+      scene,
+      provisional,
+    )
     charts = remapCharts(charts, [node.resultId], replacementId)
   }
   return new SceneGraphCommand('解散布尔组合', scene, {
@@ -464,9 +505,11 @@ export function createReplaceBooleanNodeCommand(
     ...scene,
     rootItems: mapNode(scene.rootItems, replacement.id, () => replacement),
   }
-  return new SceneGraphCommand(
-    label,
+  const anchored = preserveBooleanConnectorWorldAnchors(scene, provisional)
+  const next = removeChangedNumericBindings(
     scene,
-    preserveBooleanConnectorWorldAnchors(scene, provisional),
+    anchored,
+    (binding) => binding.target.type === 'boolean' && binding.target.nodeId === replacement.id,
   )
+  return new SceneGraphCommand(label, scene, next)
 }

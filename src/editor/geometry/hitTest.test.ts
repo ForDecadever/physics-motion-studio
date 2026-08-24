@@ -4,6 +4,9 @@ import {
   createBall,
   createGroundJoint,
   createLineGround,
+  createMarkerMeasurement,
+  createProtractorMeasurement,
+  createRulerMeasurement,
   createRope,
 } from '../../scene/model/entityFactories'
 import { buildGroundPathNetwork } from '../../scene/model/groundPath'
@@ -156,5 +159,30 @@ describe('地面连接点命中', () => {
 
     expect(findTopEntity([first, second, rope], { x: 0, y: -1 }, 0.05, runtime)?.id).toBe(rope.id)
     expect(findTopEntity([first, second, rope], { x: 0, y: 0 }, 0.05, runtime)).toBeNull()
+  })
+})
+
+describe('测量标注命中', () => {
+  it('可命中记号、直尺和量角器的可见线段', () => {
+    const marker = createMarkerMeasurement(
+      layerId,
+      [
+        { x: -2, y: 0 },
+        { x: -1, y: 1 },
+      ],
+      1,
+    )
+    const ruler = createRulerMeasurement(layerId, { x: 0, y: 0 }, { x: 2, y: 0 }, 1)
+    const protractor = createProtractorMeasurement(
+      layerId,
+      { x: 3, y: 0 },
+      { x: 4, y: 0 },
+      { x: 4, y: 1 },
+      1,
+    )
+
+    expect(findTopEntity([marker], { x: -1.5, y: 0.5 }, 0.05)?.id).toBe(marker.id)
+    expect(findTopEntity([ruler], { x: 1, y: 0.03 }, 0.05)?.id).toBe(ruler.id)
+    expect(findTopEntity([protractor], { x: 4, y: 0.5 }, 0.05)?.id).toBe(protractor.id)
   })
 })
