@@ -46,8 +46,10 @@ jobs:
           tagName: v1.6.2
           releaseName: Motion Studio v1.6.2
           releaseBody: |
-            Motion Studio Windows x64 桌面版本 v1.6.2�?
-            安装包尚未进行代码签名，Windows 可能显示 SmartScreen 或“未知发布者”信誉提示。请核对随附 SHA-256 文件�?          releaseDraft: true
+            Motion Studio Windows x64 桌面版本 v1.6.2。
+
+            安装包尚未进行代码签名，Windows 可能显示 SmartScreen 或“未知发布者”信誉提示。请核对随附 SHA-256 文件。
+          releaseDraft: true
           generateReleaseNotes: true
           includeUpdaterJson: false
           args: --target x86_64-pc-windows-msvc
